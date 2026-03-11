@@ -1,0 +1,21 @@
+name: res-sam
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - matplotlib
+  - matplotlib-inline
+  - numpy<2
+  - opencv
+  - pyside6
+  - scikit-learn=1.3.*
+  - scipy<1.14
+  - tqdm
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=11.8
+  - faiss-gpu
