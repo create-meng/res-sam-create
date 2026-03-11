@@ -141,8 +141,10 @@ class ResSAM:
         self.feature_bank = torch.cat(all_features, dim=0)
         self.feature_bank_source = source_info
         
-        # 训练异常评分器
-        self.anomaly_scorer.fit(detection_features=self.feature_bank)
+        # 训练异常评分器 - NearestNeighbourScorer.fit 期望 List[np.ndarray]
+        # torch.Tensor 需要转换为 numpy 以便 np.concatenate
+        feature_bank_np = self.feature_bank.numpy() if self.feature_bank.is_cuda else self.feature_bank.detach().numpy()
+        self.anomaly_scorer.fit([feature_bank_np])
         
         print(f"Feature Bank built: shape={self.feature_bank.shape}, source={source_info}")
         
@@ -151,7 +153,10 @@ class ResSAM:
     def load_feature_bank(self, path: str):
         """加载预存的 Feature Bank"""
         self.feature_bank = torch.load(path)
-        self.anomaly_scorer.fit(detection_features=self.feature_bank)
+        # NearestNeighbourScorer.fit 期望 List[np.ndarray]
+        # torch.Tensor 需要转换为 numpy
+        feature_bank_np = self.feature_bank.numpy() if self.feature_bank.is_cuda else self.feature_bank.detach().numpy()
+        self.anomaly_scorer.fit([feature_bank_np])
         print(f"Feature Bank loaded: shape={self.feature_bank.shape}")
     
     def save_feature_bank(self, path: str):
@@ -200,8 +205,11 @@ class ResSAM:
         torch.Tensor
             特征 [num_patches, hidden_size^2]
         """
+        # ESN_2D.forward 期望输入 [batch_size, height, width]
+        # 需要去掉 channel 维度
+        patches_2d = patches.squeeze(1)  # [num_patches, window_size, window_size]
         with torch.no_grad():
-            features = self.esn.forward(patches)
+            features = self.esn.forward(patches_2d)
         return features
     
     def detect_automatic(
@@ -271,8 +279,9 @@ class ResSAM:
             features = self._fit_patches(patches)
             
             # 计算异常分数 (与 Feature Bank 的最小距离)
+            # NearestNeighbourScorer.predict 期望 List[np.ndarray]
             features_np = features.numpy()
-            scores = self.anomaly_scorer.predict(features_np)[0]
+            scores = self.anomaly_scorer.predict([features_np])[0]
             
             # 归一化分数
             scores = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
@@ -376,8 +385,9 @@ class ResSAM:
             features = self._fit_patches(patches)
             
             # 计算异常分数
+            # NearestNeighbourScorer.predict 期望 List[np.ndarray]
             features_np = features.numpy()
-            scores = self.anomaly_scorer.predict(features_np)[0]
+            scores = self.anomaly_scorer.predict([features_np])[0]
             scores = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
             
             avg_score = float(np.mean(scores))
