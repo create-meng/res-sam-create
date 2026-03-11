@@ -1,3 +1,82 @@
+# IDE
 .vscode
-__pycache__
+.idea
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+venv/
+ENV/
+env/
+
+# SAM 模型权重（太大）
 sam/sam_vit_l_0b3195.pth
+sam/sam_vit_h_4b8939.pth
+sam/sam_vit_b_01ec64.pth
+*.pth
+!outputs/feature_banks/features.pth
+
+# 输出文件（可选，如果不想追踪结果）
+outputs/feature_banks/
+outputs/predictions/
+outputs/metrics/
+outputs/checkpoints/
+outputs/checkpoints_click/
+
+# 数据文件（如果数据集太大）
+data/
+gpr_data/
+*.jpg
+*.png
+*.jpeg
+!images/
+
+# 日志和临时文件
+*.log
+*.tmp
+*.bak
+LOG.txt
+log.txt
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# 测试覆盖率
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
