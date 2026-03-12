@@ -85,6 +85,9 @@ class ResSAM:
         # 初始化异常评分器
         self.anomaly_scorer = NearestNeighbourScorer(n_nearest_neighbours=1)
         
+        # NearestNeighbors 搜索器 (用于 patch 级别异常分数)
+        self.nn_searcher = None
+        
         # 初始化 SAM
         self.sam = SAMIntegration(
             model_type=sam_model_type,
@@ -154,9 +157,14 @@ class ResSAM:
         """加载预存的 Feature Bank"""
         self.feature_bank = torch.load(path)
         # NearestNeighbourScorer.fit 期望 List[np.ndarray]
-        # torch.Tensor 需要转换为 numpy
         feature_bank_np = self.feature_bank.numpy() if self.feature_bank.is_cuda else self.feature_bank.detach().numpy()
         self.anomaly_scorer.fit([feature_bank_np])
+        
+        # 构建 NearestNeighbors 搜索器用于 patch 级别异常分数
+        from sklearn.neighbors import NearestNeighbors
+        self.nn_searcher = NearestNeighbors(n_neighbors=1, algorithm='ball_tree', n_jobs=-1)
+        self.nn_searcher.fit(feature_bank_np)
+        
         print(f"Feature Bank loaded: shape={self.feature_bank.shape}")
     
     def save_feature_bank(self, path: str):
@@ -329,17 +337,9 @@ class ResSAM:
             features = self._fit_patches(patches_tensor)
             
             # 计算每个 patch 与 Feature Bank 的最近邻距离
-            # 使用 sklearn 的 NearestNeighbors (更高效)
-            from sklearn.neighbors import NearestNeighbors
-            feature_bank_np = self.feature_bank.numpy()
+            # 使用预构建的搜索器 (避免内存问题)
             features_np = features.numpy()
-            
-            # 构建最近邻搜索器
-            nn = NearestNeighbors(n_neighbors=1, algorithm='ball_tree', n_jobs=-1)
-            nn.fit(feature_bank_np)
-            
-            # 计算距离
-            distances, _ = nn.kneighbors(features_np)
+            distances, _ = self.nn_searcher.kneighbors(features_np)
             scores = distances.flatten()  # [N]
             
             # 统计分数分布

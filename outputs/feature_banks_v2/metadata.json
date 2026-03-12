@@ -6,7 +6,7 @@
     "output_dir": "outputs\\feature_banks_v2",
     "output_file": "feature_bank.pth",
     "metadata_file": "metadata.json",
-    "window_size": 50,
+    "window_size": 30,
     "stride": 5,
     "hidden_size": 30,
     "num_normal_samples": 20,
@@ -67,9 +67,9 @@
       ]
     }
   },
-  "creation_time": "2026-03-12T18:37:15.202722",
+  "creation_time": "2026-03-12T21:22:36.637586",
   "feature_bank_shape": [
-    81920,
+    92480,
     60
   ],
   "feature_bank_path": "outputs\\feature_banks_v2\\feature_bank.pth"

@@ -105,15 +105,15 @@ class SAMIntegration:
         # 参数调整：生成更大更完整的区域
         self._mask_generator = SamAutomaticMaskGenerator(
             self._sam,
-            points_per_side=16,
+            points_per_side=32,       # 增加采样点
             points_per_batch=64,
-            pred_iou_thresh=0.80,     # 降低阈值保留更多区域
-            stability_score_thresh=0.85,  # 降低稳定性阈值
+            pred_iou_thresh=0.75,     # 降低阈值保留更多区域
+            stability_score_thresh=0.80,  # 降低稳定性阈值
             stability_score_offset=1.0,
             crop_n_layers=1,          # 启用裁剪层增加覆盖
-            crop_overlap_ratio=0.2,
+            crop_overlap_ratio=0.3,
             crop_n_points_downscale_factor=2,
-            min_mask_region_area=100,  # 降低最小区域
+            min_mask_region_area=50,  # 降低最小区域
         )
         
         print(f"SAM model loaded successfully on {self.device}")

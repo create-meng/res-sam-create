@@ -44,7 +44,7 @@ CONFIG = {
     'metadata_file': 'metadata.json',
     
     # 论文参数
-    'window_size': 50,
+    'window_size': 30,  # 降低以匹配 SAM 候选区域
     'stride': 5,  # 论文原始值
     'hidden_size': 30,
     'num_normal_samples': 20,  # 每个来源的样本数
