@@ -270,6 +270,9 @@ def run_inference(config: dict):
                 pred_bboxes = [r['bbox'] for r in result['anomaly_regions']]
                 anomaly_scores = [r['max_anomaly_score'] for r in result['anomaly_regions']]
                 
+                # 记录每张图片的处理结果
+                logger.info(f"图片 {img_file}: 检测到 {len(pred_bboxes)} 个异常区域, 分数={anomaly_scores}")
+                
                 # 计算 TP/FP
                 tp = 0
                 fp = 0
