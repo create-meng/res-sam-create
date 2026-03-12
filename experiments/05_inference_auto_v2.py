@@ -140,9 +140,33 @@ def load_image(path: str, size: tuple = None) -> np.ndarray:
 
 def run_inference(config: dict):
     """运行推理"""
+    import logging
+    from logging.handlers import RotatingFileHandler
+    
+    # 设置日志
+    log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'outputs', 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f'inference_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+    
+    # 配置日志格式
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s | %(levelname)s | %(message)s',
+        handlers=[
+            RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8'),
+            logging.StreamHandler()
+        ]
+    )
+    logger = logging.getLogger(__name__)
+    
+    logger.info("=" * 60)
+    logger.info("Res-SAM V2: Fully Automatic Inference")
+    logger.info("=" * 60)
+    
     print("=" * 60)
     print("Res-SAM V2: Fully Automatic Inference")
     print("=" * 60)
+    print(f"日志文件: {log_file}")
     
     # 检查 Feature Bank
     if not os.path.exists(config['feature_bank_path']):
@@ -154,6 +178,7 @@ def run_inference(config: dict):
     if os.path.exists(config['metadata_path']):
         with open(config['metadata_path'], 'r') as f:
             metadata = json.load(f)
+        logger.info(f"Feature Bank 来源: {list(metadata.get('sources', {}).keys())}")
         print(f"\nFeature Bank 来源: {list(metadata.get('sources', {}).keys())}")
     
     # 创建输出目录
@@ -164,6 +189,9 @@ def run_inference(config: dict):
     from PatchRes.ResSAM import ResSAM
     
     # 初始化模型
+    logger.info("初始化 ResSAM...")
+    logger.info(f"参数: hidden_size={config['hidden_size']}, window_size={config['window_size']}, stride={config['stride']}")
+    logger.info(f"SAM: {config['sam_model_type']}")
     print("\n初始化 ResSAM...")
     model = ResSAM(
         hidden_size=config['hidden_size'],
@@ -175,18 +203,21 @@ def run_inference(config: dict):
     )
     
     # 加载 Feature Bank
+    logger.info(f"加载 Feature Bank: {config['feature_bank_path']}")
     model.load_feature_bank(config['feature_bank_path'])
     
     all_results = {}
     
     # 处理每个类别
     for category, data_dir in config['test_data_dirs'].items():
+        logger.info(f"处理类别: {category}, 目录: {data_dir}")
         print(f"\n{'='*60}")
         print(f"处理类别: {category}")
         print(f"数据目录: {data_dir}")
         print("=" * 60)
         
         if not os.path.exists(data_dir):
+            logger.warning(f"目录不存在: {data_dir}")
             print(f"警告: 目录不存在: {data_dir}")
             continue
         
@@ -201,12 +232,14 @@ def run_inference(config: dict):
                 checkpoint = json.load(f)
             start_idx = checkpoint.get('processed_count', 0)
             results = checkpoint.get('results', [])
+            logger.info(f"从断点恢复: 第 {start_idx} 张图片")
             print(f"从第 {start_idx} 张图片继续...")
         
         # 获取图像列表
         image_files = sorted([f for f in os.listdir(data_dir) 
                              if f.lower().endswith(('.jpg', '.png', '.jpeg'))])
         
+        logger.info(f"总图像数: {len(image_files)}, 起始索引: {start_idx}")
         print(f"总图像数: {len(image_files)}")
         
         annotation_dir = config['annotation_dirs'].get(category, '')
@@ -282,6 +315,7 @@ def run_inference(config: dict):
                 
                 # 保存断点
                 if (i + 1) % config['checkpoint_interval'] == 0:
+                    logger.info(f"保存断点: 已处理 {i+1} 张图片")
                     with open(checkpoint_path, 'w') as f:
                         json.dump({
                             'processed_count': i + 1,
@@ -290,12 +324,14 @@ def run_inference(config: dict):
                         }, f)
                 
             except Exception as e:
+                logger.error(f"处理图片错误 {img_file}: {e}", exc_info=True)
                 print(f"\nError processing {img_file}: {e}")
                 continue
         
         # 清除断点
         if os.path.exists(checkpoint_path):
             os.remove(checkpoint_path)
+            logger.info(f"清除断点文件: {checkpoint_path}")
         
         all_results[category] = results
         
@@ -308,6 +344,7 @@ def run_inference(config: dict):
         recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
         
+        logger.info(f"{category} 结果: TP={total_tp}, FP={total_fp}, FN={total_fn}, P={precision:.4f}, R={recall:.4f}, F1={f1:.4f}")
         print(f"\n{category} 结果:")
         print(f"  TP: {total_tp}, FP: {total_fp}, FN: {total_fn}")
         print(f"  Precision: {precision:.4f}")
@@ -318,6 +355,7 @@ def run_inference(config: dict):
     output_path = os.path.join(config['output_dir'], 'auto_predictions.json')
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
+    logger.info(f"结果保存至: {output_path}")
     print(f"\n结果保存至: {output_path}")
     
     # 计算总体指标
@@ -329,6 +367,7 @@ def run_inference(config: dict):
     overall_recall = overall_tp / (overall_tp + overall_fn) if (overall_tp + overall_fn) > 0 else 0
     overall_f1 = 2 * overall_precision * overall_recall / (overall_precision + overall_recall) if (overall_precision + overall_recall) > 0 else 0
     
+    logger.info(f"总体结果: TP={overall_tp}, FP={overall_fp}, FN={overall_fn}, P={overall_precision:.4f}, R={overall_recall:.4f}, F1={overall_f1:.4f}")
     print("\n" + "=" * 60)
     print("总体结果:")
     print(f"  TP: {overall_tp}, FP: {overall_fp}, FN: {overall_fn}")
@@ -337,6 +376,7 @@ def run_inference(config: dict):
     print(f"  F1: {overall_f1:.4f}")
     print("=" * 60)
     
+    logger.info("推理完成")
     return all_results
 
 
