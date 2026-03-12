@@ -61,12 +61,12 @@ CONFIG = {
     'anomaly_threshold': 0.5,  # 初始阈值，会自动优化
     
     # SAM 参数
-    'sam_model_type': 'vit_l',  # 使用 vit_l 模型
+    'sam_model_type': 'vit_l',  # 使用用户已有的 vit_l 模型
     'sam_checkpoint': os.path.join(os.path.dirname(os.path.dirname(__file__)), 
                                    'sam', 'sam_vit_l_0b3195.pth'),
     
-    # 图像预处理
-    'image_size': (256, 256),
+    # 图像预处理 - 使用论文原始尺寸
+    'image_size': (369, 369),
     
     # 推理参数
     'max_candidates_per_image': 10,

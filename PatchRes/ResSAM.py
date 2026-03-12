@@ -222,6 +222,13 @@ class ResSAM:
         """
         Fully Automatic 模式异常检测
         
+        论文流程 (Page 10-11):
+        1. SAM 分割 → 候选区域 R
+        2. 对 R 内每个点提取以该点为中心的 patch
+        3. 每个 patch 独立 2D-ESN 拟合 → 特征 f*
+        4. f* 与 Feature Bank 比较 → 每个 patch 一个异常分数
+        5. 合并异常 patches → 计算最小包围框 → 最终 bbox
+        
         Parameters:
         -----------
         image : np.ndarray
@@ -244,6 +251,8 @@ class ResSAM:
         if len(image.shape) == 3:
             image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
         
+        img_h, img_w = image.shape
+        
         # Step 1: SAM 生成候选区域
         print("Step 1: SAM generating candidate regions...")
         candidate_regions = self.sam.generate_masks_automatic(
@@ -254,66 +263,134 @@ class ResSAM:
         
         print(f"  Found {len(candidate_regions)} candidate regions")
         
+        # 过滤有效区域：尺寸必须 >= window_size
+        valid_regions = []
+        for region in candidate_regions:
+            bbox = region['bbox']
+            w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            if w >= self.window_size and h >= self.window_size:
+                valid_regions.append(region)
+        
+        # 按面积排序（大的优先）
+        valid_regions.sort(key=lambda r: (r['bbox'][2]-r['bbox'][0]) * (r['bbox'][3]-r['bbox'][1]), reverse=True)
+        
+        print(f"  Valid regions (>={self.window_size}x{self.window_size}): {len(valid_regions)}")
+        
         # Step 2: 分析每个候选区域
         print("Step 2: Analyzing candidate regions with 2D-ESN...")
         anomaly_regions = []
-        anomaly_scores = []
         
-        for i, region in enumerate(candidate_regions[:max_regions]):
+        for i, region in enumerate(valid_regions[:max_regions]):
             bbox = region['bbox']
             mask = region['mask']
             
-            # 提取区域
+            # 提取区域边界
             x1, y1, x2, y2 = bbox
-            region_img = image[y1:y2, x1:x2]
             
             # 跳过过小区域
-            if region_img.size < min_region_area:
+            region_area = (x2 - x1) * (y2 - y1)
+            if region_area < min_region_area:
                 continue
             
-            # 提取特征并计算异常分数
-            patches = self._extract_patches(region_img)
-            if len(patches) == 0:
+            # 论文方法：对候选区域内每个点提取 patch
+            # 收集所有 patches 和位置
+            all_patches = []
+            patch_positions = []
+            
+            half_win = self.window_size // 2
+            
+            # 遍历候选区域内的点
+            for y in range(y1 + half_win, y2 - half_win, self.stride):
+                for x in range(x1 + half_win, x2 - half_win, self.stride):
+                    # 提取以 (x, y) 为中心的 patch
+                    patch_y1 = y - half_win
+                    patch_y2 = y + half_win
+                    patch_x1 = x - half_win
+                    patch_x2 = x + half_win
+                    
+                    # 边界检查
+                    if patch_y1 < 0 or patch_y2 > img_h or patch_x1 < 0 or patch_x2 > img_w:
+                        continue
+                    
+                    patch = image[patch_y1:patch_y2, patch_x1:patch_x2]
+                    
+                    if patch.shape != (self.window_size, self.window_size):
+                        continue
+                    
+                    all_patches.append(patch)
+                    patch_positions.append((x, y))
+            
+            if len(all_patches) == 0:
+                print(f"  Region {i}: no valid patches")
                 continue
             
-            features = self._fit_patches(patches)
+            # 批量处理所有 patches
+            patches_tensor = torch.tensor(np.array(all_patches), dtype=torch.float32).unsqueeze(1)
+            features = self._fit_patches(patches_tensor)
             
-            # 计算异常分数 (与 Feature Bank 的最小距离)
-            # NearestNeighbourScorer.predict 期望 List[np.ndarray]
+            # 计算每个 patch 与 Feature Bank 的最近邻距离
+            # 使用 sklearn 的 NearestNeighbors (更高效)
+            from sklearn.neighbors import NearestNeighbors
+            feature_bank_np = self.feature_bank.numpy()
             features_np = features.numpy()
-            scores = self.anomaly_scorer.predict([features_np])[0]
+            
+            # 构建最近邻搜索器
+            nn = NearestNeighbors(n_neighbors=1, algorithm='ball_tree', n_jobs=-1)
+            nn.fit(feature_bank_np)
+            
+            # 计算距离
+            distances, _ = nn.kneighbors(features_np)
+            scores = distances.flatten()  # [N]
+            
+            # 统计分数分布
+            score_min, score_max = scores.min(), scores.max()
+            score_mean = scores.mean()
+            
+            print(f"  Region {i}: {len(all_patches)} patches, scores min={score_min:.4f}, max={score_max:.4f}, mean={score_mean:.4f}")
             
             # 归一化分数
-            scores = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
+            if score_max > score_min:
+                scores_norm = (scores - score_min) / (score_max - score_min)
+            else:
+                scores_norm = np.zeros_like(scores)
             
-            # 平均异常分数
-            avg_score = float(np.mean(scores))
-            max_score = float(np.max(scores))
+            # Step 3: 合并异常 patches 计算最终 bbox
+            threshold_norm = self.anomaly_threshold
+            anomaly_positions = [
+                pos for pos, s in zip(patch_positions, scores_norm) 
+                if s > threshold_norm
+            ]
             
-            anomaly_regions.append({
-                'bbox': bbox,
-                'mask': mask,
-                'avg_anomaly_score': avg_score,
-                'max_anomaly_score': max_score,
-                'stability_score': region.get('stability_score', 0),
-            })
-            anomaly_scores.append(max_score)
-        
-        # Step 3: 过滤异常区域
-        print("Step 3: Filtering anomaly regions...")
-        filtered_regions = [
-            r for r in anomaly_regions 
-            if r['max_anomaly_score'] > self.anomaly_threshold
-        ]
+            if len(anomaly_positions) > 0:
+                # 计算异常 patches 的最小包围框
+                anomaly_x = [p[0] for p in anomaly_positions]
+                anomaly_y = [p[1] for p in anomaly_positions]
+                
+                final_x1 = max(0, min(anomaly_x) - half_win)
+                final_y1 = max(0, min(anomaly_y) - half_win)
+                final_x2 = min(img_w, max(anomaly_x) + half_win)
+                final_y2 = min(img_h, max(anomaly_y) + half_win)
+                
+                final_bbox = [int(final_x1), int(final_y1), int(final_x2), int(final_y2)]
+                max_score = float(max(scores))
+                avg_score = float(np.mean(scores))
+                
+                anomaly_regions.append({
+                    'bbox': final_bbox,  # 使用重新计算的 bbox
+                    'mask': mask,
+                    'avg_anomaly_score': avg_score,
+                    'max_anomaly_score': max_score,
+                    'stability_score': region.get('stability_score', 0),
+                    'num_anomaly_patches': len(anomaly_positions),
+                })
         
         # 按异常分数排序
-        filtered_regions.sort(key=lambda x: x['max_anomaly_score'], reverse=True)
+        anomaly_regions.sort(key=lambda x: x['max_anomaly_score'], reverse=True)
         
-        print(f"  Detected {len(filtered_regions)} anomaly regions")
+        print(f"  Detected {len(anomaly_regions)} anomaly regions")
         
         result = {
-            'anomaly_regions': filtered_regions[:max_regions],
-            'anomaly_scores': anomaly_scores,
+            'anomaly_regions': anomaly_regions[:max_regions],
             'num_candidates': len(candidate_regions),
         }
         

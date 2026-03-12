@@ -1,0 +1,76 @@
+{
+  "config": {
+    "normal_data_sources": {
+      "intact": "data\\GPR_data\\intact"
+    },
+    "output_dir": "outputs\\feature_banks_v2",
+    "output_file": "feature_bank.pth",
+    "metadata_file": "metadata.json",
+    "window_size": 50,
+    "stride": 5,
+    "hidden_size": 30,
+    "num_normal_samples": 20,
+    "image_size": [
+      369,
+      369
+    ],
+    "random_seed": 42,
+    "checkpoint_file": "checkpoint.json"
+  },
+  "sources": {
+    "intact": {
+      "directory": "data\\GPR_data\\intact",
+      "num_images": 20,
+      "image_paths": [
+        "data\\GPR_data\\intact\\27 (2).JPG",
+        "data\\GPR_data\\intact\\21 (2).JPG",
+        "data\\GPR_data\\intact\\17.JPG",
+        "data\\GPR_data\\intact\\3.JPG",
+        "data\\GPR_data\\intact\\44.JPG",
+        "data\\GPR_data\\intact\\9 (2).JPG",
+        "data\\GPR_data\\intact\\12.JPG",
+        "data\\GPR_data\\intact\\23.JPG",
+        "data\\GPR_data\\intact\\14 (2).JPG",
+        "data\\GPR_data\\intact\\2.JPG",
+        "data\\GPR_data\\intact\\38.JPG",
+        "data\\GPR_data\\intact\\23 (2).JPG",
+        "data\\GPR_data\\intact\\42 (2).JPG",
+        "data\\GPR_data\\intact\\39.JPG",
+        "data\\GPR_data\\intact\\4 (2).JPG",
+        "data\\GPR_data\\intact\\16 (2).JPG",
+        "data\\GPR_data\\intact\\45 (2).JPG",
+        "data\\GPR_data\\intact\\20.JPG",
+        "data\\GPR_data\\intact\\15.JPG",
+        "data\\GPR_data\\intact\\31.JPG"
+      ],
+      "image_hashes": [
+        "12d43755",
+        "56a81733",
+        "88c6b9b9",
+        "2501aed7",
+        "b4f7f5eb",
+        "dbc6682b",
+        "c08889e4",
+        "2a8fcedb",
+        "d9b5aaf4",
+        "911ea2ce",
+        "58565731",
+        "efe5989d",
+        "a3c86df5",
+        "69ff5750",
+        "945e78a5",
+        "a9227e63",
+        "9edba411",
+        "52c79e7a",
+        "9d9acbf1",
+        "291132ba"
+      ]
+    }
+  },
+  "creation_time": "2026-03-12T18:37:15.202722",
+  "feature_bank_shape": [
+    81920,
+    60
+  ],
+  "feature_bank_path": "outputs\\feature_banks_v2\\feature_bank.pth"
+}

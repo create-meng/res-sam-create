@@ -49,8 +49,8 @@ CONFIG = {
     'hidden_size': 30,
     'num_normal_samples': 20,  # 每个来源的样本数
     
-    # 图像预处理
-    'image_size': (256, 256),
+    # 图像预处理 - 使用论文原始尺寸
+    'image_size': (369, 369),
     
     # 随机种子
     'random_seed': 42,
