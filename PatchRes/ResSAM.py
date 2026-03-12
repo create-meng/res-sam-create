@@ -288,7 +288,13 @@ class ResSAM:
         print("Step 2: Analyzing candidate regions with 2D-ESN...")
         anomaly_regions = []
         
-        for i, region in enumerate(valid_regions[:max_regions]):
+        # 添加进度条
+        from tqdm import tqdm
+        region_iter = tqdm(enumerate(valid_regions[:max_regions]), 
+                          total=min(len(valid_regions), max_regions),
+                          desc="  Analyzing regions", leave=False)
+        
+        for i, region in region_iter:
             bbox = region['bbox']
             mask = region['mask']
             
@@ -346,7 +352,11 @@ class ResSAM:
             score_min, score_max = scores.min(), scores.max()
             score_mean = scores.mean()
             
-            print(f"  Region {i}: {len(all_patches)} patches, scores min={score_min:.4f}, max={score_max:.4f}, mean={score_mean:.4f}")
+            # 更新进度条描述
+            region_iter.set_postfix({
+                'patches': len(all_patches),
+                'score': f'{score_max:.1f}'
+            })
             
             # 归一化分数
             if score_max > score_min:
