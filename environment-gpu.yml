@@ -19,3 +19,7 @@ dependencies:
   - torchaudio
   - pytorch-cuda=11.8
   - faiss-gpu
+  - pillow
+  - pip
+  - pip:
+    - segment-anything

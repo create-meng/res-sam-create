@@ -4,7 +4,7 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.8
+  - python=3.9
   - matplotlib
   - matplotlib-inline
   - numpy<2
@@ -17,3 +17,7 @@ dependencies:
   - torchvision
   - cpuonly
   - faiss-cpu
+  - pillow
+  - pip
+  - pip:
+    - segment-anything
