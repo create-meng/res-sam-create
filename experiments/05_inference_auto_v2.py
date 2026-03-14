@@ -142,9 +142,16 @@ def run_inference(config: dict):
     """运行推理"""
     import logging
     from logging.handlers import RotatingFileHandler
+
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _to_abs(p: str) -> str:
+        if not p:
+            return p
+        return p if os.path.isabs(p) else os.path.abspath(os.path.join(base_dir, p))
     
     # 设置日志
-    log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'outputs', 'logs')
+    log_dir = os.path.join(base_dir, 'outputs', 'logs')
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, f'inference_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
     
@@ -168,6 +175,16 @@ def run_inference(config: dict):
     print("=" * 60)
     print(f"日志文件: {log_file}")
     
+    # 统一路径为绝对路径（避免不同启动目录导致断点/数据路径失效）
+    config = dict(config)
+    config['feature_bank_path'] = _to_abs(config.get('feature_bank_path', ''))
+    config['metadata_path'] = _to_abs(config.get('metadata_path', ''))
+    config['output_dir'] = _to_abs(config.get('output_dir', ''))
+    config['checkpoint_dir'] = _to_abs(config.get('checkpoint_dir', ''))
+    config['sam_checkpoint'] = _to_abs(config.get('sam_checkpoint', ''))
+    config['test_data_dirs'] = {k: _to_abs(v) for k, v in config.get('test_data_dirs', {}).items()}
+    config['annotation_dirs'] = {k: _to_abs(v) for k, v in config.get('annotation_dirs', {}).items()}
+
     # 检查 Feature Bank
     if not os.path.exists(config['feature_bank_path']):
         raise FileNotFoundError(
@@ -227,11 +244,18 @@ def run_inference(config: dict):
         # 加载断点
         start_idx = 0
         results = []
+        last_completed = 0
         if os.path.exists(checkpoint_path):
             with open(checkpoint_path, 'r') as f:
                 checkpoint = json.load(f)
+            if checkpoint.get('completed', False):
+                logger.info(f"类别已完成，跳过: {category}")
+                print(f"类别已完成，跳过: {category}")
+                all_results[category] = checkpoint.get('results', [])
+                continue
             start_idx = checkpoint.get('processed_count', 0)
             results = checkpoint.get('results', [])
+            last_completed = start_idx
             logger.info(f"从断点恢复: 第 {start_idx} 张图片")
             print(f"从第 {start_idx} 张图片继续...")
         
@@ -245,96 +269,117 @@ def run_inference(config: dict):
         annotation_dir = config['annotation_dirs'].get(category, '')
         
         # 处理每张图像
-        for i in tqdm(range(start_idx, len(image_files)), desc=f"Processing {category}"):
-            img_file = image_files[i]
-            img_path = os.path.join(data_dir, img_file)
-            
-            # 获取 GT
-            xml_name = os.path.splitext(img_file)[0] + '.xml'
-            xml_path = os.path.join(annotation_dir, xml_name)
-            gt = parse_voc_xml(xml_path) if os.path.exists(xml_path) else None
-            
-            try:
-                # 加载图像
-                img = load_image(img_path, config['image_size'])
+        try:
+            for i in tqdm(range(start_idx, len(image_files)), desc=f"Processing {category}"):
+                img_file = image_files[i]
+                img_path = os.path.join(data_dir, img_file)
                 
-                # 推理
-                result = model.detect_automatic(
-                    img,
-                    min_region_area=config['min_region_area'],
-                    max_regions=config['max_candidates_per_image'],
-                    return_all_candidates=False,
-                )
+                # 获取 GT
+                xml_name = os.path.splitext(img_file)[0] + '.xml'
+                xml_path = os.path.join(annotation_dir, xml_name)
+                gt = parse_voc_xml(xml_path) if os.path.exists(xml_path) else None
                 
-                # 处理结果
-                pred_bboxes = [r['bbox'] for r in result['anomaly_regions']]
-                anomaly_scores = [r['max_anomaly_score'] for r in result['anomaly_regions']]
-                
-                # 记录每张图片的处理结果
-                logger.info(f"图片 {img_file}: 检测到 {len(pred_bboxes)} 个异常区域, 分数={anomaly_scores}")
-                
-                # 计算 TP/FP
-                tp = 0
-                fp = 0
-                if gt and gt['objects']:
-                    gt_boxes = [[o['xmin'], o['ymin'], o['xmax'], o['ymax']] 
-                               for o in gt['objects']]
+                try:
+                    # 加载图像
+                    img = load_image(img_path, config['image_size'])
                     
-                    for pred_box in pred_bboxes:
-                        # 缩放 bbox 到原始尺寸
-                        scale_x = gt['width'] / config['image_size'][1]
-                        scale_y = gt['height'] / config['image_size'][0]
-                        pred_box_scaled = [
-                            int(pred_box[0] * scale_x),
-                            int(pred_box[1] * scale_y),
-                            int(pred_box[2] * scale_x),
-                            int(pred_box[3] * scale_y),
-                        ]
+                    # 推理
+                    result = model.detect_automatic(
+                        img,
+                        min_region_area=config['min_region_area'],
+                        max_regions=config['max_candidates_per_image'],
+                        return_all_candidates=False,
+                    )
+                    
+                    # 处理结果
+                    pred_bboxes = [r['bbox'] for r in result['anomaly_regions']]
+                    anomaly_scores = [r['max_anomaly_score'] for r in result['anomaly_regions']]
+                    
+                    # 记录每张图片的处理结果
+                    logger.info(f"图片 {img_file}: 检测到 {len(pred_bboxes)} 个异常区域, 分数={anomaly_scores}")
+                    
+                    # 计算 TP/FP
+                    tp = 0
+                    fp = 0
+                    if gt and gt['objects']:
+                        gt_boxes = [[o['xmin'], o['ymin'], o['xmax'], o['ymax']] 
+                                   for o in gt['objects']]
                         
-                        # 检查是否与任何 GT 匹配
-                        matched = False
-                        for gt_box in gt_boxes:
-                            iou = compute_iou(pred_box_scaled, gt_box)
-                            if iou >= 0.5:  # IoU 阈值
-                                matched = True
-                                break
-                        
-                        if matched:
-                            tp += 1
-                        else:
-                            fp += 1
-                elif pred_bboxes:
-                    fp = len(pred_bboxes)
-                
-                results.append({
-                    'image_name': img_file,
-                    'pred_bboxes': pred_bboxes,
-                    'anomaly_scores': anomaly_scores,
-                    'tp': tp,
-                    'fp': fp,
-                    'fn': len(gt['objects']) if gt and gt['objects'] else 0,
-                    'num_gt': len(gt['objects']) if gt and gt['objects'] else 0,
-                })
-                
-                # 保存断点
-                if (i + 1) % config['checkpoint_interval'] == 0:
-                    logger.info(f"保存断点: 已处理 {i+1} 张图片")
-                    with open(checkpoint_path, 'w') as f:
-                        json.dump({
-                            'processed_count': i + 1,
-                            'results': results,
-                            'timestamp': datetime.now().isoformat(),
-                        }, f)
-                
-            except Exception as e:
-                logger.error(f"处理图片错误 {img_file}: {e}", exc_info=True)
-                print(f"\nError processing {img_file}: {e}")
-                continue
+                        for pred_box in pred_bboxes:
+                            # 缩放 bbox 到原始尺寸
+                            scale_x = gt['width'] / config['image_size'][1]
+                            scale_y = gt['height'] / config['image_size'][0]
+                            pred_box_scaled = [
+                                int(pred_box[0] * scale_x),
+                                int(pred_box[1] * scale_y),
+                                int(pred_box[2] * scale_x),
+                                int(pred_box[3] * scale_y),
+                            ]
+                            
+                            # 检查是否与任何 GT 匹配
+                            matched = False
+                            for gt_box in gt_boxes:
+                                iou = compute_iou(pred_box_scaled, gt_box)
+                                if iou >= 0.5:  # IoU 阈值
+                                    matched = True
+                                    break
+                            
+                            if matched:
+                                tp += 1
+                            else:
+                                fp += 1
+                    elif pred_bboxes:
+                        fp = len(pred_bboxes)
+                    
+                    results.append({
+                        'image_name': img_file,
+                        'pred_bboxes': pred_bboxes,
+                        'anomaly_scores': anomaly_scores,
+                        'tp': tp,
+                        'fp': fp,
+                        'fn': len(gt['objects']) if gt and gt['objects'] else 0,
+                        'num_gt': len(gt['objects']) if gt and gt['objects'] else 0,
+                    })
+
+                    # 记录已完成数量（用于断点，避免 KeyboardInterrupt 时 i/i+1 边界问题）
+                    last_completed = i + 1
+                    
+                    # 保存断点
+                    if (i + 1) % config['checkpoint_interval'] == 0:
+                        logger.info(f"保存断点: 已处理 {i+1} 张图片")
+                        with open(checkpoint_path, 'w') as f:
+                            json.dump({
+                                'processed_count': last_completed,
+                                'results': results,
+                                'timestamp': datetime.now().isoformat(),
+                                'completed': False,
+                            }, f)
+                    
+                except Exception as e:
+                    logger.error(f"处理图片错误 {img_file}: {e}", exc_info=True)
+                    print(f"\nError processing {img_file}: {e}")
+                    continue
+        except KeyboardInterrupt:
+            processed_count = last_completed
+            logger.warning(f"收到 KeyboardInterrupt，中断并保存断点: processed_count={processed_count}")
+            with open(checkpoint_path, 'w') as f:
+                json.dump({
+                    'processed_count': processed_count,
+                    'results': results,
+                    'timestamp': datetime.now().isoformat(),
+                    'completed': False,
+                }, f)
+            raise
         
-        # 清除断点
-        if os.path.exists(checkpoint_path):
-            os.remove(checkpoint_path)
-            logger.info(f"清除断点文件: {checkpoint_path}")
+        # 标记该类别已完成（不删除断点，便于下次直接跳过）
+        with open(checkpoint_path, 'w') as f:
+            json.dump({
+                'processed_count': len(image_files),
+                'results': results,
+                'timestamp': datetime.now().isoformat(),
+                'completed': True,
+            }, f)
+        logger.info(f"类别完成并写入 completed 断点: {checkpoint_path}")
         
         all_results[category] = results
         
