@@ -15,6 +15,8 @@ dependencies:
   - pillow
   - pip
   - pip:
-    - segment-anything
-    - --index-url https://download.pytorch.org/whl/cu118
+    - --extra-index-url https://download.pytorch.org/whl/cu118
     - torch
+    - torchvision
+    - torchaudio
+    - git+https://github.com/facebookresearch/segment-anything.git
