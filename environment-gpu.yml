@@ -1,7 +1,5 @@
 name: res-sam
 channels:
-  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/pytorch/
-  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/nvidia/
   - https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/
   - https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/
   - defaults
@@ -13,12 +11,10 @@ dependencies:
   - scikit-learn=1.3
   - scipy<1.14
   - tqdm
-  - pytorch
-  - torchvision
-  - torchaudio
-  - pytorch-cuda=11.8
   - faiss-cpu
   - pillow
   - pip
   - pip:
     - segment-anything
+    - --index-url https://download.pytorch.org/whl/cu118
+    - torch
