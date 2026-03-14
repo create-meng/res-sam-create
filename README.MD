@@ -46,9 +46,12 @@ conda env create -f environment-cpu.yml
 
 conda activate res-sam
 
-# 2. 下载 SAM 权重 (推荐 vit_b)
-# https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
-# 放置在 ./sam/ 目录
+# 2. 获取 SAM 权重 (Git LFS，推荐 vit_b)
+git lfs install
+git lfs pull
+
+# 校验：权重文件应为几百 MB（不是几 KB 的 LFS 指针文件）
+ls -lh sam/sam_vit_b_01ec64.pth
 
 # 3. 运行 V2 实验
 cd experiments
