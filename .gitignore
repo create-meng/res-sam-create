@@ -44,6 +44,7 @@ outputs/predictions/
 outputs/metrics/
 outputs/checkpoints/
 outputs/checkpoints_click/
+outputs/checkpoints_v2/
 
 # 数据文件（如果数据集太大）
 data/
