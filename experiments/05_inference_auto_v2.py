@@ -148,7 +148,17 @@ def run_inference(config: dict):
     def _to_abs(p: str) -> str:
         if not p:
             return p
-        return p if os.path.isabs(p) else os.path.abspath(os.path.join(base_dir, p))
+        if os.path.isabs(p):
+            return p
+
+        # 常见情况：从上级目录启动脚本时，传入路径可能已经带了项目目录名（如 Res-SAM\outputs\...）。
+        # 这时再与 base_dir 拼接会变成 Res-SAM\Res-SAM\...，需要先去掉重复前缀。
+        base_name = os.path.basename(base_dir)
+        p_norm = p.replace('/', os.sep)
+        if p_norm == base_name or p_norm.startswith(base_name + os.sep):
+            p_norm = p_norm[len(base_name) + 1 :]
+
+        return os.path.abspath(os.path.join(base_dir, p_norm))
     
     # 设置日志
     log_dir = os.path.join(base_dir, 'outputs', 'logs')
