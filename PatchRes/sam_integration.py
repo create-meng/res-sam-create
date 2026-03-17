@@ -128,9 +128,21 @@ class SAMIntegration:
                 )
         
         print(f"Loading SAM model: {self.model_type} from {self.checkpoint_path}")
-        
-        # 加载模型
-        self._sam = sam_model_registry[self.model_type](checkpoint=self.checkpoint_path)
+
+        # 避免 Windows 上 segment-anything 内部 build_sam.py 的 torch.load 触发进程崩溃（exit code 3221225477）。
+        # 改为：先构建空模型，再手动 torch.load state_dict 并 load_state_dict。
+        try:
+            torch.set_num_threads(1)
+            torch.set_num_interop_threads(1)
+        except Exception:
+            pass
+
+        self._sam = sam_model_registry[self.model_type](checkpoint=None)
+        try:
+            state_dict = torch.load(self.checkpoint_path, map_location="cpu", weights_only=True)
+        except TypeError:
+            state_dict = torch.load(self.checkpoint_path, map_location="cpu")
+        self._sam.load_state_dict(state_dict, strict=True)
         self._sam.to(device=self.device)
         
         # 创建 predictor (用于 click-guided 模式)
