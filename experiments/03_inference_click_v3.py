@@ -134,6 +134,17 @@ CONFIG["test_data_dirs"]["normal_auc"] = os.path.join(
 CONFIG["annotation_dirs"]["normal_auc"] = ""
 
 
+class _RunIdFilter(logging.Filter):
+    def __init__(self, run_id: str):
+        super().__init__()
+        self._run_id = run_id
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "run_id"):
+            record.run_id = self._run_id
+        return True
+
+
 def parse_voc_xml(xml_path: str):
     try:
         tree = ET.parse(xml_path)
@@ -297,17 +308,26 @@ def run_click_guided(config: dict):
     log_dir = os.path.join(base_dir, 'outputs', 'logs')
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, f'click_inference_v3_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+
+    run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+
+    file_handler = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding='utf-8')
+    stream_handler = logging.StreamHandler()
+
+    runid_filter = _RunIdFilter(run_id)
+    file_handler.addFilter(runid_filter)
+    stream_handler.addFilter(runid_filter)
+
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s | %(levelname)s | %(message)s',
+        format='%(asctime)s | %(levelname)s | run_id=%(run_id)s | %(message)s',
         handlers=[
-            RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding='utf-8'),
-            logging.StreamHandler(),
+            file_handler,
+            stream_handler,
         ],
     )
     logger = logging.getLogger(__name__)
 
-    run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     logger.info(f"run_id={run_id}")
 
     logger.info('=' * 60)
