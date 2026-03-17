@@ -1,5 +1,7 @@
 --index-url https://download.pytorch.org/whl/cu118
---extra-index-url https://mirrors.tencent.com/pypi/simple
+
+# Use official PyPI as extra index to avoid hash mismatch from third-party mirrors.
+--extra-index-url https://pypi.org/simple
 
 torch==2.3.1+cu118
 torchvision==0.18.1+cu118

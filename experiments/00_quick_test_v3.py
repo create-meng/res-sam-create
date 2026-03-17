@@ -43,9 +43,10 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str], log_fp):
 
 def _python_cmd() -> list[str]:
     """Return a python command that runs inside conda env `res-sam` when needed."""
-    if os.environ.get("CONDA_DEFAULT_ENV", "") == "res-sam":
-        return [sys.executable, "-u"]
-    return ["conda", "run", "-n", "res-sam", "python", "-u"]
+    # if os.environ.get("CONDA_DEFAULT_ENV", "") == "res-sam":
+    #     return [sys.executable, "-u"]
+    # return ["conda", "run", "-n", "res-sam", "python", "-u"]
+    return [sys.executable, "-u"]
 
 
 def main():

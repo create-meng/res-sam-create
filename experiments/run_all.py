@@ -50,9 +50,10 @@ STEPS = {
 
 
 def _python_cmd() -> list[str]:
-    if os.environ.get("CONDA_DEFAULT_ENV", "") == "res-sam":
-        return [sys.executable]
-    return ["conda", "run", "-n", "res-sam", "python"]
+    # if os.environ.get("CONDA_DEFAULT_ENV", "") == "res-sam":
+    #     return [sys.executable]
+    # return ["conda", "run", "-n", "res-sam", "python"]
+    return [sys.executable]
 
 
 def run_step(step_num):

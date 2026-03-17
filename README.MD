@@ -48,6 +48,16 @@ pip install -r requirements-cpu.txt
 pip install -r requirements-gpu.txt
 ```
 
+如果你遇到 pip 的 `hash mismatch`（例如 `nvidia-cudnn-cu11` 的 sha256 不一致），通常是第三方镜像/缓存导致：
+
+- 建议使用官方源（本仓库 `requirements-gpu.txt` 已默认使用 PyTorch 官方 cu118 index + 官方 PyPI）。
+- 可尝试清理缓存/禁用缓存后重装：
+
+```bash
+pip cache purge
+pip install --no-cache-dir -r requirements-gpu.txt
+```
+
 说明（版本口径锁定）：
 
 - **CPU**：`requirements-cpu.txt` 固定 `torch==2.3.1 / torchvision==0.18.1 / torchaudio==2.3.1`
