@@ -15,7 +15,7 @@ dependencies:
   - pip
   - pip:
     - --extra-index-url https://download.pytorch.org/whl/cu118
-    - torch
-    - torchvision
-    - torchaudio
+    - torch==2.3.1+cu118
+    - torchvision==0.18.1+cu118
+    - torchaudio==2.3.1+cu118
     - git+https://github.com/facebookresearch/segment-anything.git

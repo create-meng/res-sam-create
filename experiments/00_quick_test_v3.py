@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 
@@ -88,30 +89,37 @@ def main():
     print("=" * 80)
 
     with open(log_path, "w", encoding="utf-8") as log_fp:
-        log_fp.write("Res-SAM V3 quick test\n")
-        log_fp.write(f"LOG_PATH: {str(log_path)}\n")
-        log_fp.write(f"REPO_ROOT: {str(repo_root)}\n")
-        log_fp.write(f"MAX_IMAGES_PER_CATEGORY: {env.get('MAX_IMAGES_PER_CATEGORY', '')}\n")
-        log_fp.write("\n")
-        log_fp.flush()
+        try:
+            log_fp.write("Res-SAM V3 quick test\n")
+            log_fp.write(f"LOG_PATH: {str(log_path)}\n")
+            log_fp.write(f"REPO_ROOT: {str(repo_root)}\n")
+            log_fp.write(f"MAX_IMAGES_PER_CATEGORY: {env.get('MAX_IMAGES_PER_CATEGORY', '')}\n")
+            log_fp.write("\n")
+            log_fp.flush()
 
-    # Step 1: Feature bank
-        if not args.skip_build_feature_bank:
-            if feature_bank.exists():
-                msg = f"[SKIP] Feature bank exists: {feature_bank}"
-                print(msg)
-                log_fp.write(msg + "\n")
-                log_fp.flush()
-            else:
-                _run([*py_cmd, str(experiments_dir / "01_build_feature_bank_v3.py")], cwd=repo_root, env=env, log_fp=log_fp)
+            if not args.skip_build_feature_bank:
+                if feature_bank.exists():
+                    msg = f"[SKIP] Feature bank exists: {feature_bank}"
+                    print(msg)
+                    log_fp.write(msg + "\n")
+                    log_fp.flush()
+                else:
+                    _run([*py_cmd, str(experiments_dir / "01_build_feature_bank_v3.py")], cwd=repo_root, env=env, log_fp=log_fp)
 
-        _run([*py_cmd, str(experiments_dir / "02_inference_auto_v3.py")], cwd=repo_root, env=env, log_fp=log_fp)
-        _run([*py_cmd, str(experiments_dir / "03_inference_click_v3.py")], cwd=repo_root, env=env, log_fp=log_fp)
-        _run([*py_cmd, str(experiments_dir / "04_evaluate_and_visualize_v3.py")], cwd=repo_root, env=env, log_fp=log_fp)
+            _run([*py_cmd, str(experiments_dir / "02_inference_auto_v3.py")], cwd=repo_root, env=env, log_fp=log_fp)
+            _run([*py_cmd, str(experiments_dir / "03_inference_click_v3.py")], cwd=repo_root, env=env, log_fp=log_fp)
+            _run([*py_cmd, str(experiments_dir / "04_evaluate_and_visualize_v3.py")], cwd=repo_root, env=env, log_fp=log_fp)
 
-        print("\nDONE: quick test finished.")
-        log_fp.write("\nDONE: quick test finished.\n")
-        log_fp.flush()
+            print("\nDONE: quick test finished.")
+            log_fp.write("\nDONE: quick test finished.\n")
+            log_fp.flush()
+        except Exception:
+            log_fp.write("\n" + "!" * 80 + "\n")
+            log_fp.write("QUICK TEST FAILED\n")
+            log_fp.write(traceback.format_exc())
+            log_fp.write("\n" + "!" * 80 + "\n")
+            log_fp.flush()
+            raise
 
 
 if __name__ == "__main__":

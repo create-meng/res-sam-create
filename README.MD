@@ -48,6 +48,16 @@ pip install -r requirements-cpu.txt
 pip install -r requirements-gpu.txt
 ```
 
+说明（版本口径锁定）：
+
+- **CPU**：`requirements-cpu.txt` 固定 `torch==2.3.1 / torchvision==0.18.1 / torchaudio==2.3.1`
+- **GPU (CUDA 11.8)**：`requirements-gpu.txt` 固定 `torch==2.3.1+cu118 / torchvision==0.18.1+cu118 / torchaudio==2.3.1+cu118`
+
+这样做是为了：
+
+- 避免 `torch/torchvision/torchaudio` 版本随时间漂移导致结果不可复现。
+- 避免在部分 Python/平台组合下出现 `torch==2.1.2+cu118` 无可用 wheel 的安装失败问题（会表现为 pip 只能看到 `2.2.0+cu118` 及更高版本）。
+
 验证 CUDA 是否可用：
 
 ```bash
