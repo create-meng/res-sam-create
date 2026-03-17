@@ -15,6 +15,13 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str]):
     subprocess.run(cmd, cwd=str(cwd), env=env, check=True)
 
 
+def _python_cmd() -> list[str]:
+    """Return a python command that runs inside conda env `res-sam` when needed."""
+    if os.environ.get("CONDA_DEFAULT_ENV", "") == "res-sam":
+        return [sys.executable]
+    return ["conda", "run", "-n", "res-sam", "python"]
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Temporary one-click sanity test for Res-SAM V3 (10 samples per category by default)."
@@ -41,23 +48,23 @@ def main():
     if args.max_images and args.max_images > 0:
         env["MAX_IMAGES_PER_CATEGORY"] = str(args.max_images)
 
-    py = sys.executable
+    py_cmd = _python_cmd()
 
     # Step 1: Feature bank
     if not args.skip_build_feature_bank:
         if feature_bank.exists():
             print(f"[SKIP] Feature bank exists: {feature_bank}")
         else:
-            _run([py, str(experiments_dir / "01_build_feature_bank_v3.py")], cwd=repo_root, env=env)
+            _run([*py_cmd, str(experiments_dir / "01_build_feature_bank_v3.py")], cwd=repo_root, env=env)
 
     # Step 2: Fully automatic inference
-    _run([py, str(experiments_dir / "02_inference_auto_v3.py")], cwd=repo_root, env=env)
+    _run([*py_cmd, str(experiments_dir / "02_inference_auto_v3.py")], cwd=repo_root, env=env)
 
     # Step 3: Click-guided inference
-    _run([py, str(experiments_dir / "03_inference_click_v3.py")], cwd=repo_root, env=env)
+    _run([*py_cmd, str(experiments_dir / "03_inference_click_v3.py")], cwd=repo_root, env=env)
 
     # Step 4: Evaluation (automatic + click)
-    _run([py, str(experiments_dir / "04_evaluate_and_visualize_v3.py")], cwd=repo_root, env=env)
+    _run([*py_cmd, str(experiments_dir / "04_evaluate_and_visualize_v3.py")], cwd=repo_root, env=env)
 
     print("\nDONE: quick test finished.")
 

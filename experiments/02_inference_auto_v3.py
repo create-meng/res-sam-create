@@ -272,6 +272,10 @@ def run_inference(config: dict):
             xml_path = os.path.join(annotation_dir, xml_file) if annotation_dir else None
             
             try:
+                # 读取原图尺寸（用于将预测 bbox 从 resize 坐标系缩放回原图坐标系，避免评估/可视化口径漂移）
+                with Image.open(img_path) as _im:
+                    orig_w, orig_h = _im.size
+
                 # 加载图像
                 img = load_image(img_path, config["image_size"])
                 
@@ -289,31 +293,42 @@ def run_inference(config: dict):
                 record = {
                     "image_name": img_file,
                     "image_path": img_path,
+                    # detect_automatic 返回 bbox 在 resize 坐标系下（与输入 img 对齐）
                     "pred_bboxes": [r["bbox"] for r in result["anomaly_regions"]],
                     "anomaly_scores": [r["max_anomaly_score"] for r in result["anomaly_regions"]],
                     "num_candidates": result["num_candidates"],
                     "num_coarse_discarded": result["num_coarse_discarded"],
                     "num_esn_fits": result["num_esn_fits"],
                 }
+
+                # 统一输出坐标系：pred_bboxes -> 原图/VOC 坐标系；pred_bboxes_resized -> resize 坐标系。
+                # 注意：若存在 VOC XML，评估时 gt_bboxes 的坐标系以 XML 的 width/height 为准，
+                # 因此这里缩放应优先对齐到 XML 声明的图像尺寸，避免“图像文件尺寸 != XML size”导致 IoU 漂移。
+                target_w = int(gt["width"]) if gt and gt.get("width") else int(orig_w)
+                target_h = int(gt["height"]) if gt and gt.get("height") else int(orig_h)
+
+                resized_w = config["image_size"][1]
+                resized_h = config["image_size"][0]
+                scale_x_img = target_w / resized_w
+                scale_y_img = target_h / resized_h
+                pred_bboxes_resized = record.get("pred_bboxes", [])
+                pred_bboxes_scaled = [
+                    [
+                        int(b[0] * scale_x_img),
+                        int(b[1] * scale_y_img),
+                        int(b[2] * scale_x_img),
+                        int(b[3] * scale_y_img),
+                    ]
+                    for b in pred_bboxes_resized
+                ]
+                
+                record["pred_bboxes_resized"] = pred_bboxes_resized
+                record["pred_bboxes"] = pred_bboxes_scaled
                 
                 # 添加 GT 信息（如果存在）
                 if gt:
                     _has_gt = True
-                    _num_gt = len(gt["bboxes"])
-                    
-                    # 缩放预测框（推理 resize 坐标系 -> 原图/标注坐标系）
-                    scale_x = gt["width"] / config["image_size"][1]
-                    scale_y = gt["height"] / config["image_size"][0]
-                    
-                    pred_boxes_scaled = []
-                    for bbox in record["pred_bboxes"]:
-                        scaled_bbox = [
-                            int(bbox[0] * scale_x),
-                            int(bbox[1] * scale_y),
-                            int(bbox[2] * scale_x),
-                            int(bbox[3] * scale_y),
-                        ]
-                        pred_boxes_scaled.append(scaled_bbox)
+                    _num_gt = len(gt['bboxes'])
                     
                     # 同时提供 GT 的 resize 坐标系（便于与 pred_bboxes 直接对照）
                     inv_scale_x = config["image_size"][1] / gt["width"]
@@ -330,14 +345,15 @@ def run_inference(config: dict):
                     ]
                     
                     record.update({
-                        "gt_bboxes": gt["bboxes"],  # 原图坐标系
-                        "gt_bboxes_resized": gt_boxes_resized,  # resize 坐标系
-                        "pred_bboxes_scaled": pred_boxes_scaled,  # 原图坐标系
-                        "gt_width": gt["width"],
-                        "gt_height": gt["height"],
-                        "exclude_from_det_metrics": False,
-                        "exclude_from_auc": False,
+                        'gt_bboxes': gt['bboxes'],  # 原图坐标系
+                        'gt_bboxes_resized': gt_boxes_resized,  # resize 坐标系
+                        'num_gt': int(_num_gt),
+                        'gt_width': gt['width'],
+                        'gt_height': gt['height'],
+                        'exclude_from_det_metrics': False,
+                        'exclude_from_auc': False,
                     })
+                
                 else:
                     _has_gt = False
                     _num_gt = 0
@@ -346,6 +362,7 @@ def run_inference(config: dict):
                     if category == "normal_auc":
                         record.update({
                             "gt_bboxes": [],
+                            "num_gt": 0,
                             "exclude_from_det_metrics": True,  # 不计入 TP/FP/FN
                             "exclude_from_auc": False,  # 参与 ROC/AUC
                         })
@@ -353,6 +370,7 @@ def run_inference(config: dict):
                         # 其他类别但无标注：完全排除
                         record.update({
                             "gt_bboxes": [],
+                            "num_gt": 0,
                             "exclude_from_det_metrics": True,
                             "exclude_from_auc": True,
                         })

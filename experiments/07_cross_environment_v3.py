@@ -114,6 +114,10 @@ CONFIG = {
     "random_seed": 42,
     # 限制图片数
     "max_images_per_category": None,
+
+    # 与 V3 推理（02_inference_auto_v3.py）保持一致的 detect_automatic 参数
+    "min_region_area": 100,
+    "max_candidates_per_image": 10,
 }
 
 
@@ -261,7 +265,11 @@ def main():
                 img = load_image(item["path"], CONFIG["image_size"])
 
                 # 检测
-                result = model.detect_automatic(img)
+                result = model.detect_automatic(
+                    img,
+                    min_region_area=int(CONFIG.get("min_region_area", 100)),
+                    max_regions=int(CONFIG.get("max_candidates_per_image", 10)),
+                )
                 regions = result.get("anomaly_regions", [])
                 
                 if regions:

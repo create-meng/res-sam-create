@@ -62,7 +62,7 @@ class ResSAM:
         spectral_radius: float = 0.9,
         connectivity: float = 0.1,
         anomaly_threshold: float = 0.5,
-        region_coarse_threshold: float = 0.3,  # 兼容入口：最终将与 anomaly_threshold 一起收敛为论文 Eq.(9) 的单一 β
+        region_coarse_threshold: float = 0.5,  # 论文 Eq.(9) 要求单一 β 阈值，与 anomaly_threshold 保持一致
         sam_model_type: str = "vit_b",
         sam_checkpoint: str = None,
         device: str = "cuda",
@@ -157,7 +157,8 @@ class ResSAM:
     
     def load_feature_bank(self, path: str):
         """加载预存的 Feature Bank"""
-        self.feature_bank = torch.load(path)
+        # 显式指定 map_location，避免 feature bank 在保存时绑定到 CUDA，导致 CPU 环境加载失败。
+        self.feature_bank = torch.load(path, map_location=self.device)
         # NearestNeighbourScorer.fit 期望 List[np.ndarray]
         feature_bank_np = self.feature_bank.detach().cpu().numpy()
         self.anomaly_scorer.fit([feature_bank_np])
@@ -346,6 +347,10 @@ class ResSAM:
 
             # 计算与 Feature Bank 的最近邻距离（region-level score）
             features_np = features.detach().cpu().numpy()
+            if self.nn_searcher is None:
+                raise RuntimeError(
+                    "Feature bank searcher not initialized. Call load_feature_bank() or build_feature_bank() first."
+                )
             distances, _ = self.nn_searcher.kneighbors(features_np)
 
             region_max_score = float(distances.flatten()[0])
@@ -419,6 +424,10 @@ class ResSAM:
             
             # 计算每个 patch 与 Feature Bank 的最近邻距离（论文 Eq.(7)）
             features_np = features.detach().cpu().numpy()
+            if self.nn_searcher is None:
+                raise RuntimeError(
+                    "Feature bank searcher not initialized. Call load_feature_bank() or build_feature_bank() first."
+                )
             distances, _ = self.nn_searcher.kneighbors(features_np)
             scores = distances.flatten()
             

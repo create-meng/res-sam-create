@@ -49,6 +49,12 @@ STEPS = {
 }
 
 
+def _python_cmd() -> list[str]:
+    if os.environ.get("CONDA_DEFAULT_ENV", "") == "res-sam":
+        return [sys.executable]
+    return ["conda", "run", "-n", "res-sam", "python"]
+
+
 def run_step(step_num):
     """运行单个步骤"""
     if step_num not in STEPS:
@@ -69,8 +75,9 @@ def run_step(step_num):
         return False
     
     try:
+        py_cmd = _python_cmd()
         result = subprocess.run(
-            [sys.executable, script_path],
+            [*py_cmd, script_path],
             cwd=os.path.dirname(__file__),
             check=False,
         )

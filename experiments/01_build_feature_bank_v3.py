@@ -241,6 +241,9 @@ def build_feature_bank(config: dict, resume: bool = True):
     print("\n构建 Feature Bank...")
     source_info = ", ".join(config['normal_data_sources'].keys())
     feature_bank = model.build_feature_bank(all_images, source_info=source_info)
+
+    # 为保证跨设备复现稳定性，保存前强制转为 CPU tensor（避免 .pth 绑定 CUDA 设备）
+    feature_bank_to_save = feature_bank.detach().cpu()
     
     # 验证特征维度
     expected_dim = 2 * config['hidden_size'] + 1
@@ -255,12 +258,12 @@ def build_feature_bank(config: dict, resume: bool = True):
     
     # 保存 Feature Bank
     output_path = os.path.join(config['output_dir'], config['output_file'])
-    torch.save(feature_bank, output_path)
+    torch.save(feature_bank_to_save, output_path)
     print(f"\nFeature Bank V3 保存至: {output_path}")
-    print(f"形状: {feature_bank.shape}")
+    print(f"形状: {feature_bank_to_save.shape}")
     
     # 保存元数据
-    all_metadata['feature_bank_shape'] = list(feature_bank.shape)
+    all_metadata['feature_bank_shape'] = list(feature_bank_to_save.shape)
     all_metadata['feature_bank_path'] = output_path
     all_metadata['feature_dim_expected'] = expected_dim
     all_metadata['feature_dim_actual'] = actual_dim
@@ -280,7 +283,7 @@ def build_feature_bank(config: dict, resume: bool = True):
     print("Feature Bank V3 构建完成!")
     print("=" * 60)
     
-    return feature_bank
+    return feature_bank_to_save
 
 
 if __name__ == "__main__":
