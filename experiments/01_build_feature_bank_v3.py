@@ -143,10 +143,28 @@ def build_feature_bank(config: dict, resume: bool = True):
     
     # 创建输出目录
     os.makedirs(config['output_dir'], exist_ok=True)
+
+    # 目标输出文件
+    output_path = os.path.join(config['output_dir'], config['output_file'])
     
     # 检查断点
     checkpoint_path = os.path.join(config['output_dir'], config['checkpoint_file'])
     processed_sources = {}
+
+    # 若 feature bank 目标文件缺失但 checkpoint 存在，说明之前运行中断在“来源完成”阶段，
+    # 可能导致后续 all_images 为空直接退出，从而不生成 feature bank 文件。
+    # 这种情况下应清理 checkpoint 并强制重建。
+    if (not os.path.exists(output_path)) and os.path.exists(checkpoint_path):
+        print(
+            f"\n发现断点文件但 feature bank 目标文件缺失，将清理断点并强制重建：\n"
+            f"  checkpoint: {checkpoint_path}\n"
+            f"  missing: {output_path}"
+        )
+        try:
+            os.remove(checkpoint_path)
+        except Exception:
+            pass
+        processed_sources = {}
     
     if resume and os.path.exists(checkpoint_path):
         print(f"\n发现断点文件: {checkpoint_path}")
@@ -257,7 +275,6 @@ def build_feature_bank(config: dict, resume: bool = True):
         print(f"  ✗ 维度不匹配！期望 {expected_dim}，实际 {actual_dim}")
     
     # 保存 Feature Bank
-    output_path = os.path.join(config['output_dir'], config['output_file'])
     torch.save(feature_bank_to_save, output_path)
     print(f"\nFeature Bank V3 保存至: {output_path}")
     print(f"形状: {feature_bank_to_save.shape}")
