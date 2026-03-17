@@ -88,6 +88,23 @@ python 02_inference_auto_v3.py
 python 04_evaluate_and_visualize_v3.py
 ```
 
+Windows（或不手动 activate 环境）可用：
+
+```bash
+conda run -n res-sam python experiments/01_build_feature_bank_v3.py
+conda run -n res-sam python experiments/02_inference_auto_v3.py
+conda run -n res-sam python experiments/04_evaluate_and_visualize_v3.py
+```
+
+10 样本快速验证（每类最多 10 张；用于检查流程/输出字段，不作为最终出数）：
+
+```bash
+set MAX_IMAGES_PER_CATEGORY=10
+conda run -n res-sam python experiments/02_inference_auto_v3.py
+conda run -n res-sam python experiments/03_inference_click_v3.py
+conda run -n res-sam python experiments/04_evaluate_and_visualize_v3.py
+```
+
 ## 实验脚本
 
 ### V3 版本 (推荐)

@@ -80,6 +80,10 @@ CONFIG = {
     "random_seed": 42,
     # 限制图片数（用于快速验证）
     "max_images_per_category": None,
+
+    # 与 V3 主推理（02_inference_auto_v3.py）保持一致的 detect_automatic 参数
+    "min_region_area": 100,
+    "max_candidates_per_image": 10,
 }
 
 
@@ -335,7 +339,11 @@ def main():
             # Automatic: Res-SAM（真实执行的 2D-ESN fitting 次数）
             res_auto = None
             try:
-                res_auto = model.detect_automatic(img)
+                res_auto = model.detect_automatic(
+                    img,
+                    min_region_area=int(CONFIG.get("min_region_area", 100)),
+                    max_regions=int(CONFIG.get("max_candidates_per_image", 10)),
+                )
                 with_sam_auto = int(res_auto.get("num_esn_fits", 0))
                 num_candidates = int(res_auto.get("num_candidates", 0))
                 num_coarse_discarded = int(res_auto.get("num_coarse_discarded", 0))
