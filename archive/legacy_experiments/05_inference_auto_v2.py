@@ -311,44 +311,61 @@ def run_inference(config: dict):
                     # 计算 TP/FP
                     tp = 0
                     fp = 0
+                    fn = 0
+                    gt_boxes = []
                     if gt and gt['objects']:
                         gt_boxes = [[o['xmin'], o['ymin'], o['xmax'], o['ymax']] 
                                    for o in gt['objects']]
-                        
+
+                        # 一对一匹配：每个 GT 最多匹配一个预测框
+                        matched_gt = [False] * len(gt_boxes)
+
+                        # 将预测 bbox 缩放回原始尺寸后再做匹配
+                        scale_x = gt['width'] / config['image_size'][1]
+                        scale_y = gt['height'] / config['image_size'][0]
+
+                        pred_boxes_scaled = []
                         for pred_box in pred_bboxes:
-                            # 缩放 bbox 到原始尺寸
-                            scale_x = gt['width'] / config['image_size'][1]
-                            scale_y = gt['height'] / config['image_size'][0]
-                            pred_box_scaled = [
+                            pred_boxes_scaled.append([
                                 int(pred_box[0] * scale_x),
                                 int(pred_box[1] * scale_y),
                                 int(pred_box[2] * scale_x),
                                 int(pred_box[3] * scale_y),
-                            ]
-                            
-                            # 检查是否与任何 GT 匹配
-                            matched = False
-                            for gt_box in gt_boxes:
+                            ])
+
+                        for pred_box_scaled in pred_boxes_scaled:
+                            best_iou = 0.0
+                            best_gt_idx = -1
+                            for gt_idx, gt_box in enumerate(gt_boxes):
+                                if matched_gt[gt_idx]:
+                                    continue
                                 iou = compute_iou(pred_box_scaled, gt_box)
-                                if iou >= 0.5:  # IoU 阈值
-                                    matched = True
-                                    break
-                            
-                            if matched:
+                                if iou > best_iou:
+                                    best_iou = iou
+                                    best_gt_idx = gt_idx
+
+                            if best_gt_idx >= 0 and best_iou >= 0.5:
+                                matched_gt[best_gt_idx] = True
                                 tp += 1
                             else:
                                 fp += 1
+
+                        fn = sum(1 for m in matched_gt if not m)
                     elif pred_bboxes:
                         fp = len(pred_bboxes)
+                        fn = 0
+                    else:
+                        fn = len(gt_boxes) if gt_boxes else 0
                     
                     results.append({
                         'image_name': img_file,
                         'pred_bboxes': pred_bboxes,
                         'anomaly_scores': anomaly_scores,
+                        'gt_bboxes': gt_boxes,
                         'tp': tp,
                         'fp': fp,
-                        'fn': len(gt['objects']) if gt and gt['objects'] else 0,
-                        'num_gt': len(gt['objects']) if gt and gt['objects'] else 0,
+                        'fn': fn,
+                        'num_gt': len(gt_boxes),
                     })
 
                     # 记录已完成数量（用于断点，避免 KeyboardInterrupt 时 i/i+1 边界问题）

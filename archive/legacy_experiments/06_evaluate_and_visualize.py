@@ -47,6 +47,53 @@ CONFIG = {
 }
 
 
+def _compute_iou(box1: list, box2: list) -> float:
+    """计算两个 bbox 的 IoU"""
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+
+    inter = (x2 - x1) * (y2 - y1)
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    union = area1 + area2 - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _match_tp_fp_fn(pred_bboxes: list, gt_bboxes: list, iou_thresh: float = 0.5) -> tuple:
+    """一对一 IoU 匹配，返回 (tp, fp, fn)。"""
+    pred_bboxes = pred_bboxes or []
+    gt_bboxes = gt_bboxes or []
+
+    matched_gt = [False] * len(gt_bboxes)
+    tp = 0
+    fp = 0
+
+    for pred in pred_bboxes:
+        best_iou = 0.0
+        best_gt_idx = -1
+        for gt_idx, gt in enumerate(gt_bboxes):
+            if matched_gt[gt_idx]:
+                continue
+            iou = _compute_iou(pred, gt)
+            if iou > best_iou:
+                best_iou = iou
+                best_gt_idx = gt_idx
+
+        if best_gt_idx >= 0 and best_iou >= iou_thresh:
+            matched_gt[best_gt_idx] = True
+            tp += 1
+        else:
+            fp += 1
+
+    fn = sum(1 for m in matched_gt if not m)
+    return tp, fp, fn
+
+
 def compute_metrics(results: dict) -> dict:
     """计算完整评估指标"""
     all_tp = []
@@ -56,9 +103,15 @@ def compute_metrics(results: dict) -> dict:
     all_labels = []
     
     for category, cat_results in results.items():
-        tp = sum(r['tp'] for r in cat_results)
-        fp = sum(r['fp'] for r in cat_results)
-        fn = sum(r['fn'] for r in cat_results)
+        # 统一按一对一 IoU 匹配口径重新统计，避免依赖推理阶段写入的计数口径
+        tp = 0
+        fp = 0
+        fn = 0
+        for r in cat_results:
+            _tp, _fp, _fn = _match_tp_fp_fn(r.get('pred_bboxes', []), r.get('gt_bboxes', []), iou_thresh=0.5)
+            tp += _tp
+            fp += _fp
+            fn += _fn
         
         all_tp.append(tp)
         all_fp.append(fp)
@@ -158,19 +211,20 @@ def plot_threshold_analysis(results: dict, output_path: str):
         
         for category, cat_results in results.items():
             for r in cat_results:
-                # 根据阈值重新计算 TP/FP
-                filtered_scores = [s for s in r['anomaly_scores'] if s > thresh]
-                num_pred = len(filtered_scores)
-                
-                # 简化计算
-                if num_pred > 0 and r['num_gt'] > 0:
-                    # 假设至少有一个匹配
-                    tp_total += min(num_pred, r['num_gt'])
-                    fp_total += max(0, num_pred - r['num_gt'])
-                elif num_pred > 0:
-                    fp_total += num_pred
-                else:
-                    fn_total += r['num_gt']
+                pred_bboxes = r.get('pred_bboxes', [])
+                pred_scores = r.get('anomaly_scores', [])
+                gt_bboxes = r.get('gt_bboxes', [])
+
+                # 根据阈值过滤预测框
+                filtered_pred = [
+                    b for b, s in zip(pred_bboxes, pred_scores)
+                    if s is not None and s > thresh
+                ]
+
+                _tp, _fp, _fn = _match_tp_fp_fn(filtered_pred, gt_bboxes, iou_thresh=0.5)
+                tp_total += _tp
+                fp_total += _fp
+                fn_total += _fn
         
         prec = tp_total / (tp_total + fp_total) if (tp_total + fp_total) > 0 else 0
         rec = tp_total / (tp_total + fn_total) if (tp_total + fn_total) > 0 else 0

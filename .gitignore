@@ -45,10 +45,18 @@ outputs/metrics/
 outputs/checkpoints/
 outputs/checkpoints_click/
 outputs/checkpoints_v2/
+outputs/feature_banks_v3/
+outputs/predictions_v3/
+outputs/metrics_v3/
+outputs/checkpoints_v3/
+outputs/logs/
 
 # 数据文件（如果数据集太大）
 data/
 gpr_data/
+data.zip
+outputs.zip
+*.zip
 *.jpg
 *.png
 *.jpeg
@@ -60,6 +68,12 @@ gpr_data/
 *.bak
 LOG.txt
 log.txt
+
+# Archive (legacy outputs are artifacts; do not track)
+archive/legacy_outputs/
+
+# Media
+*.mp4
 
 # 系统文件
 .DS_Store

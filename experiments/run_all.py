@@ -23,27 +23,27 @@ import subprocess
 STEPS = {
     1: {
         'name': 'Feature Bank Construction',
-        'script': '01_build_feature_bank.py',
+        'script': '01_build_feature_bank_v3.py',
         'description': '从 normal 数据构建特征银行',
     },
     2: {
         'name': 'Fully Automatic Inference',
-        'script': '02_inference_auto.py',
+        'script': '02_inference_auto_v3.py',
         'description': '自动模式批量推理',
     },
     3: {
         'name': 'Evaluation Metrics',
-        'script': '04_evaluate.py',
+        'script': '04_evaluate_and_visualize_v3.py',
         'description': '计算评估指标 (Table 2)',
     },
     4: {
         'name': 'Click-guided Inference',
-        'script': '03_inference_click.py',
+        'script': '03_inference_click_v3.py',
         'description': '点击引导模式推理 (Table 1)',
     },
     5: {
         'name': 'Anomaly Clustering',
-        'script': '05_clustering.py',
+        'script': '05_clustering_v3.py',
         'description': '异常聚类分析 (Table 3)',
     },
 }
@@ -150,13 +150,13 @@ def main():
     print(f"\nTotal: {success}/{total} steps completed successfully")
     
     if success == total:
-        print("\n🎉 All experiments completed!")
-        print("\nResults saved in:")
-        print("  - outputs/feature_banks/features.pth")
-        print("  - outputs/predictions/auto_predictions.json")
-        print("  - outputs/predictions/click_predictions.json")
-        print("  - outputs/metrics/evaluation_results.json")
-        print("  - outputs/metrics/clustering_results.json")
+        print("\nAll experiments completed!")
+        print("\nMain outputs:")
+        print("  - outputs/feature_banks_v3/feature_bank_v3.pth")
+        print("  - outputs/predictions_v3/auto_predictions_v3.json")
+        print("  - outputs/predictions_v3/click_predictions_v3.json")
+        print("  - experiments/04_evaluate_and_visualize_v3_report.md")
+        print("  - outputs/metrics_v3/clustering_v3.json")
 
 
 if __name__ == "__main__":

@@ -13,4 +13,5 @@ matplotlib
 opencv-python
 faiss-cpu
 
+
 git+https://github.com/facebookresearch/segment-anything.git

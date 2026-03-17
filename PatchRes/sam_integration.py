@@ -264,7 +264,8 @@ class SAMIntegration:
             if rows.any() and cols.any():
                 y_min, y_max = np.where(rows)[0][[0, -1]]
                 x_min, x_max = np.where(cols)[0][[0, -1]]
-                bbox = [int(x_min), int(y_min), int(x_max), int(y_max)]
+                # bbox 统一为半开区间 [x1, y1, x2, y2) 以匹配 numpy 切片 image[y1:y2, x1:x2]
+                bbox = [int(x_min), int(y_min), int(x_max) + 1, int(y_max) + 1]
                 
                 candidate_regions.append({
                     'bbox': bbox,
