@@ -18,6 +18,41 @@ from typing import List, Tuple, Optional, Dict, Any
 import cv2
 
 
+def _to_uint8_gray(image: np.ndarray) -> np.ndarray:
+    """Convert input image to uint8 grayscale with minimal peak memory."""
+    if image.dtype == np.uint8:
+        if image.ndim == 2:
+            return image
+        if image.ndim == 3 and image.shape[-1] == 1:
+            return image[:, :, 0]
+
+    if image.ndim == 3:
+        # If RGB-like, convert to gray first (uint8 path if possible).
+        if image.dtype == np.uint8 and image.shape[-1] >= 3:
+            return cv2.cvtColor(image[:, :, :3], cv2.COLOR_RGB2GRAY)
+        if image.shape[-1] == 1:
+            image = image[:, :, 0]
+        else:
+            # Float RGB -> gray float
+            image = cv2.cvtColor(image[:, :, :3].astype(np.float32), cv2.COLOR_RGB2GRAY)
+
+    img = image.astype(np.float32, copy=False)
+    mn = float(np.min(img))
+    mx = float(np.max(img))
+    if mx - mn < 1e-8:
+        return np.zeros(img.shape, dtype=np.uint8)
+    img_u8 = ((img - mn) / (mx - mn) * 255.0).astype(np.uint8)
+    return img_u8
+
+
+def _to_uint8_rgb(image: np.ndarray) -> np.ndarray:
+    """Convert input image to uint8 RGB with minimal peak memory."""
+    if image.ndim == 3 and image.dtype == np.uint8 and image.shape[-1] == 3:
+        return image
+    gray_u8 = _to_uint8_gray(image)
+    return cv2.cvtColor(gray_u8, cv2.COLOR_GRAY2RGB)
+
+
 class SAMIntegration:
     """SAM 模型集成类"""
     
@@ -146,16 +181,9 @@ class SAMIntegration:
             - 'stability_score': 稳定性分数
         """
         self._load_sam()
-        
-        # 处理灰度图
-        if len(image.shape) == 2:
-            image = np.stack([image] * 3, axis=-1)
-        elif image.shape[-1] == 1:
-            image = np.concatenate([image] * 3, axis=-1)
-        
-        # 确保图像是 uint8 格式
-        if image.dtype != np.uint8:
-            image = ((image - image.min()) / (image.max() - image.min() + 1e-8) * 255).astype(np.uint8)
+
+        # 统一转换为 uint8 RGB（避免构造 (H,W,3) float32 的中间数组造成内存峰值）
+        image = _to_uint8_rgb(image)
         
         # 生成 masks
         masks = self._mask_generator.generate(image)
@@ -213,16 +241,9 @@ class SAMIntegration:
             候选区域列表
         """
         self._load_sam()
-        
-        # 处理灰度图
-        if len(image.shape) == 2:
-            image = np.stack([image] * 3, axis=-1)
-        elif image.shape[-1] == 1:
-            image = np.concatenate([image] * 3, axis=-1)
-        
-        # 确保图像是 uint8 格式
-        if image.dtype != np.uint8:
-            image = ((image - image.min()) / (image.max() - image.min() + 1e-8) * 255).astype(np.uint8)
+
+        # 统一转换为 uint8 RGB（避免构造 (H,W,3) float32 的中间数组造成内存峰值）
+        image = _to_uint8_rgb(image)
         
         # 设置图像
         self._predictor.set_image(image)
