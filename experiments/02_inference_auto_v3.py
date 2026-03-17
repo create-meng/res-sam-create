@@ -16,6 +16,7 @@ import json
 import xml.etree.ElementTree as ET
 from datetime import datetime
 import hashlib
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -181,9 +182,11 @@ def load_image(path: str, size: tuple = None) -> np.ndarray:
 
 def run_inference(config: dict):
     """运行 Fully Automatic 推理（V3 严格对齐）"""
+    run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     print("=" * 60)
     print("Res-SAM V3: Fully Automatic Inference (Strict Paper Alignment)")
     print("=" * 60)
+    print(f"run_id: {run_id}")
     print(f"  window_size = {config['window_size']}")
     print(f"  stride = {config['stride']}")
     print(f"  hidden_size = {config['hidden_size']}")
@@ -246,6 +249,15 @@ def run_inference(config: dict):
             image_files = image_files[:config["max_images_per_category"]]
         
         print(f"找到 {len(image_files)} 张图像")
+
+        checkpoint_interval = int(config.get("checkpoint_interval", 20))
+        effective_interval = checkpoint_interval
+        if len(image_files) > 0 and len(image_files) <= checkpoint_interval:
+            effective_interval = 1
+            print(
+                f"短任务断点策略: num_images={len(image_files)} <= checkpoint_interval={checkpoint_interval}，"
+                f"将 effective_checkpoint_interval=1（每张保存一次断点）"
+            )
         
         # 断点支持
         checkpoint_file = os.path.join(config["checkpoint_dir"], f"checkpoint_auto_{category}.json")
@@ -379,7 +391,7 @@ def run_inference(config: dict):
                 
                 # 更新断点
                 processed_files.add(img_file)
-                if (i + 1) % config["checkpoint_interval"] == 0:
+                if effective_interval > 0 and ((i + 1) % effective_interval == 0):
                     with open(checkpoint_file, "w") as f:
                         json.dump({"processed_files": list(processed_files)}, f)
                 

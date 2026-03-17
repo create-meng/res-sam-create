@@ -17,6 +17,7 @@ import json
 import random
 import xml.etree.ElementTree as ET
 from datetime import datetime
+import uuid
 import logging
 from logging.handlers import RotatingFileHandler
 
@@ -184,6 +185,56 @@ def _to_abs(base_dir: str, p: str) -> str:
     return os.path.abspath(os.path.join(base_dir, p_norm))
 
 
+def _iter_checkpoint_files(checkpoint_dir: str):
+    if not checkpoint_dir or not os.path.isdir(checkpoint_dir):
+        return
+    for root, _, files in os.walk(checkpoint_dir):
+        for fn in files:
+            if fn.lower().endswith(".json"):
+                yield os.path.join(root, fn)
+
+
+def _load_checkpoint_if_valid(path: str):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        if isinstance(obj, dict) and ("results" in obj or "processed_count" in obj or "completed" in obj):
+            return obj
+    except Exception:
+        return None
+    return None
+
+
+def _find_legacy_checkpoint(checkpoint_dir: str, cfg_name: str, category: str) -> str:
+    if not checkpoint_dir or not os.path.isdir(checkpoint_dir):
+        return ""
+
+    cfg_variants = [
+        f"click_{cfg_name}",
+        f"click_{cfg_name.replace('/', '_')}",
+    ]
+    if cfg_name and "/" in cfg_name:
+        cfg_variants.append(f"click_{cfg_name.split('/')[0]}")
+
+    needles = [category.lower(), "checkpoint", "v3"] + [v.lower() for v in cfg_variants]
+
+    candidates = []
+    for p in _iter_checkpoint_files(checkpoint_dir):
+        path_l = p.lower()
+        base_l = os.path.basename(p).lower()
+        if not all(n in path_l or n in base_l for n in needles[:3]):
+            continue
+        if not any(v in path_l or v in base_l for v in needles[3:]):
+            continue
+        candidates.append(p)
+
+    if not candidates:
+        return ""
+
+    candidates.sort(key=lambda x: os.path.getmtime(x) if os.path.exists(x) else 0.0, reverse=True)
+    return candidates[0]
+
+
 def _scale_box_to_resized(gt_box: list, gt_w: int, gt_h: int, resized_h: int, resized_w: int) -> list:
     scale_x = resized_w / float(gt_w)
     scale_y = resized_h / float(gt_h)
@@ -255,6 +306,9 @@ def run_click_guided(config: dict):
         ],
     )
     logger = logging.getLogger(__name__)
+
+    run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+    logger.info(f"run_id={run_id}")
 
     logger.info('=' * 60)
     logger.info('Res-SAM V3: Click-guided Inference (Strict Paper Alignment)')
@@ -339,20 +393,40 @@ def run_click_guided(config: dict):
             category_key = f"{click_key}_{category}_v3"
             click_checkpoint_path = os.path.join(config["checkpoint_dir"], f"checkpoint_{category_key}.json")
 
+            checkpoint_parent = os.path.dirname(click_checkpoint_path)
+            if checkpoint_parent:
+                os.makedirs(checkpoint_parent, exist_ok=True)
+
             start_idx = 0
             results = []
             last_completed = 0
+
+            checkpoint = None
+            checkpoint_loaded_from = ""
             if os.path.exists(click_checkpoint_path):
-                with open(click_checkpoint_path, "r", encoding="utf-8") as f:
-                    checkpoint = json.load(f)
+                checkpoint = _load_checkpoint_if_valid(click_checkpoint_path)
+                checkpoint_loaded_from = click_checkpoint_path if checkpoint is not None else ""
+            else:
+                legacy_path = _find_legacy_checkpoint(config.get("checkpoint_dir", ""), cfg_name, category)
+                if legacy_path:
+                    checkpoint = _load_checkpoint_if_valid(legacy_path)
+                    checkpoint_loaded_from = legacy_path if checkpoint is not None else ""
+
+            if checkpoint is not None:
+                if checkpoint_loaded_from and checkpoint_loaded_from != click_checkpoint_path:
+                    logger.info(
+                        f"Legacy checkpoint found: legacy={checkpoint_loaded_from} -> new={click_checkpoint_path}"
+                    )
                 if checkpoint.get("completed", False):
                     logger.info(f"Checkpoint completed, skip: {click_checkpoint_path}")
                     click_results[category] = checkpoint.get("results", [])
                     continue
-                start_idx = checkpoint.get("processed_count", 0)
-                results = checkpoint.get("results", [])
+                start_idx = int(checkpoint.get("processed_count", 0) or 0)
+                results = checkpoint.get("results", []) or []
                 last_completed = start_idx
-                logger.info(f"Resume from checkpoint: click={cfg_name}, category={category}, start_idx={start_idx}, checkpoint={click_checkpoint_path}")
+                logger.info(
+                    f"Resume from checkpoint: click={cfg_name}, category={category}, start_idx={start_idx}, checkpoint={click_checkpoint_path}"
+                )
 
             image_files = sorted(
                 [
@@ -367,6 +441,8 @@ def run_click_guided(config: dict):
                 image_files = image_files[:max_images]
 
             logger.info(f"Category start: click={cfg_name}, category={category}, num_images={len(image_files)}, start_idx={start_idx}")
+
+            effective_interval = 5
 
             annotation_dir = config["annotation_dirs"].get(category, "")
 
@@ -488,7 +564,7 @@ def run_click_guided(config: dict):
 
                     last_completed = i + 1
 
-                    if (i + 1) % config["checkpoint_interval"] == 0:
+                    if effective_interval > 0 and ((i + 1) % effective_interval == 0):
                         logger.info(f"Save checkpoint: click={cfg_name}, category={category}, processed={last_completed}, path={click_checkpoint_path}")
                         with open(click_checkpoint_path, "w", encoding="utf-8") as f:
                             json.dump(

@@ -19,7 +19,7 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str], log_fp):
         "=" * 80,
     ]
     for line in header:
-        print(line)
+        print(line, flush=True)
         log_fp.write(line + "\n")
     log_fp.flush()
 
@@ -34,8 +34,9 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str], log_fp):
     )
     assert proc.stdout is not None
     for line in proc.stdout:
-        print(line, end="")
+        print(line, end="", flush=True)
         log_fp.write(line)
+        log_fp.flush()
     proc.wait()
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd)
@@ -43,9 +44,6 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str], log_fp):
 
 def _python_cmd() -> list[str]:
     """Return a python command that runs inside conda env `res-sam` when needed."""
-    # if os.environ.get("CONDA_DEFAULT_ENV", "") == "res-sam":
-    #     return [sys.executable, "-u"]
-    # return ["conda", "run", "-n", "res-sam", "python", "-u"]
     return [sys.executable, "-u"]
 
 
@@ -89,7 +87,7 @@ def main():
     print(" ", str(log_path))
     print("=" * 80)
 
-    with open(log_path, "w", encoding="utf-8") as log_fp:
+    with open(log_path, "w", encoding="utf-8", buffering=1) as log_fp:
         try:
             log_fp.write("Res-SAM V3 quick test\n")
             log_fp.write(f"LOG_PATH: {str(log_path)}\n")
