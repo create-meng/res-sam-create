@@ -43,8 +43,8 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str], log_fp):
 def _python_cmd() -> list[str]:
     """Return a python command that runs inside conda env `res-sam` when needed."""
     if os.environ.get("CONDA_DEFAULT_ENV", "") == "res-sam":
-        return [sys.executable]
-    return ["conda", "run", "-n", "res-sam", "python"]
+        return [sys.executable, "-u"]
+    return ["conda", "run", "-n", "res-sam", "python", "-u"]
 
 
 def main():
@@ -74,6 +74,8 @@ def main():
     feature_bank = repo_root / "outputs" / "feature_banks_v3" / "feature_bank_v3.pth"
 
     env = os.environ.copy()
+    # Ensure unbuffered output for subprocesses. This is critical when stdout is piped.
+    env["PYTHONUNBUFFERED"] = "1"
     if args.max_images and args.max_images > 0:
         env["MAX_IMAGES_PER_CATEGORY"] = str(args.max_images)
 
