@@ -216,6 +216,22 @@ def _load_checkpoint_if_valid(path: str):
     return None
 
 
+def _normalize_cfg_for_path(cfg_name: str) -> str:
+    return (cfg_name or "").replace("/", "_")
+
+
+def _checkpoint_matches_run(checkpoint_obj: dict, cfg_name: str, category: str) -> bool:
+    if not isinstance(checkpoint_obj, dict):
+        return False
+    ck_cfg = checkpoint_obj.get("click_config", None)
+    ck_cat = checkpoint_obj.get("category", None)
+    if ck_cfg is not None and ck_cfg != cfg_name:
+        return False
+    if ck_cat is not None and ck_cat != category:
+        return False
+    return True
+
+
 def _find_legacy_checkpoint(checkpoint_dir: str, cfg_name: str, category: str) -> str:
     if not checkpoint_dir or not os.path.isdir(checkpoint_dir):
         return ""
@@ -224,8 +240,10 @@ def _find_legacy_checkpoint(checkpoint_dir: str, cfg_name: str, category: str) -
         f"click_{cfg_name}",
         f"click_{cfg_name.replace('/', '_')}",
     ]
-    if cfg_name and "/" in cfg_name:
-        cfg_variants.append(f"click_{cfg_name.split('/')[0]}")
+
+    # NOTE: Do NOT add broad variants like "click_5" for "5/3".
+    # It can accidentally match other prompt settings (e.g., 5/5), causing
+    # incorrect reuse and skipping.
 
     needles = [category.lower(), "checkpoint", "v3"] + [v.lower() for v in cfg_variants]
 
@@ -312,7 +330,8 @@ def run_click_guided(config: dict):
     run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
 
     file_handler = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding='utf-8')
-    stream_handler = logging.StreamHandler()
+    # Bind to stdout explicitly: some IDE terminals may hide stderr by default.
+    stream_handler = logging.StreamHandler(sys.stdout)
 
     runid_filter = _RunIdFilter(run_id)
     file_handler.addFilter(runid_filter)
@@ -325,6 +344,7 @@ def run_click_guided(config: dict):
             file_handler,
             stream_handler,
         ],
+        force=True,
     )
     logger = logging.getLogger(__name__)
 
@@ -338,15 +358,11 @@ def run_click_guided(config: dict):
     logger.info(f"image_size_hw={config.get('image_size')}")
     logger.info(f"feature_bank_path={config.get('feature_bank_path')}")
     logger.info(f"sam_checkpoint={config.get('sam_checkpoint')}")
-    logger.info(f"click_configs={config.get('click_configs', [])}")
-    logger.info(f"max_images_per_category={config.get('max_images_per_category')}")
-    logger.info(f"log_file={log_file}")
-    logger.info('=' * 60)
 
-    print("=" * 60)
-    print("Res-SAM V3: Click-guided Inference")
-    print("=" * 60)
-    print(f"日志文件: {log_file}")
+    print("=" * 60, flush=True)
+    print("Res-SAM V3: Click-guided Inference", flush=True)
+    print("=" * 60, flush=True)
+    print(f"\u65e7\u5fd7\u6587\u4ef6: {log_file}", flush=True)
 
     config = dict(config)
     config["feature_bank_path"] = _to_abs(base_dir, config.get("feature_bank_path", ""))
@@ -411,7 +427,10 @@ def run_click_guided(config: dict):
                 continue
 
             category_key = f"{click_key}_{category}_v3"
-            click_checkpoint_path = os.path.join(config["checkpoint_dir"], f"checkpoint_{category_key}.json")
+            # IMPORTANT: cfg_name can contain '/', which would create nested directories on Windows.
+            # This also caused legacy checkpoint matching to collide across configs (e.g., 5/3 -> 5/5).
+            safe_category_key = f"click_{_normalize_cfg_for_path(cfg_name)}_{category}_v3"
+            click_checkpoint_path = os.path.join(config["checkpoint_dir"], f"checkpoint_{safe_category_key}.json")
 
             checkpoint_parent = os.path.dirname(click_checkpoint_path)
             if checkpoint_parent:
@@ -425,12 +444,18 @@ def run_click_guided(config: dict):
             checkpoint_loaded_from = ""
             if os.path.exists(click_checkpoint_path):
                 checkpoint = _load_checkpoint_if_valid(click_checkpoint_path)
-                checkpoint_loaded_from = click_checkpoint_path if checkpoint is not None else ""
+                if checkpoint is not None and _checkpoint_matches_run(checkpoint, cfg_name, category):
+                    checkpoint_loaded_from = click_checkpoint_path
+                else:
+                    checkpoint = None
             else:
                 legacy_path = _find_legacy_checkpoint(config.get("checkpoint_dir", ""), cfg_name, category)
                 if legacy_path:
                     checkpoint = _load_checkpoint_if_valid(legacy_path)
-                    checkpoint_loaded_from = legacy_path if checkpoint is not None else ""
+                    if checkpoint is not None and _checkpoint_matches_run(checkpoint, cfg_name, category):
+                        checkpoint_loaded_from = legacy_path
+                    else:
+                        checkpoint = None
 
             if checkpoint is not None:
                 if checkpoint_loaded_from and checkpoint_loaded_from != click_checkpoint_path:
@@ -467,7 +492,12 @@ def run_click_guided(config: dict):
             annotation_dir = config["annotation_dirs"].get(category, "")
 
             try:
-                for i in tqdm(range(start_idx, len(image_files)), desc=f"Click {cfg_name} {category}"):
+                for i in tqdm(
+                    range(start_idx, len(image_files)),
+                    desc=f"Click {cfg_name} {category}",
+                    disable=False,
+                    file=sys.stdout,
+                ):
                     img_file = image_files[i]
                     img_path = os.path.join(data_dir, img_file)
 
@@ -589,6 +619,8 @@ def run_click_guided(config: dict):
                         with open(click_checkpoint_path, "w", encoding="utf-8") as f:
                             json.dump(
                                 {
+                                    "click_config": cfg_name,
+                                    "category": category,
                                     "processed_count": last_completed,
                                     "results": results,
                                     "timestamp": datetime.now().isoformat(),
@@ -604,6 +636,8 @@ def run_click_guided(config: dict):
                 with open(click_checkpoint_path, "w", encoding="utf-8") as f:
                     json.dump(
                         {
+                            "click_config": cfg_name,
+                            "category": category,
                             "processed_count": last_completed,
                             "results": results,
                             "timestamp": datetime.now().isoformat(),
@@ -617,6 +651,8 @@ def run_click_guided(config: dict):
             with open(click_checkpoint_path, "w", encoding="utf-8") as f:
                 json.dump(
                     {
+                        "click_config": cfg_name,
+                        "category": category,
                         "processed_count": len(image_files),
                         "results": results,
                         "timestamp": datetime.now().isoformat(),

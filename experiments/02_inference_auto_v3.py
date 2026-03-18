@@ -272,7 +272,14 @@ def run_inference(config: dict):
         category_results = []
         
         # 处理每张图像
-        for i, img_file in enumerate(tqdm(image_files, desc=f"推理 {category}")):
+        for i, img_file in enumerate(
+            tqdm(
+                image_files,
+                desc=f"推理 {category}",
+                disable=(not sys.stdout.isatty()),
+                file=sys.stdout,
+            )
+        ):
             if img_file in processed_files:
                 continue
             
