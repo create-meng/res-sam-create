@@ -17,7 +17,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 import hashlib
 import uuid
-import atexit
+import logging
+from logging.handlers import RotatingFileHandler
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -27,33 +28,17 @@ from tqdm import tqdm
 from PIL import Image
 import cv2
 
-class _TeeStream:
-    def __init__(self, *streams):
-        self._streams = [s for s in streams if s is not None]
 
-    def write(self, data):
-        for s in self._streams:
-            try:
-                s.write(data)
-            except Exception:
-                pass
-        return len(data)
+class _RunIdFilter(logging.Filter):
+    def __init__(self, run_id: str):
+        super().__init__()
+        self._run_id = run_id
 
-    def flush(self):
-        for s in self._streams:
-            try:
-                s.flush()
-            except Exception:
-                pass
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "run_id"):
+            record.run_id = self._run_id
+        return True
 
-    def isatty(self):
-        for s in self._streams:
-            try:
-                if hasattr(s, "isatty") and s.isatty():
-                    return True
-            except Exception:
-                pass
-        return False
 
 # ============ 配置 ============
 CONFIG = {
@@ -218,25 +203,27 @@ def run_inference(config: dict):
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, f"auto_inference_v3_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
-    log_fp = open(log_file, "w", encoding="utf-8")
-    tee = _TeeStream(original_stdout, log_fp)
-    sys.stdout = tee
-    sys.stderr = tee
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    stream_handler = logging.StreamHandler(sys.stdout)
 
-    def _restore_streams():
-        try:
-            sys.stdout = original_stdout
-            sys.stderr = original_stderr
-        except Exception:
-            pass
-        try:
-            log_fp.close()
-        except Exception:
-            pass
+    runid_filter = _RunIdFilter(run_id)
+    file_handler.addFilter(runid_filter)
+    stream_handler.addFilter(runid_filter)
 
-    atexit.register(_restore_streams)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | run_id=%(run_id)s | %(message)s",
+        handlers=[file_handler, stream_handler],
+        force=True,
+    )
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"run_id={run_id}")
 
     print("=" * 60)
     print("Res-SAM V3: Fully Automatic Inference (Strict Paper Alignment)")
@@ -249,6 +236,19 @@ def run_inference(config: dict):
     print(f"  Expected feature dim = {2*config['hidden_size'] + 1}")
     print(f"  beta_threshold = {config['beta_threshold']}")
     print("=" * 60)
+
+    logger.info("=" * 60)
+    logger.info("Res-SAM V3: Fully Automatic Inference (Strict Paper Alignment)")
+    logger.info("=" * 60)
+    logger.info(f"log_file={log_file}")
+    logger.info(
+        "window_size=%s, stride=%s, hidden_size=%s, beta_threshold=%s, image_size_hw=%s",
+        config.get("window_size"),
+        config.get("stride"),
+        config.get("hidden_size"),
+        config.get("beta_threshold"),
+        config.get("image_size"),
+    )
     
     # 创建输出目录
     os.makedirs(config["output_dir"], exist_ok=True)
@@ -292,6 +292,12 @@ def run_inference(config: dict):
         print(f"处理类别: {category}")
         print(f"目录: {data_dir}")
         print("=" * 60)
+
+        logger.info(
+            "Category start: category=%s, dir=%s",
+            category,
+            data_dir,
+        )
         
         if not os.path.exists(data_dir):
             print(f"警告: 目录不存在: {data_dir}")
@@ -305,15 +311,12 @@ def run_inference(config: dict):
             image_files = image_files[:config["max_images_per_category"]]
         
         print(f"找到 {len(image_files)} 张图像")
+        logger.info("Category images: category=%s, num_images=%s", category, len(image_files))
 
         checkpoint_interval = int(config.get("checkpoint_interval", 20))
         effective_interval = checkpoint_interval
         if len(image_files) > 0 and len(image_files) <= checkpoint_interval:
             effective_interval = 1
-            print(
-                f"短任务断点策略: num_images={len(image_files)} <= checkpoint_interval={checkpoint_interval}，"
-                f"将 effective_checkpoint_interval=1（每张保存一次断点）"
-            )
         
         # 断点支持
         checkpoint_file = os.path.join(config["checkpoint_dir"], f"checkpoint_auto_{category}.json")
@@ -451,6 +454,20 @@ def run_inference(config: dict):
                         })
                 
                 category_results.append(record)
+
+                logger.info(
+                    "image=%s | category=%s | num_pred=%s | scores=%s | num_candidates=%s | num_coarse_discarded=%s | num_esn_fits=%s | has_gt=%s | exclude_det=%s | exclude_auc=%s",
+                    img_file,
+                    category,
+                    len(record.get("pred_bboxes", []) or []),
+                    record.get("anomaly_scores", []),
+                    record.get("num_candidates", None),
+                    record.get("num_coarse_discarded", None),
+                    record.get("num_esn_fits", None),
+                    bool(gt),
+                    record.get("exclude_from_det_metrics", None),
+                    record.get("exclude_from_auc", None),
+                )
                 
                 # 更新断点
                 processed_files.add(img_file)
@@ -460,6 +477,7 @@ def run_inference(config: dict):
                 
             except Exception as e:
                 print(f"处理图像 {img_file} 时出错: {e}")
+                logger.exception("Error processing image=%s | category=%s", img_file, category)
                 continue
         
         all_results[category] = category_results
@@ -494,6 +512,7 @@ def run_inference(config: dict):
         json.dump(output_data, f, indent=2, ensure_ascii=False)
     
     print(f"\n结果保存至: {output_file}")
+    logger.info(f"Results saved: {output_file}")
     
     # 统计汇总
     total_images = sum(len(results) for results in all_results.values())
@@ -509,9 +528,7 @@ def run_inference(config: dict):
     print("Fully Automatic V3 推理完成!")
     print("=" * 60)
     
-    _final_results = all_results
-    _restore_streams()
-    return _final_results
+    return all_results
 
 
 if __name__ == "__main__":
