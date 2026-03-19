@@ -303,12 +303,13 @@ class ResSAM:
         # 对每个 coarse region 做 2D-ESN 拟合并与 Feature Bank 比较
         # discard normal-like; retain potential anomaly regions
         print("Step 2: Region-level coarse filtering...")
+        debug_coarse = bool(os.environ.get("RES_SAM_DEBUG_COARSE", "").strip())
         retained_regions = []
         num_discarded = 0
         
         half_win = self.window_size // 2
         
-        for region in valid_coarse_regions:
+        for region_idx, region in enumerate(valid_coarse_regions):
             bbox = region['bbox']
             mask = region['mask']
             x1, y1, x2, y2 = bbox
@@ -316,11 +317,19 @@ class ResSAM:
             # 跳过过小区域
             region_area = (x2 - x1) * (y2 - y1)
             if region_area < min_region_area:
+                if debug_coarse:
+                    print(
+                        f"  [coarse][discard][{region_idx}] reason=area_lt_min "
+                        f"bbox={bbox} area={region_area} min_region_area={min_region_area}")
                 num_discarded += 1
                 continue
             
             crop = image[y1:y2, x1:x2]
             if crop.size == 0:
+                if debug_coarse:
+                    print(
+                        f"  [coarse][discard][{region_idx}] reason=empty_crop "
+                        f"bbox={bbox} crop_shape={getattr(crop, 'shape', None)}")
                 num_discarded += 1
                 continue
 
@@ -339,6 +348,10 @@ class ResSAM:
                     interpolation=cv2.INTER_LINEAR,
                 )
             except Exception:
+                if debug_coarse:
+                    print(
+                        f"  [coarse][discard][{region_idx}] reason=resize_failed "
+                        f"bbox={bbox} crop_shape={getattr(crop, 'shape', None)} window_size={self.window_size}")
                 num_discarded += 1
                 continue
 
@@ -358,6 +371,10 @@ class ResSAM:
             
             # 粗筛阈值：保留异常分数高于阈值的 region
             if region_max_score > self.beta_threshold:
+                if debug_coarse:
+                    print(
+                        f"  [coarse][retain][{region_idx}] bbox={bbox} area={region_area} "
+                        f"score={region_max_score:.6f} beta={self.beta_threshold:.6f}")
                 retained_regions.append({
                     'bbox': bbox,
                     'mask': mask,
@@ -366,6 +383,10 @@ class ResSAM:
                     'stability_score': region.get('stability_score', 0),
                 })
             else:
+                if debug_coarse:
+                    print(
+                        f"  [coarse][discard][{region_idx}] reason=score_le_beta bbox={bbox} area={region_area} "
+                        f"score={region_max_score:.6f} beta={self.beta_threshold:.6f}")
                 num_discarded += 1
         
         print(f"  Retained {len(retained_regions)} regions after coarse filtering (discarded {num_discarded})")

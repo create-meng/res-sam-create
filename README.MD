@@ -131,11 +131,15 @@ conda run -n res-sam python experiments/04_evaluate_and_visualize_v3.py
 
 | 脚本 | 功能 |
 |------|------|
+| `00_quick_test_v3.py` | 快速流程自检（小样本/快速检查输出字段，不作为最终出数） |
 | `01_build_feature_bank_v3.py` | 构建 Feature Bank (严格按论文对齐) |
 | `02_inference_auto_v3.py` | Fully Automatic 模式推理 (V3) |
 | `03_inference_click_v3.py` | Click-guided 模式推理 (Table 1) |
 | `04_evaluate_and_visualize_v3.py` | 评估指标 + 可视化 (Table 2 + Table 1 汇总) |
 | `05_clustering_v3.py` | 异常聚类 (Table 3 / 区域级再拟合) |
+| `06_ablation_wo_sam_v3.py` | 消融实验：w/o SAM（用于对齐论文 Fig.5/消融设置） |
+| `07_cross_environment_v3.py` | Cross-environment 实验（用于对齐论文 Fig.6/跨环境设置） |
+| `run_all.py` | 一键串联运行脚本（按顺序调用 V3 主线脚本） |
 
 ### V1/V2 版本 (已归档)
 
@@ -205,11 +209,14 @@ Res-SAM/
 │   ├── sam_integration.py  # SAM 集成 ⭐
 │   └── functions.py        # 工具函数
 ├── experiments/
+│   ├── 00_quick_test_v3.py         # V3 快速自检
 │   ├── 01_build_feature_bank_v3.py  # V3 Feature Bank ⭐
 │   ├── 02_inference_auto_v3.py      # V3 自动推理 ⭐
 │   ├── 03_inference_click_v3.py     # V3 点击引导推理 ⭐
 │   ├── 04_evaluate_and_visualize_v3.py # V3 评估 ⭐
 │   ├── 05_clustering_v3.py          # V3 聚类 ⭐
+│   ├── 06_ablation_wo_sam_v3.py     # V3 消融：w/o SAM
+│   ├── 07_cross_environment_v3.py   # V3 跨环境
 │   └── run_all.py                   # 主运行脚本
 ├── sam/
 │   └── sam_vit_b_01ec64.pth # SAM 权重

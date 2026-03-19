@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 import hashlib
 import uuid
+import atexit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -25,6 +26,34 @@ import numpy as np
 from tqdm import tqdm
 from PIL import Image
 import cv2
+
+class _TeeStream:
+    def __init__(self, *streams):
+        self._streams = [s for s in streams if s is not None]
+
+    def write(self, data):
+        for s in self._streams:
+            try:
+                s.write(data)
+            except Exception:
+                pass
+        return len(data)
+
+    def flush(self):
+        for s in self._streams:
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        for s in self._streams:
+            try:
+                if hasattr(s, "isatty") and s.isatty():
+                    return True
+            except Exception:
+                pass
+        return False
 
 # ============ 配置 ============
 CONFIG = {
@@ -183,9 +212,36 @@ def load_image(path: str, size: tuple = None) -> np.ndarray:
 def run_inference(config: dict):
     """运行 Fully Automatic 推理（V3 严格对齐）"""
     run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    log_dir = os.path.join(base_dir, "outputs", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f"auto_inference_v3_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    log_fp = open(log_file, "w", encoding="utf-8")
+    tee = _TeeStream(original_stdout, log_fp)
+    sys.stdout = tee
+    sys.stderr = tee
+
+    def _restore_streams():
+        try:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+        except Exception:
+            pass
+        try:
+            log_fp.close()
+        except Exception:
+            pass
+
+    atexit.register(_restore_streams)
+
     print("=" * 60)
     print("Res-SAM V3: Fully Automatic Inference (Strict Paper Alignment)")
     print("=" * 60)
+    print(f"日志文件: {log_file}")
     print(f"run_id: {run_id}")
     print(f"  window_size = {config['window_size']}")
     print(f"  stride = {config['stride']}")
@@ -453,7 +509,9 @@ def run_inference(config: dict):
     print("Fully Automatic V3 推理完成!")
     print("=" * 60)
     
-    return all_results
+    _final_results = all_results
+    _restore_streams()
+    return _final_results
 
 
 if __name__ == "__main__":

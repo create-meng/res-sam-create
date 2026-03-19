@@ -189,7 +189,9 @@ def _to_abs(base_dir: str, p: str) -> str:
         return p
 
     base_name = os.path.basename(base_dir)
-    p_norm = p.replace("/", os.sep)
+    p_norm = os.path.normpath(p.replace("/", os.sep))
+    if p_norm.startswith("." + os.sep):
+        p_norm = p_norm[2:]
     if p_norm == base_name or p_norm.startswith(base_name + os.sep):
         p_norm = p_norm[len(base_name) + 1 :]
 
