@@ -320,172 +320,257 @@ def run_inference(config: dict):
         
         # 断点支持
         checkpoint_file = os.path.join(config["checkpoint_dir"], f"checkpoint_auto_{category}.json")
-        processed_files = set()
-        
-        if os.path.exists(checkpoint_file):
-            with open(checkpoint_file, "r") as f:
-                checkpoint = json.load(f)
-            processed_files = set(checkpoint.get("processed_files", []))
-            print(f"从断点继续，已处理 {len(processed_files)} 张图像")
-        
+        start_idx = 0
         category_results = []
+        last_completed = 0
+        legacy_processed_files = set()
+
+        if os.path.exists(checkpoint_file):
+            with open(checkpoint_file, "r", encoding="utf-8") as f:
+                checkpoint = json.load(f)
+
+            if checkpoint.get("completed", False):
+                logger.info("Checkpoint completed, skip: %s", checkpoint_file)
+                all_results[category] = checkpoint.get("results", []) or []
+                continue
+
+            if isinstance(checkpoint.get("processed_count", None), int):
+                start_idx = int(checkpoint.get("processed_count", 0) or 0)
+                category_results = checkpoint.get("results", []) or []
+                last_completed = start_idx
+                print(f"从断点继续，start_idx={start_idx}")
+                logger.info(
+                    "Resume from checkpoint: category=%s, start_idx=%s, checkpoint=%s",
+                    category,
+                    start_idx,
+                    checkpoint_file,
+                )
+            else:
+                legacy_processed_files = set(checkpoint.get("processed_files", []) or [])
+                if legacy_processed_files:
+                    print(f"从旧断点继续（processed_files），已处理 {len(legacy_processed_files)} 张图像")
+                    logger.info(
+                        "Resume from legacy checkpoint: category=%s, processed=%s, checkpoint=%s",
+                        category,
+                        len(legacy_processed_files),
+                        checkpoint_file,
+                    )
         
         # 处理每张图像
-        for i, img_file in enumerate(
-            tqdm(
-                image_files,
+        try:
+            for i in tqdm(
+                range(start_idx, len(image_files)),
                 desc=f"推理 {category}",
-                disable=(not sys.stdout.isatty()),
+                disable=False,
                 file=sys.stdout,
-            )
-        ):
-            if img_file in processed_files:
-                continue
-            
-            img_path = os.path.join(data_dir, img_file)
-            
-            # 获取标注（如果存在）
-            annotation_dir = config["annotation_dirs"].get(category)
-            xml_file = os.path.splitext(img_file)[0] + ".xml"
-            xml_path = os.path.join(annotation_dir, xml_file) if annotation_dir else None
-            
-            try:
-                # 读取原图尺寸（用于将预测 bbox 从 resize 坐标系缩放回原图坐标系，避免评估/可视化口径漂移）
-                with Image.open(img_path) as _im:
-                    orig_w, orig_h = _im.size
+            ):
+                img_file = image_files[i]
+                if legacy_processed_files and img_file in legacy_processed_files:
+                    last_completed = i + 1
+                    continue
 
-                # 加载图像
-                img = load_image(img_path, config["image_size"])
+                img_path = os.path.join(data_dir, img_file)
                 
-                # 推理（V3 detect_automatic 包含 region 级粗筛）
-                result = model.detect_automatic(
-                    img,
-                    min_region_area=config["min_region_area"],
-                    max_regions=config["max_candidates_per_image"],
-                )
+                # 获取标注（如果存在）
+                annotation_dir = config["annotation_dirs"].get(category)
+                xml_file = os.path.splitext(img_file)[0] + ".xml"
+                xml_path = os.path.join(annotation_dir, xml_file) if annotation_dir else None
                 
-                # 解析标注
-                gt = parse_voc_xml(xml_path) if xml_path and os.path.exists(xml_path) else None
-                
-                # 准备结果记录
-                record = {
-                    "image_name": img_file,
-                    "image_path": img_path,
-                    # detect_automatic 返回 bbox 在 resize 坐标系下（与输入 img 对齐）
-                    "pred_bboxes": [r["bbox"] for r in result["anomaly_regions"]],
-                    "anomaly_scores": [r["max_anomaly_score"] for r in result["anomaly_regions"]],
-                    "num_candidates": result["num_candidates"],
-                    "num_coarse_discarded": result["num_coarse_discarded"],
-                    "num_esn_fits": result["num_esn_fits"],
-                }
+                try:
+                    # 读取原图尺寸（用于将预测 bbox 从 resize 坐标系缩放回原图坐标系，避免评估/可视化口径漂移）
+                    with Image.open(img_path) as _im:
+                        orig_w, orig_h = _im.size
 
-                # 统一输出坐标系：pred_bboxes -> 原图/VOC 坐标系；pred_bboxes_resized -> resize 坐标系。
-                # 注意：若存在 VOC XML，评估时 gt_bboxes 的坐标系以 XML 的 width/height 为准，
-                # 因此这里缩放应优先对齐到 XML 声明的图像尺寸，避免“图像文件尺寸 != XML size”导致 IoU 漂移。
-                target_w = int(gt["width"]) if gt and gt.get("width") else int(orig_w)
-                target_h = int(gt["height"]) if gt and gt.get("height") else int(orig_h)
-
-                resized_w = config["image_size"][1]
-                resized_h = config["image_size"][0]
-                scale_x_img = target_w / resized_w
-                scale_y_img = target_h / resized_h
-                pred_bboxes_resized = record.get("pred_bboxes", [])
-                pred_bboxes_scaled = [
-                    [
-                        int(b[0] * scale_x_img),
-                        int(b[1] * scale_y_img),
-                        int(b[2] * scale_x_img),
-                        int(b[3] * scale_y_img),
-                    ]
-                    for b in pred_bboxes_resized
-                ]
-                
-                record["pred_bboxes_resized"] = pred_bboxes_resized
-                record["pred_bboxes"] = pred_bboxes_scaled
-                
-                # 添加 GT 信息（如果存在）
-                if gt:
-                    _has_gt = True
-                    _num_gt = len(gt['bboxes'])
+                    # 加载图像
+                    img = load_image(img_path, config["image_size"])
                     
-                    # 同时提供 GT 的 resize 坐标系（便于与 pred_bboxes 直接对照）
-                    inv_scale_x = config["image_size"][1] / gt["width"]
-                    inv_scale_y = config["image_size"][0] / gt["height"]
+                    # 推理（V3 detect_automatic 包含 region 级粗筛）
+                    result = model.detect_automatic(
+                        img,
+                        min_region_area=config["min_region_area"],
+                        max_regions=config["max_candidates_per_image"],
+                    )
                     
-                    gt_boxes_resized = [
+                    # 解析标注
+                    gt = parse_voc_xml(xml_path) if xml_path and os.path.exists(xml_path) else None
+                    
+                    # 准备结果记录
+                    record = {
+                        "image_name": img_file,
+                        "image_path": img_path,
+                        # detect_automatic 返回 bbox 在 resize 坐标系下（与输入 img 对齐）
+                        "pred_bboxes": [r["bbox"] for r in result["anomaly_regions"]],
+                        "anomaly_scores": [r["max_anomaly_score"] for r in result["anomaly_regions"]],
+                        "num_candidates": result["num_candidates"],
+                        "num_coarse_discarded": result["num_coarse_discarded"],
+                        "num_esn_fits": result["num_esn_fits"],
+                    }
+
+                    # 统一输出坐标系：pred_bboxes -> 原图/VOC 坐标系；pred_bboxes_resized -> resize 坐标系。
+                    # 注意：若存在 VOC XML，评估时 gt_bboxes 的坐标系以 XML 的 width/height 为准，
+                    # 因此这里缩放应优先对齐到 XML 声明的图像尺寸，避免“图像文件尺寸 != XML size”导致 IoU 漂移。
+                    target_w = int(gt["width"]) if gt and gt.get("width") else int(orig_w)
+                    target_h = int(gt["height"]) if gt and gt.get("height") else int(orig_h)
+
+                    resized_w = config["image_size"][1]
+                    resized_h = config["image_size"][0]
+                    scale_x_img = target_w / resized_w
+                    scale_y_img = target_h / resized_h
+                    pred_bboxes_resized = record.get("pred_bboxes", [])
+                    pred_bboxes_scaled = [
                         [
-                            int(bbox[0] * inv_scale_x),
-                            int(bbox[1] * inv_scale_y),
-                            int(bbox[2] * inv_scale_x),
-                            int(bbox[3] * inv_scale_y),
+                            int(b[0] * scale_x_img),
+                            int(b[1] * scale_y_img),
+                            int(b[2] * scale_x_img),
+                            int(b[3] * scale_y_img),
                         ]
-                        for bbox in gt["bboxes"]
+                        for b in pred_bboxes_resized
                     ]
                     
-                    record.update({
-                        'gt_bboxes': gt['bboxes'],  # 原图坐标系
-                        'gt_bboxes_resized': gt_boxes_resized,  # resize 坐标系
-                        'num_gt': int(_num_gt),
-                        'gt_width': gt['width'],
-                        'gt_height': gt['height'],
-                        'exclude_from_det_metrics': False,
-                        'exclude_from_auc': False,
-                    })
-                
-                else:
-                    _has_gt = False
-                    _num_gt = 0
+                    record["pred_bboxes_resized"] = pred_bboxes_resized
+                    record["pred_bboxes"] = pred_bboxes_scaled
                     
-                    # normal_auc 类别：无 GT，仅用于 AUC 计算
-                    if category == "normal_auc":
+                    # 添加 GT 信息（如果存在）
+                    if gt:
+                        _has_gt = True
+                        _num_gt = len(gt['bboxes'])
+                        
+                        # 同时提供 GT 的 resize 坐标系（便于与 pred_bboxes 直接对照）
+                        inv_scale_x = config["image_size"][1] / gt["width"]
+                        inv_scale_y = config["image_size"][0] / gt["height"]
+                        
+                        gt_boxes_resized = [
+                            [
+                                int(bbox[0] * inv_scale_x),
+                                int(bbox[1] * inv_scale_y),
+                                int(bbox[2] * inv_scale_x),
+                                int(bbox[3] * inv_scale_y),
+                            ]
+                            for bbox in gt["bboxes"]
+                        ]
+                        
                         record.update({
-                            "gt_bboxes": [],
-                            "num_gt": 0,
-                            "exclude_from_det_metrics": True,  # 不计入 TP/FP/FN
-                            "exclude_from_auc": False,  # 参与 ROC/AUC
+                            'gt_bboxes': gt['bboxes'],  # 原图坐标系
+                            'gt_bboxes_resized': gt_boxes_resized,  # resize 坐标系
+                            'num_gt': int(_num_gt),
+                            'gt_width': gt['width'],
+                            'gt_height': gt['height'],
+                            'exclude_from_det_metrics': False,
+                            'exclude_from_auc': False,
                         })
+                    
                     else:
-                        # 其他类别但无标注：完全排除
-                        record.update({
-                            "gt_bboxes": [],
-                            "num_gt": 0,
-                            "exclude_from_det_metrics": True,
-                            "exclude_from_auc": True,
-                        })
-                
-                category_results.append(record)
+                        _has_gt = False
+                        _num_gt = 0
+                        
+                        # normal_auc 类别：无 GT，仅用于 AUC 计算
+                        if category == "normal_auc":
+                            record.update({
+                                "gt_bboxes": [],
+                                "num_gt": 0,
+                                "exclude_from_det_metrics": True,  # 不计入 TP/FP/FN
+                                "exclude_from_auc": False,  # 参与 ROC/AUC
+                            })
+                        else:
+                            # 其他类别但无标注：完全排除
+                            record.update({
+                                "gt_bboxes": [],
+                                "num_gt": 0,
+                                "exclude_from_det_metrics": True,
+                                "exclude_from_auc": True,
+                            })
+                    
+                    category_results.append(record)
 
-                logger.info(
-                    "image=%s | category=%s | num_pred=%s | scores=%s | num_candidates=%s | num_coarse_discarded=%s | num_esn_fits=%s | has_gt=%s | exclude_det=%s | exclude_auc=%s",
-                    img_file,
-                    category,
-                    len(record.get("pred_bboxes", []) or []),
-                    record.get("anomaly_scores", []),
-                    record.get("num_candidates", None),
-                    record.get("num_coarse_discarded", None),
-                    record.get("num_esn_fits", None),
-                    bool(gt),
-                    record.get("exclude_from_det_metrics", None),
-                    record.get("exclude_from_auc", None),
-                )
-                
-                # 更新断点
-                processed_files.add(img_file)
-                if effective_interval > 0 and ((i + 1) % effective_interval == 0):
-                    with open(checkpoint_file, "w") as f:
-                        json.dump({"processed_files": list(processed_files)}, f)
-                
-            except Exception as e:
-                print(f"处理图像 {img_file} 时出错: {e}")
-                logger.exception("Error processing image=%s | category=%s", img_file, category)
-                continue
+                    logger.info(
+                        "image=%s | category=%s | num_pred=%s | scores=%s | num_candidates=%s | num_coarse_discarded=%s | num_esn_fits=%s | has_gt=%s | exclude_det=%s | exclude_auc=%s",
+                        img_file,
+                        category,
+                        len(record.get("pred_bboxes", []) or []),
+                        record.get("anomaly_scores", []),
+                        record.get("num_candidates", None),
+                        record.get("num_coarse_discarded", None),
+                        record.get("num_esn_fits", None),
+                        bool(gt),
+                        record.get("exclude_from_det_metrics", None),
+                        record.get("exclude_from_auc", None),
+                    )
+                    
+                    # 更新断点
+                    last_completed = i + 1
+                    if effective_interval > 0 and (last_completed % effective_interval == 0):
+                        logger.info(
+                            "Save checkpoint: category=%s, processed=%s, path=%s",
+                            category,
+                            last_completed,
+                            checkpoint_file,
+                        )
+                        with open(checkpoint_file, "w", encoding="utf-8") as f:
+                            json.dump(
+                                {
+                                    "category": category,
+                                    "processed_count": int(last_completed),
+                                    "results": category_results,
+                                    "timestamp": datetime.now().isoformat(),
+                                    "completed": False,
+                                },
+                                f,
+                                ensure_ascii=False,
+                            )
+                    
+                except Exception as e:
+                    print(f"处理图像 {img_file} 时出错: {e}")
+                    logger.exception("Error processing image=%s | category=%s", img_file, category)
+                    continue
+        except KeyboardInterrupt:
+            logger.warning(
+                "KeyboardInterrupt: 保存断点并退出 | category=%s | processed_count=%s | path=%s",
+                category,
+                int(last_completed),
+                checkpoint_file,
+            )
+            try:
+                with open(checkpoint_file, "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "category": category,
+                            "processed_count": int(last_completed),
+                            "results": category_results,
+                            "timestamp": datetime.now().isoformat(),
+                            "completed": False,
+                        },
+                        f,
+                        ensure_ascii=False,
+                    )
+            except Exception:
+                pass
+            raise
         
         all_results[category] = category_results
         print(f"类别 {category} 完成，处理了 {len(category_results)} 张图像")
-        
-        # 清理断点文件
-        if os.path.exists(checkpoint_file):
-            os.remove(checkpoint_file)
+
+        # 标记该类别已完成（与 03 对齐：保留 checkpoint 以便下次直接跳过）
+        try:
+            with open(checkpoint_file, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "category": category,
+                        "processed_count": int(len(image_files)),
+                        "results": category_results,
+                        "timestamp": datetime.now().isoformat(),
+                        "completed": True,
+                    },
+                    f,
+                    ensure_ascii=False,
+                )
+            logger.info(
+                "Checkpoint completed: category=%s, processed=%s, path=%s",
+                category,
+                len(image_files),
+                checkpoint_file,
+            )
+        except Exception:
+            logger.exception("Failed to write completed checkpoint: category=%s", category)
     
     # 保存结果
     output_file = os.path.join(config["output_dir"], "auto_predictions_v3.json")
