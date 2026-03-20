@@ -163,7 +163,7 @@ def main():
         print("  - outputs/feature_banks_v3/feature_bank_v3.pth")
         print("  - outputs/predictions_v3/auto_predictions_v3.json")
         print("  - outputs/predictions_v3/click_predictions_v3.json")
-        print("  - experiments/04_evaluate_and_visualize_v3_report.md")
+        print("  - outputs/visualizations_v3/04_evaluate_and_visualize_v3_report.md")
         print("  - outputs/metrics_v3/clustering_v3.json")
 
 

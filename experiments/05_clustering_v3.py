@@ -200,18 +200,30 @@ def fcm_clustering(X: np.ndarray, n_clusters: int, max_iter: int = 100, m: float
 def compute_clustering_metrics(true_labels: np.ndarray, pred_labels: np.ndarray) -> dict:
     from scipy.optimize import linear_sum_assignment
 
-    n_true = len(np.unique(true_labels))
-    n_pred = len(np.unique(pred_labels))
+    if len(true_labels) == 0:
+        return {"Accuracy": 0.0, "ARI": 0.0, "NMI": 0.0}
 
-    contingency = np.zeros((n_true, n_pred))
-    for i, t in enumerate(true_labels):
-        contingency[int(t), int(pred_labels[i])] += 1
+    true_labels = np.asarray(true_labels)
+    pred_labels = np.asarray(pred_labels)
+
+    true_uniques = np.unique(true_labels)
+    pred_uniques = np.unique(pred_labels)
+
+    true_map = {int(v): i for i, v in enumerate(true_uniques.tolist())}
+    pred_map = {int(v): i for i, v in enumerate(pred_uniques.tolist())}
+
+    n_true = len(true_uniques)
+    n_pred = len(pred_uniques)
+
+    contingency = np.zeros((n_true, n_pred), dtype=np.int64)
+    for t, p in zip(true_labels, pred_labels):
+        contingency[true_map[int(t)], pred_map[int(p)]] += 1
 
     row_ind, col_ind = linear_sum_assignment(-contingency)
-    accuracy = contingency[row_ind, col_ind].sum() / len(true_labels) if len(true_labels) else 0.0
+    accuracy = contingency[row_ind, col_ind].sum() / len(true_labels)
 
-    ari = adjusted_rand_score(true_labels, pred_labels) if len(true_labels) else 0.0
-    nmi = normalized_mutual_info_score(true_labels, pred_labels) if len(true_labels) else 0.0
+    ari = adjusted_rand_score(true_labels, pred_labels)
+    nmi = normalized_mutual_info_score(true_labels, pred_labels)
 
     return {"Accuracy": float(accuracy), "ARI": float(ari), "NMI": float(nmi)}
 
@@ -261,8 +273,7 @@ def main():
         with open(checkpoint_path, "r", encoding="utf-8") as f:
             ckpt = json.load(f)
         if ckpt.get("completed", False):
-            print(f"已完成，跳过：{checkpoint_path}")
-            return
+            print(f"特征提取已完成，继续聚类与指标输出：{checkpoint_path}")
         start_pos = int(ckpt.get("processed_count", 0))
         items = ckpt.get("items", [])
 

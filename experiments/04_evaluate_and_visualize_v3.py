@@ -39,7 +39,7 @@ CONFIG = {
     
     # 分析输出
     'analysis_output': os.path.join(os.path.dirname(os.path.dirname(__file__)), 
-                                   'experiments', '04_evaluate_and_visualize_v3_report.md'),
+                                   'outputs', 'visualizations_v3', '04_evaluate_and_visualize_v3_report.md'),
     
     # 论文基准结果 (Table 2 - Real-world dataset)
     'paper_baseline': {
@@ -526,6 +526,7 @@ def main():
     report = "\n\n".join([p for p in report_parts if p])
     if report:
         print("\n生成分析报告...")
+        os.makedirs(os.path.dirname(CONFIG['analysis_output']), exist_ok=True)
         with open(CONFIG['analysis_output'], 'w', encoding='utf-8') as f:
             f.write(report)
         print(f"分析报告保存至: {CONFIG['analysis_output']}")
