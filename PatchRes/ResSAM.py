@@ -19,6 +19,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from typing import List, Dict, Any, Tuple, Optional
+import logging
 import os
 import time
 from PIL import Image
@@ -546,8 +547,9 @@ class ResSAM:
             image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
         self._fitting_count = 0
-        
+
         profile_enabled = bool(os.environ.get("RES_SAM_PROFILE", "").strip())
+        logger = logging.getLogger(__name__)
         t_profile = {}
         t0 = time.perf_counter() if profile_enabled else 0.0
 
@@ -670,14 +672,17 @@ class ResSAM:
 
         if profile_enabled:
             try:
-                print(
-                    "[PROFILE][click_guided] sam_click=%.3fs collect_patches=%.3fs esn_fit=%.3fs knn_cpu=%.3fs" % (
+                msg = (
+                    "[PROFILE][click_guided] sam_click=%.3fs collect_patches=%.3fs esn_fit=%.3fs knn_cpu=%.3fs"
+                    % (
                         float(t_profile.get("sam_click", 0.0)),
                         float(t_profile.get("collect_patches", 0.0)),
                         float(t_profile.get("esn_fit", 0.0)),
                         float(t_profile.get("knn_cpu", 0.0)),
                     )
                 )
+                print(msg)
+                logger.info(msg)
             except Exception:
                 pass
         
