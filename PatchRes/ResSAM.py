@@ -94,6 +94,7 @@ class ResSAM:
         
         # NearestNeighbors 搜索器 (用于 patch 级别异常分数)
         self.nn_searcher = None
+        self.nn_backend = "sklearn"
         
         # 初始化 SAM
         self.sam = SAMIntegration(
@@ -165,12 +166,43 @@ class ResSAM:
         feature_bank_np = self.feature_bank.detach().cpu().numpy()
         self.anomaly_scorer.fit([feature_bank_np])
         
-        # 构建 NearestNeighbors 搜索器用于 patch 级别异常分数
-        from sklearn.neighbors import NearestNeighbors
-        self.nn_searcher = NearestNeighbors(n_neighbors=1, algorithm='ball_tree', n_jobs=-1)
-        self.nn_searcher.fit(feature_bank_np)
+        self._init_nn_searcher(feature_bank_np)
         
         print(f"Feature Bank loaded: shape={self.feature_bank.shape}")
+
+    def _init_nn_searcher(self, feature_bank_np: np.ndarray):
+        backend = (os.environ.get("RES_SAM_KNN_BACKEND", "sklearn") or "sklearn").strip().lower()
+        if backend not in {"sklearn", "faiss_cpu", "faiss_gpu"}:
+            backend = "sklearn"
+
+        if backend == "sklearn":
+            from sklearn.neighbors import NearestNeighbors
+            self.nn_searcher = NearestNeighbors(n_neighbors=1, algorithm="ball_tree", n_jobs=-1)
+            self.nn_searcher.fit(feature_bank_np)
+            self.nn_backend = "sklearn"
+            return
+
+        try:
+            import faiss
+        except Exception:
+            backend = "sklearn"
+            from sklearn.neighbors import NearestNeighbors
+            self.nn_searcher = NearestNeighbors(n_neighbors=1, algorithm="ball_tree", n_jobs=-1)
+            self.nn_searcher.fit(feature_bank_np)
+            self.nn_backend = "sklearn"
+            return
+
+        xb = np.ascontiguousarray(feature_bank_np.astype(np.float32, copy=False))
+        index = faiss.IndexFlatL2(int(xb.shape[1]))
+        if backend == "faiss_gpu":
+            try:
+                res = faiss.StandardGpuResources()
+                index = faiss.index_cpu_to_gpu(res, 0, index)
+            except Exception:
+                backend = "faiss_cpu"
+        index.add(xb)
+        self.nn_searcher = index
+        self.nn_backend = backend
     
     def save_feature_bank(self, path: str):
         """保存 Feature Bank"""
@@ -226,6 +258,12 @@ class ResSAM:
             self._fitting_count += int(patches_2d.shape[0])
 
         batch_size = 32
+        try:
+            env_bs = os.environ.get("RES_SAM_ESN_BATCH", "").strip()
+            if env_bs:
+                batch_size = max(1, int(env_bs))
+        except Exception:
+            batch_size = 32
         feats = []
         with torch.no_grad():
             for start in range(0, int(patches_2d.shape[0]), batch_size):
@@ -624,11 +662,21 @@ class ResSAM:
 
             # 论文 Eq.(7)-(8)：s(f*) = min_{f in M} L2(f*, f)
             t_nn0 = time.perf_counter() if profile_enabled else 0.0
-            features_np = features.detach().cpu().numpy()
+            # 在 CPU 推理时避免不必要的 .cpu() 拷贝；在 CUDA 推理时仍显式搬运到 CPU。
+            if features.device.type == "cpu":
+                features_np = features.detach().numpy()
+            else:
+                features_np = features.detach().cpu().numpy()
             if self.nn_searcher is None:
                 raise RuntimeError("Feature bank searcher not initialized. Call load_feature_bank() or build_feature_bank() first.")
-            distances, _ = self.nn_searcher.kneighbors(features_np)
-            scores = distances.flatten()
+            if getattr(self, "nn_backend", "sklearn") == "sklearn":
+                distances, _ = self.nn_searcher.kneighbors(features_np)
+                scores = distances.flatten()
+            else:
+                import numpy as _np
+                xq = _np.ascontiguousarray(features_np.astype(_np.float32, copy=False))
+                dists, _ = self.nn_searcher.search(xq, 1)
+                scores = dists.reshape(-1)
 
             if profile_enabled:
                 t_profile["knn_cpu"] = t_profile.get("knn_cpu", 0.0) + (time.perf_counter() - t_nn0)

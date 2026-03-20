@@ -57,7 +57,9 @@ class ESN_2D(torch.nn.Module):
         x: [batch_size]
         state: [batch_size, n_reservoir]
         """
-        x = x.to(device)
+        # 避免在最内层循环里重复触发 .to(device) 的包装/拷贝。
+        if x.device != device:
+            x = x.to(device)
         pre_activation = torch.mm(x.unsqueeze(1), self.W_in) + torch.mm(state1, self.W_res_1) + torch.mm(state2, self.W_res_2)
         state_new = self.activation(pre_activation)
         return state_new
@@ -82,22 +84,31 @@ class ESN_2D(torch.nn.Module):
         batch, length, dim = states.shape
         
         # 增广一列 1 以吸收 bias（论文 Eq.(3) 的 H̃）
-        ones = torch.ones(batch, length, 1, dtype=states.dtype, device=states.device)
+        ones = states.new_ones((batch, length, 1))
         states_aug = torch.cat([states, ones], dim=2)  # [batch, length, dim+1]
         
         targets = targets.unsqueeze(2)  # [batch, length, 1]
         
         # 正则化系数 λ²（论文 Eq.(3) 中为 λ²I）
         dim_aug = dim + 1
-        I = torch.eye(dim_aug, dtype=states.dtype, device=states.device).unsqueeze(0).repeat(batch, 1, 1)
-        I = I * (self.alpha ** 2)  # 论文用 λ²，当前 self.alpha 对应 λ
+        # NOTE: 为避免每次重复分配 eye + repeat，这里缓存 [1, dim_aug, dim_aug] 的单位阵底座。
+        # 仅做广播扩展，不改变数值计算逻辑（仍然是 HtH + λ²I）。
+        if (not hasattr(self, "_ridge_I_base")) or (self._ridge_I_base is None) or (int(self._ridge_I_base.shape[-1]) != int(dim_aug)):
+            self._ridge_I_base = torch.eye(dim_aug, dtype=states.dtype, device=states.device).unsqueeze(0)
+        I = self._ridge_I_base.expand(batch, -1, -1) * (self.alpha ** 2)  # 论文用 λ²
         
         # 岭回归求解 (H̃^T H̃ + λ²I)^{-1} H̃^T U
         HtH = torch.bmm(states_aug.transpose(1, 2), states_aug)
         HtH_plus_lambdaI = HtH + I
-        HtH_plus_lambdaI_inv = torch.inverse(HtH_plus_lambdaI)
         HtU = torch.bmm(states_aug.transpose(1, 2), targets)
-        W_out_with_bias = torch.bmm(HtH_plus_lambdaI_inv, HtU)  # [batch, dim+1, 1]
+
+        solver = (os.environ.get("RES_SAM_RIDGE_SOLVER", "inverse") or "inverse").strip().lower()
+        if solver == "solve":
+            # A @ X = B  -> X = solve(A, B)
+            W_out_with_bias = torch.linalg.solve(HtH_plus_lambdaI, HtU)  # [batch, dim+1, 1]
+        else:
+            HtH_plus_lambdaI_inv = torch.inverse(HtH_plus_lambdaI)
+            W_out_with_bias = torch.bmm(HtH_plus_lambdaI_inv, HtU)  # [batch, dim+1, 1]
         
         # 返回 [W_out, b] 作为特征（论文 Eq.(3) 后的描述）
         # squeeze 后形状为 [batch, dim+1]
@@ -117,10 +128,13 @@ class ESN_2D(torch.nn.Module):
         feature : [batch_size, 2*n_reservoir + 1]
             动态特征 f = [W_out, b]，其中 W_out 维度为 2*n_reservoir，b 为标量
         """
-        input_image = input_image.detach().to(device) # 确保输入图像是一个tensor 且类型统一为torch.float32
+        # 避免每次无条件 detach()/to(device) 触发额外的 tensor 包装/拷贝。
+        # 在 no_grad 推理下不需要 detach；仅在 device/dtype 不匹配时才转换。
+        if input_image.device != device or input_image.dtype != torch.float32:
+            input_image = input_image.to(device=device, dtype=torch.float32)
         batch, height, width = input_image.shape
-        state = torch.zeros((batch, height, width, self.n_reservoir), dtype=torch.float32).to(device)
-        initial_state = torch.zeros((batch, self.n_reservoir), dtype=torch.float32).to(device)
+        state = torch.zeros((batch, height, width, self.n_reservoir), dtype=torch.float32, device=device)
+        initial_state = torch.zeros((batch, self.n_reservoir), dtype=torch.float32, device=device)
 
         state[:, 0, 0, :] = self.update_reservoir(input_image[:, 0, 0], initial_state, initial_state)  # init
         # 先初始化第一行的所有state
