@@ -20,6 +20,7 @@ import numpy as np
 from tqdm import tqdm
 from typing import List, Dict, Any, Tuple, Optional
 import os
+import time
 from PIL import Image
 import cv2
 
@@ -230,6 +231,14 @@ class ResSAM:
                 end = min(start + batch_size, int(patches_2d.shape[0]))
                 feats.append(self.esn.forward(patches_2d[start:end]))
         return torch.cat(feats, dim=0) if feats else torch.zeros((0, 2 * self.hidden_size + 1), dtype=torch.float32)
+
+    def _patch_list_to_tensor(self, patches_list: List[np.ndarray]) -> torch.Tensor:
+        if not patches_list:
+            return torch.zeros((0, 1, int(self.window_size), int(self.window_size)), dtype=torch.float32)
+        arr = np.stack(patches_list, axis=0)
+        if arr.dtype != np.float32:
+            arr = arr.astype(np.float32, copy=False)
+        return torch.from_numpy(arr).unsqueeze(1)
     
     def detect_automatic(
         self,
@@ -538,7 +547,10 @@ class ResSAM:
 
         self._fitting_count = 0
         
-        # Step 1: SAM 基于 click 生成候选区域
+        profile_enabled = bool(os.environ.get("RES_SAM_PROFILE", "").strip())
+        t_profile = {}
+        t0 = time.perf_counter() if profile_enabled else 0.0
+
         print("Step 1: SAM generating regions from clicks...")
         candidate_regions = self.sam.generate_masks_from_clicks(
             image,
@@ -546,6 +558,9 @@ class ResSAM:
             negative_points=negative_points,
             box=box,
         )
+
+        if profile_enabled:
+            t_profile["sam_click"] = time.perf_counter() - t0
         
         print(f"  Found {len(candidate_regions)} candidate regions")
         
@@ -556,6 +571,7 @@ class ResSAM:
         half_win = self.window_size // 2
         
         for region in candidate_regions:
+            t_region0 = time.perf_counter() if profile_enabled else 0.0
             bbox = region['bbox']
             mask = region['mask']
 
@@ -594,15 +610,26 @@ class ResSAM:
             if len(all_patches) == 0:
                 continue
 
-            patches_tensor = torch.tensor(np.array(all_patches), dtype=torch.float32).unsqueeze(1)
+            if profile_enabled:
+                t_profile["collect_patches"] = t_profile.get("collect_patches", 0.0) + (time.perf_counter() - t_region0)
+
+            t_fit0 = time.perf_counter() if profile_enabled else 0.0
+            patches_tensor = self._patch_list_to_tensor(all_patches)
             features = self._fit_patches(patches_tensor)
 
+            if profile_enabled:
+                t_profile["esn_fit"] = t_profile.get("esn_fit", 0.0) + (time.perf_counter() - t_fit0)
+
             # 论文 Eq.(7)-(8)：s(f*) = min_{f in M} L2(f*, f)
+            t_nn0 = time.perf_counter() if profile_enabled else 0.0
             features_np = features.detach().cpu().numpy()
             if self.nn_searcher is None:
                 raise RuntimeError("Feature bank searcher not initialized. Call load_feature_bank() or build_feature_bank() first.")
             distances, _ = self.nn_searcher.kneighbors(features_np)
             scores = distances.flatten()
+
+            if profile_enabled:
+                t_profile["knn_cpu"] = t_profile.get("knn_cpu", 0.0) + (time.perf_counter() - t_nn0)
 
             # 论文 Eq.(9)：s(f*) > β 判为 abnormal
             anomaly_positions = [
@@ -640,6 +667,19 @@ class ResSAM:
             if r['max_anomaly_score'] > self.beta_threshold
         ]
         filtered_regions.sort(key=lambda x: x['max_anomaly_score'], reverse=True)
+
+        if profile_enabled:
+            try:
+                print(
+                    "[PROFILE][click_guided] sam_click=%.3fs collect_patches=%.3fs esn_fit=%.3fs knn_cpu=%.3fs" % (
+                        float(t_profile.get("sam_click", 0.0)),
+                        float(t_profile.get("collect_patches", 0.0)),
+                        float(t_profile.get("esn_fit", 0.0)),
+                        float(t_profile.get("knn_cpu", 0.0)),
+                    )
+                )
+            except Exception:
+                pass
         
         return {
             'anomaly_regions': filtered_regions,
