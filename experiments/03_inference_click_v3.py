@@ -108,7 +108,7 @@ CONFIG = {
         {"name": "3/1", "pos_clicks": 3, "neg_clicks": 1},
     ],
     # 断点
-    "checkpoint_interval": 20,
+    "checkpoint_interval": 100,
     "max_images_per_category": None,
     # 随机种子
     "random_seed": 42,
@@ -493,7 +493,13 @@ def run_click_guided(config: dict):
 
             logger.info(f"Category start: click={cfg_name}, category={category}, num_images={len(image_files)}, start_idx={start_idx}")
 
-            effective_interval = 5
+            effective_interval = int(config.get("checkpoint_interval", 100) or 0)
+            try:
+                env_interval = (os.environ.get("RES_SAM_CHECKPOINT_INTERVAL", "") or "").strip()
+                if env_interval:
+                    effective_interval = int(env_interval)
+            except Exception:
+                effective_interval = effective_interval
 
             annotation_dir = config["annotation_dirs"].get(category, "")
 
