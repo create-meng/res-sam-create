@@ -18,6 +18,8 @@ The data for this project is organized as follows:
 
 This project works well with **python>=3.8** (recommended **python=3.9**).
 
+For Res-SAM V3 experiments, see scripts under `../experiments/`.
+
 Ensure you have the necessary dependencies installed. You can install them using the requirements.txt file:
 
 ``` bash

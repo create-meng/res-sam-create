@@ -137,27 +137,47 @@ class ESN_2D(torch.nn.Module):
         if input_image.device != device or input_image.dtype != torch.float32:
             input_image = input_image.to(device=device, dtype=torch.float32)
         batch, height, width = input_image.shape
-        state = torch.zeros((batch, height, width, self.n_reservoir), dtype=torch.float32, device=device)
         initial_state = torch.zeros((batch, self.n_reservoir), dtype=torch.float32, device=device)
 
-        state[:, 0, 0, :] = self.update_reservoir(input_image[:, 0, 0], initial_state, initial_state)  # init
-        # 先初始化第一行的所有state
-        for t in range(1, width):
-            state[:, 0, t, :] = self.update_reservoir(input_image[:, 0, t], state[:, 0, t-1, :], initial_state)
-        # 每一列，一列一列地算
-        for h in range(1, height):
-            state[:, h, 0, :] = self.update_reservoir(input_image[:, h, 0], initial_state, state[:, h-1, 0, :])
-            for t in range(1, width):
-                state[:, h, t, :] = self.update_reservoir(input_image[:, h, t], state[:, h, t - 1, :], state[:, h-1, t, :])
-        pre_states, targets = [], []
-        for h in range(self.start_node[0], height):
-            for t in range(self.start_node[1], width):
-                new_state = torch.cat([state[:, h, t-1, :], state[:, h-1, t, :]], dim=1).unsqueeze(1) # 2D-ESN公式
-                pre_states.append(new_state)
-                targets.append(input_image[:, h, t].unsqueeze(1))
+        prev_row = torch.zeros((batch, width, self.n_reservoir), dtype=torch.float32, device=device)
+        curr_row = torch.zeros((batch, width, self.n_reservoir), dtype=torch.float32, device=device)
 
-        pre_states = torch.cat(pre_states, dim=1)
-        targets = torch.cat(targets, dim=1)
+        curr_row[:, 0, :] = self.update_reservoir(input_image[:, 0, 0], initial_state, initial_state)  # init
+        for t in range(1, width):
+            curr_row[:, t, :] = self.update_reservoir(input_image[:, 0, t], curr_row[:, t - 1, :], initial_state)
+
+        start_h = int(self.start_node[0])
+        start_t = int(self.start_node[1])
+        pre_states_chunks = []
+        targets_chunks = []
+
+        for h in range(1, height):
+            prev_row, curr_row = curr_row, prev_row
+            curr_row.zero_()
+            curr_row[:, 0, :] = self.update_reservoir(input_image[:, h, 0], initial_state, prev_row[:, 0, :])
+            for t in range(1, width):
+                curr_row[:, t, :] = self.update_reservoir(
+                    input_image[:, h, t],
+                    curr_row[:, t - 1, :],
+                    prev_row[:, t, :],
+                )
+
+            if h >= start_h and start_t < width:
+                if start_t <= 0:
+                    continue
+                left_states = curr_row[:, (start_t - 1):(width - 1), :]
+                up_states = prev_row[:, start_t:width, :]
+                if left_states.shape[1] != up_states.shape[1] or left_states.shape[1] <= 0:
+                    continue
+                pre_states_chunks.append(torch.cat([left_states, up_states], dim=2))
+                targets_chunks.append(input_image[:, h, start_t:width])
+
+        if not pre_states_chunks:
+            pre_states = torch.zeros((batch, 0, 2 * self.n_reservoir), dtype=torch.float32, device=device)
+            targets = torch.zeros((batch, 0), dtype=torch.float32, device=device)
+        else:
+            pre_states = torch.cat(pre_states_chunks, dim=1)
+            targets = torch.cat(targets_chunks, dim=1)
 
         return self.ridge_regression(pre_states, targets)
 
