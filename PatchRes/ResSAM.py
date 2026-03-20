@@ -167,13 +167,30 @@ class ResSAM:
         self.anomaly_scorer.fit([feature_bank_np])
         
         self._init_nn_searcher(feature_bank_np)
+        try:
+            logger = logging.getLogger(__name__)
+            nn_backend = str(getattr(self, "nn_backend", "unknown"))
+            msg = (
+                "[INIT] device=%s nn_backend=%s feature_bank_shape=%s feature_dim=%s"
+                % (
+                    str(getattr(self, "device", "unknown")),
+                    nn_backend,
+                    str(tuple(getattr(self.feature_bank, "shape", ()))),
+                    str(int(feature_bank_np.shape[1]) if (hasattr(feature_bank_np, "shape") and len(feature_bank_np.shape) > 1) else "unknown"),
+                )
+            )
+            print(msg, flush=True)
+            logger.info(msg)
+        except Exception:
+            pass
         
         print(f"Feature Bank loaded: shape={self.feature_bank.shape}")
 
     def _init_nn_searcher(self, feature_bank_np: np.ndarray):
-        backend = (os.environ.get("RES_SAM_KNN_BACKEND", "sklearn") or "sklearn").strip().lower()
-        if backend not in {"sklearn", "faiss_cpu", "faiss_gpu"}:
-            backend = "sklearn"
+        backend_env = (os.environ.get("RES_SAM_KNN_BACKEND", "") or "").strip().lower()
+        backend = backend_env
+        if backend and backend not in {"sklearn", "faiss_cpu", "faiss_gpu"}:
+            backend = ""
 
         if backend == "sklearn":
             from sklearn.neighbors import NearestNeighbors
@@ -181,6 +198,11 @@ class ResSAM:
             self.nn_searcher.fit(feature_bank_np)
             self.nn_backend = "sklearn"
             return
+
+        # Default acceleration: if backend is not explicitly specified, prefer Faiss.
+        # If CUDA is available, try faiss_gpu first then fall back to faiss_cpu/sklearn.
+        if not backend:
+            backend = "faiss_gpu" if (self.device == "cuda" and torch.cuda.is_available()) else "faiss_cpu"
 
         try:
             import faiss
@@ -257,13 +279,14 @@ class ResSAM:
         if hasattr(self, "_fitting_count") and isinstance(self._fitting_count, int):
             self._fitting_count += int(patches_2d.shape[0])
 
-        batch_size = 32
+        # Default batch sizing: larger batch on GPU for throughput; keep CPU default small.
+        batch_size = 128 if (self.device == "cuda" and torch.cuda.is_available()) else 32
         try:
             env_bs = os.environ.get("RES_SAM_ESN_BATCH", "").strip()
             if env_bs:
                 batch_size = max(1, int(env_bs))
         except Exception:
-            batch_size = 32
+            batch_size = batch_size
         feats = []
         with torch.no_grad():
             for start in range(0, int(patches_2d.shape[0]), batch_size):

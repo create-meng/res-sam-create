@@ -115,6 +115,10 @@ CONFIG = {
 }
 
 
+if not (os.environ.get("RES_SAM_PROFILE", "") or "").strip():
+    os.environ["RES_SAM_PROFILE"] = "1"
+
+
 _max_images_env = os.environ.get('MAX_IMAGES_PER_CATEGORY', '').strip()
 if _max_images_env:
     try:

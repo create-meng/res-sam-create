@@ -102,7 +102,11 @@ class ESN_2D(torch.nn.Module):
         HtH_plus_lambdaI = HtH + I
         HtU = torch.bmm(states_aug.transpose(1, 2), targets)
 
-        solver = (os.environ.get("RES_SAM_RIDGE_SOLVER", "inverse") or "inverse").strip().lower()
+        solver_env = (os.environ.get("RES_SAM_RIDGE_SOLVER", "") or "").strip().lower()
+        solver = solver_env
+        if not solver:
+            solver = "solve" if (device.type == "cuda" and torch.cuda.is_available()) else "inverse"
+
         if solver == "solve":
             # A @ X = B  -> X = solve(A, B)
             W_out_with_bias = torch.linalg.solve(HtH_plus_lambdaI, HtU)  # [batch, dim+1, 1]
