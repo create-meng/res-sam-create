@@ -93,6 +93,30 @@ git lfs install
 git lfs pull
 ```
 
+若LFS上传失败导致的无法下载，以下给出解决方案
+```bash
+# 先跳过 LFS smudge，避免 checkout 阶段失败
+export GIT_LFS_SKIP_SMUDGE=1
+
+git clone https://openi.pcl.ac.cn/create-meng/res-sam.git
+cd res-sam
+
+# 拉取除该权重以外的其它 LFS 对象（数据集等）
+git lfs pull --exclude="sam/sam_vit_b_01ec64.pth"
+```
+
+然后单独下载权重到 `sam/` 目录（官方地址）：
+
+```bash
+# Linux/macOS
+curl -L -o sam/sam_vit_b_01ec64.pth https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
+```
+
+```powershell
+# Windows PowerShell
+Invoke-WebRequest -Uri https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth -OutFile sam\sam_vit_b_01ec64.pth
+```
+
 校验权重文件大小应为几百 MB（不是几 KB 的 LFS 指针文件）：
 
 ```bash
