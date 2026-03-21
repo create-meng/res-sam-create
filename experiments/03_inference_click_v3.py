@@ -29,6 +29,21 @@ from tqdm import tqdm
 from PIL import Image
 
 
+def _require_segment_anything() -> None:
+    try:
+        import importlib
+
+        importlib.import_module("segment_anything")
+    except Exception:
+        print(
+            "ERROR: segment-anything 未安装，无法运行 Res-SAM 推理。\n"
+            "请先安装：pip install segment-anything\n"
+            "或从 https://github.com/facebookresearch/segment-anything 安装。",
+            flush=True,
+        )
+        raise SystemExit(1)
+
+
 CONFIG = {
     # Feature Bank 路径（V3）
     "feature_bank_path": os.path.join(
@@ -708,6 +723,7 @@ def run_click_guided(config: dict):
 
 
 if __name__ == "__main__":
+    _require_segment_anything()
     np.random.seed(CONFIG["random_seed"])
     random.seed(CONFIG["random_seed"])
     torch.manual_seed(CONFIG["random_seed"])

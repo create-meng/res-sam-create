@@ -14,4 +14,4 @@ opencv-python
 faiss-cpu
 
 
-git+https://github.com/facebookresearch/segment-anything.git
+segment-anything @ git+https://github.com/facebookresearch/segment-anything.git

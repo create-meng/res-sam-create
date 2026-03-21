@@ -29,15 +29,19 @@ from PIL import Image
 import cv2
 
 
-class _RunIdFilter(logging.Filter):
-    def __init__(self, run_id: str):
-        super().__init__()
-        self._run_id = run_id
+def _require_segment_anything() -> None:
+    try:
+        import importlib
 
-    def filter(self, record: logging.LogRecord) -> bool:
-        if not hasattr(record, "run_id"):
-            record.run_id = self._run_id
-        return True
+        importlib.import_module("segment_anything")
+    except Exception:
+        print(
+            "ERROR: segment-anything 未安装，无法运行 Res-SAM 推理。\n"
+            "请先安装：pip install segment-anything\n"
+            "或从 https://github.com/facebookresearch/segment-anything 安装。",
+            flush=True,
+        )
+        raise SystemExit(1)
 
 
 # ============ 配置 ============
@@ -669,6 +673,18 @@ def run_inference(config: dict):
     return all_results
 
 
+class _RunIdFilter(logging.Filter):
+    def __init__(self, run_id: str):
+        super().__init__()
+        self._run_id = run_id
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "run_id"):
+            record.run_id = self._run_id
+        return True
+
+
 if __name__ == "__main__":
+    _require_segment_anything()
     with torch.no_grad():
         results = run_inference(CONFIG)
