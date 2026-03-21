@@ -99,6 +99,8 @@ CONFIG = {
     "sam_checkpoint": os.path.join(
         os.path.dirname(os.path.dirname(__file__)), "sam", "sam_vit_b_01ec64.pth"
     ),
+
+    "device": "auto",
     # 图像预处理
     "image_size": (369, 369),
     # click 配置（Table 1 的 5/5、5/3、3/1）
@@ -404,6 +406,7 @@ def run_click_guided(config: dict):
         region_coarse_threshold=config.get("beta_threshold", config["region_coarse_threshold"]),
         sam_model_type=config["sam_model_type"],
         sam_checkpoint=config["sam_checkpoint"],
+        device=config.get("device", "cuda"),
     )
     model.load_feature_bank(config["feature_bank_path"])
 

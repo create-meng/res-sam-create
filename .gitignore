@@ -71,6 +71,7 @@ log.txt
 
 # Archive (legacy outputs are artifacts; do not track)
 archive/legacy_outputs/
+archive/outputs_v3*/
 
 # Media
 *.mp4

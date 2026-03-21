@@ -67,7 +67,7 @@ class ResSAM:
         region_coarse_threshold: float = 0.5,  # 论文 Eq.(9) 要求单一 β 阈值，与 anomaly_threshold 保持一致
         sam_model_type: str = "vit_b",
         sam_checkpoint: str = None,
-        device: str = "cuda",
+        device: str = "auto",
     ):
         self.hidden_size = hidden_size
         self.window_size = window_size
@@ -78,15 +78,27 @@ class ResSAM:
         self.beta_threshold = float(anomaly_threshold)
         self.anomaly_threshold = self.beta_threshold
         self.region_coarse_threshold = self.beta_threshold
-        self.device = device if torch.cuda.is_available() else "cpu"
+        _device_in = (device if device is not None else "").strip().lower() if isinstance(device, str) else device
+        if _device_in in {"", None, "auto"}:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        elif _device_in in {"cuda", "cpu"}:
+            self.device = str(_device_in)
+        else:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # 初始化 2D-ESN
+        try:
+            _esn_device = torch.device(self.device)
+        except Exception:
+            _esn_device = torch.device("cpu")
+
         self.esn = ESN_2D(
             input_dim=1,
             n_reservoir=hidden_size,
             alpha=5,
             spectral_radius=(spectral_radius, spectral_radius),
             connectivity=connectivity,
+            device_override=_esn_device,
         )
         
         # 初始化异常评分器
@@ -106,7 +118,71 @@ class ResSAM:
         # Feature Bank
         self.feature_bank = None
         self.feature_bank_source = None  # 记录来源
-    
+
+        self._beta_calibrated = False
+
+    def _calibrate_beta_threshold(self, feature_bank_np: np.ndarray) -> float:
+        logger = logging.getLogger(__name__)
+
+        if feature_bank_np is None or (not hasattr(feature_bank_np, "shape")) or len(feature_bank_np.shape) != 2:
+            raise ValueError("Invalid feature bank array for beta calibration")
+        if int(feature_bank_np.shape[0]) < 3:
+            raise ValueError("Feature bank too small for beta calibration")
+
+        quantile = 0.995
+
+        k = 2
+        nn_dists = None
+
+        try:
+            import faiss  # type: ignore
+
+            xb = np.ascontiguousarray(feature_bank_np.astype(np.float32, copy=False))
+            index = faiss.IndexFlatL2(int(xb.shape[1]))
+            index.add(xb)
+            dists, _ = index.search(xb, k)
+            nn_dists = np.sqrt(np.maximum(dists[:, 1], 0.0))
+        except Exception:
+            try:
+                from sklearn.neighbors import NearestNeighbors
+
+                nn = NearestNeighbors(n_neighbors=k, algorithm="ball_tree", n_jobs=-1)
+                nn.fit(feature_bank_np)
+                dists, _ = nn.kneighbors(feature_bank_np, n_neighbors=k)
+                nn_dists = dists[:, 1]
+            except Exception as e:
+                raise RuntimeError(f"Failed to calibrate beta threshold: {e}")
+
+        nn_dists = np.asarray(nn_dists, dtype=np.float64)
+        nn_dists = nn_dists[np.isfinite(nn_dists)]
+        if nn_dists.size == 0:
+            raise RuntimeError("Beta calibration failed: empty nearest-neighbour distance distribution")
+
+        beta = float(np.quantile(nn_dists, quantile))
+        if not np.isfinite(beta):
+            raise RuntimeError("Beta calibration failed: non-finite beta")
+
+        self.beta_threshold = beta
+        self.anomaly_threshold = beta
+        self.region_coarse_threshold = beta
+        self._beta_calibrated = True
+
+        try:
+            logger.info(
+                "[BETA] calibrated beta_threshold=%s quantile=%s nn_dist_stats={min:%s,p50:%s,p90:%s,p99:%s,max:%s}",
+                beta,
+                quantile,
+                float(np.min(nn_dists)),
+                float(np.quantile(nn_dists, 0.5)),
+                float(np.quantile(nn_dists, 0.9)),
+                float(np.quantile(nn_dists, 0.99)),
+                float(np.max(nn_dists)),
+            )
+        except Exception:
+            pass
+
+        return beta
+
     def build_feature_bank(
         self,
         normal_images: np.ndarray,
@@ -153,11 +229,13 @@ class ResSAM:
         # torch.Tensor 需要转换为 numpy 以便 np.concatenate
         feature_bank_np = self.feature_bank.detach().cpu().numpy()
         self.anomaly_scorer.fit([feature_bank_np])
+
+        self._init_nn_searcher(feature_bank_np)
         
         print(f"Feature Bank built: shape={self.feature_bank.shape}, source={source_info}")
         
         return self.feature_bank
-    
+
     def load_feature_bank(self, path: str):
         """加载预存的 Feature Bank"""
         # 显式指定 map_location，避免 feature bank 在保存时绑定到 CUDA，导致 CPU 环境加载失败。
@@ -165,7 +243,7 @@ class ResSAM:
         # NearestNeighbourScorer.fit 期望 List[np.ndarray]
         feature_bank_np = self.feature_bank.detach().cpu().numpy()
         self.anomaly_scorer.fit([feature_bank_np])
-        
+         
         self._init_nn_searcher(feature_bank_np)
         try:
             logger = logging.getLogger(__name__)
@@ -246,17 +324,24 @@ class ResSAM:
             patches [num_patches, 1, window_size, window_size]
         """
         h, w = image.shape
-        patches = []
-        
-        for i in range(0, h - self.window_size + 1, self.stride):
-            for j in range(0, w - self.window_size + 1, self.stride):
-                patch = image[i:i+self.window_size, j:j+self.window_size]
-                patches.append(patch)
-        
-        # 转换为 tensor [N, 1, H, W]
-        patches_tensor = torch.tensor(np.array(patches), dtype=torch.float32).unsqueeze(1)
-        
-        return patches_tensor
+        win = int(self.window_size)
+        stride = int(self.stride)
+
+        if h < win or w < win:
+            return torch.zeros((0, 1, win, win), dtype=torch.float32)
+
+        try:
+            view = np.lib.stride_tricks.sliding_window_view(image, (win, win))
+            patches_np = view[::stride, ::stride].reshape(-1, win, win)
+        except Exception:
+            patches = []
+            for i in range(0, h - win + 1, stride):
+                for j in range(0, w - win + 1, stride):
+                    patches.append(image[i : i + win, j : j + win])
+            patches_np = np.asarray(patches)
+
+        patches_np = np.ascontiguousarray(patches_np, dtype=np.float32)
+        return torch.from_numpy(patches_np).unsqueeze(1)
     
     def _fit_patches(self, patches: torch.Tensor) -> torch.Tensor:
         """
@@ -276,6 +361,10 @@ class ResSAM:
         # ESN_2D.forward 期望输入 [batch_size, height, width]
         # 需要去掉 channel 维度
         patches_2d = patches.squeeze(1)  # [num_patches, window_size, window_size]
+        if self.device == "cuda" and torch.cuda.is_available() and patches_2d.device.type != "cuda":
+            patches_2d = patches_2d.to(device="cuda", dtype=torch.float32)
+        elif self.device == "cpu" and patches_2d.device.type != "cpu":
+            patches_2d = patches_2d.to(device="cpu", dtype=torch.float32)
         if hasattr(self, "_fitting_count") and isinstance(self._fitting_count, int):
             self._fitting_count += int(patches_2d.shape[0])
 
@@ -435,10 +524,18 @@ class ResSAM:
                 raise RuntimeError(
                     "Feature bank searcher not initialized. Call load_feature_bank() or build_feature_bank() first."
                 )
-            distances, _ = self.nn_searcher.kneighbors(features_np)
+            if getattr(self, "nn_backend", "sklearn") == "sklearn":
+                distances, _ = self.nn_searcher.kneighbors(features_np)
+                d0 = float(distances.flatten()[0])
+            else:
+                import numpy as _np
 
-            region_max_score = float(distances.flatten()[0])
-            region_mean_score = float(distances.flatten()[0])
+                xq = _np.ascontiguousarray(features_np.astype(_np.float32, copy=False))
+                dists, _ = self.nn_searcher.search(xq, 1)
+                d0 = float(_np.sqrt(max(float(dists.reshape(-1)[0]), 0.0)))
+
+            region_max_score = d0
+            region_mean_score = d0
             
             # 粗筛阈值：保留异常分数高于阈值的 region
             if region_max_score > self.beta_threshold:
@@ -520,8 +617,15 @@ class ResSAM:
                 raise RuntimeError(
                     "Feature bank searcher not initialized. Call load_feature_bank() or build_feature_bank() first."
                 )
-            distances, _ = self.nn_searcher.kneighbors(features_np)
-            scores = distances.flatten()
+            if getattr(self, "nn_backend", "sklearn") == "sklearn":
+                distances, _ = self.nn_searcher.kneighbors(features_np)
+                scores = distances.flatten()
+            else:
+                import numpy as _np
+
+                xq = _np.ascontiguousarray(features_np.astype(_np.float32, copy=False))
+                dists, _ = self.nn_searcher.search(xq, 1)
+                scores = _np.sqrt(_np.maximum(dists.reshape(-1), 0.0))
             
             # 更新进度条
             region_iter.set_postfix({
@@ -648,27 +752,50 @@ class ResSAM:
             all_patches = []
             patch_positions = []
 
-            for y in range(y1 + half_win, y2 - half_win, self.stride):
-                for x in range(x1 + half_win, x2 - half_win, self.stride):
-                    if mask is not None:
+            if mask is None:
+                win = int(self.window_size)
+                stride = int(self.stride)
+                y_centers = np.arange(y1 + half_win, y2 - half_win, stride, dtype=np.int32)
+                x_centers = np.arange(x1 + half_win, x2 - half_win, stride, dtype=np.int32)
+                if y_centers.size > 0 and x_centers.size > 0:
+                    y_tops = (y_centers - half_win).astype(np.int32)
+                    x_lefts = (x_centers - half_win).astype(np.int32)
+
+                    valid_y = (y_tops >= 0) & ((y_tops + win) <= img_h)
+                    valid_x = (x_lefts >= 0) & ((x_lefts + win) <= img_w)
+                    y_tops = y_tops[valid_y]
+                    x_lefts = x_lefts[valid_x]
+                    y_centers = y_centers[valid_y]
+                    x_centers = x_centers[valid_x]
+
+                    if y_tops.size > 0 and x_lefts.size > 0:
+                        view = np.lib.stride_tricks.sliding_window_view(image, (win, win))
+                        patches_grid = view[np.ix_(y_tops, x_lefts)]
+                        all_patches = patches_grid.reshape(-1, win, win).tolist()
+
+                        xx, yy = np.meshgrid(x_centers, y_centers)
+                        patch_positions = list(zip(xx.reshape(-1).tolist(), yy.reshape(-1).tolist()))
+            else:
+                for y in range(y1 + half_win, y2 - half_win, self.stride):
+                    for x in range(x1 + half_win, x2 - half_win, self.stride):
                         try:
                             if not bool(mask[y, x]):
                                 continue
                         except Exception:
                             pass
 
-                    patch_y1 = y - half_win
-                    patch_y2 = y + half_win
-                    patch_x1 = x - half_win
-                    patch_x2 = x + half_win
+                        patch_y1 = y - half_win
+                        patch_y2 = y + half_win
+                        patch_x1 = x - half_win
+                        patch_x2 = x + half_win
 
-                    if patch_y1 < 0 or patch_y2 > img_h or patch_x1 < 0 or patch_x2 > img_w:
-                        continue
+                        if patch_y1 < 0 or patch_y2 > img_h or patch_x1 < 0 or patch_x2 > img_w:
+                            continue
 
-                    patch = image[patch_y1:patch_y2, patch_x1:patch_x2]
-                    if patch.shape == (self.window_size, self.window_size):
-                        all_patches.append(patch)
-                        patch_positions.append((x, y))
+                        patch = image[patch_y1:patch_y2, patch_x1:patch_x2]
+                        if patch.shape == (self.window_size, self.window_size):
+                            all_patches.append(patch)
+                            patch_positions.append((x, y))
 
             if len(all_patches) == 0:
                 continue
@@ -699,7 +826,7 @@ class ResSAM:
                 import numpy as _np
                 xq = _np.ascontiguousarray(features_np.astype(_np.float32, copy=False))
                 dists, _ = self.nn_searcher.search(xq, 1)
-                scores = dists.reshape(-1)
+                scores = _np.sqrt(_np.maximum(dists.reshape(-1), 0.0))
 
             if profile_enabled:
                 t_profile["knn_cpu"] = t_profile.get("knn_cpu", 0.0) + (time.perf_counter() - t_nn0)

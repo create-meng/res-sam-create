@@ -93,9 +93,9 @@ CONFIG = {
     "window_size": 50,  # 论文默认值
     "stride": 5,
     "hidden_size": 30,
-    "beta_threshold": 0.5,  # 论文 Eq.(9) 的单一预设阈值 β
-    "anomaly_threshold": 0.5,  # 兼容旧字段：内部与 beta_threshold 保持一致
-    "region_coarse_threshold": 0.5,  # 兼容旧字段：内部与 beta_threshold 保持一致
+    "beta_threshold": 0.2,  # 论文 Eq.(9) 的单一预设阈值 β
+    "anomaly_threshold": 0.2,  # 兼容旧字段：内部与 beta_threshold 保持一致
+    "region_coarse_threshold": 0.2,  # 兼容旧字段：内部与 beta_threshold 保持一致
     
     # SAM 参数
     "sam_model_type": "vit_b",
@@ -103,6 +103,7 @@ CONFIG = {
         os.path.dirname(os.path.dirname(__file__)), 
         "sam", "sam_vit_b_01ec64.pth"
     ),
+    "device": "auto",
     
     # 图像预处理
     "image_size": (369, 369),
@@ -184,14 +185,16 @@ def compute_iou(box1: list, box2: list) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def load_image(path: str, size: tuple = None) -> np.ndarray:
-    """加载并预处理图像"""
-    img = Image.open(path).convert('L')
-    if size:
-        img = img.resize((size[1], size[0]), Image.BILINEAR)
-    img_array = np.array(img, dtype=np.float32)
-    img_array = (img_array - img_array.mean()) / (img_array.std() + 1e-8)
-    return img_array
+def load_image_with_orig_size(path: str, size: tuple) -> tuple:
+    """加载图像并返回 (orig_w, orig_h, img_array)"""
+    with Image.open(path) as im:
+        orig_w, orig_h = im.size
+        im_l = im.convert('L')
+        if size:
+            im_l = im_l.resize((size[1], size[0]), Image.BILINEAR)
+        img_array = np.array(im_l, dtype=np.float32)
+        img_array = (img_array - img_array.mean()) / (img_array.std() + 1e-8)
+    return orig_w, orig_h, img_array
 
 
 def run_inference(config: dict):
@@ -271,11 +274,25 @@ def run_inference(config: dict):
         region_coarse_threshold=config.get("beta_threshold", config["region_coarse_threshold"]),
         sam_model_type=config["sam_model_type"],
         sam_checkpoint=config["sam_checkpoint"],
+        device=config.get("device", "auto"),
     )
     
     # 加载 Feature Bank
     print(f"加载 Feature Bank: {config['feature_bank_path']}")
     model.load_feature_bank(config["feature_bank_path"])
+
+    try:
+        config["beta_threshold"] = float(config.get("beta_threshold", 0.2))
+        config["anomaly_threshold"] = float(config["beta_threshold"])
+        config["region_coarse_threshold"] = float(config["beta_threshold"])
+    except Exception:
+        pass
+
+    print(f"最终 beta_threshold = {config.get('beta_threshold')}")
+    try:
+        logger.info("Calibrated beta_threshold=%s", config.get("beta_threshold"))
+    except Exception:
+        pass
     
     # 加载 Feature Bank 元数据
     metadata = {}
@@ -324,6 +341,10 @@ def run_inference(config: dict):
         category_results = []
         last_completed = 0
         legacy_processed_files = set()
+
+        category_success = 0
+        category_failed = 0
+        fail_reasons = {}
 
         if os.path.exists(checkpoint_file):
             with open(checkpoint_file, "r", encoding="utf-8") as f:
@@ -377,12 +398,7 @@ def run_inference(config: dict):
                 xml_path = os.path.join(annotation_dir, xml_file) if annotation_dir else None
                 
                 try:
-                    # 读取原图尺寸（用于将预测 bbox 从 resize 坐标系缩放回原图坐标系，避免评估/可视化口径漂移）
-                    with Image.open(img_path) as _im:
-                        orig_w, orig_h = _im.size
-
-                    # 加载图像
-                    img = load_image(img_path, config["image_size"])
+                    orig_w, orig_h, img = load_image_with_orig_size(img_path, config["image_size"])
                     
                     # 推理（V3 detect_automatic 包含 region 级粗筛）
                     result = model.detect_automatic(
@@ -458,29 +474,27 @@ def run_inference(config: dict):
                             'exclude_from_det_metrics': False,
                             'exclude_from_auc': False,
                         })
-                    
                     else:
                         _has_gt = False
                         _num_gt = 0
-                        
-                        # normal_auc 类别：无 GT，仅用于 AUC 计算
+
                         if category == "normal_auc":
                             record.update({
                                 "gt_bboxes": [],
                                 "num_gt": 0,
-                                "exclude_from_det_metrics": True,  # 不计入 TP/FP/FN
-                                "exclude_from_auc": False,  # 参与 ROC/AUC
+                                "exclude_from_det_metrics": True,
+                                "exclude_from_auc": False,
                             })
                         else:
-                            # 其他类别但无标注：完全排除
                             record.update({
                                 "gt_bboxes": [],
                                 "num_gt": 0,
                                 "exclude_from_det_metrics": True,
                                 "exclude_from_auc": True,
                             })
-                    
+
                     category_results.append(record)
+                    category_success += 1
 
                     logger.info(
                         "image=%s | category=%s | num_pred=%s | scores=%s | num_candidates=%s | num_coarse_discarded=%s | num_esn_fits=%s | has_gt=%s | exclude_det=%s | exclude_auc=%s",
@@ -495,8 +509,7 @@ def run_inference(config: dict):
                         record.get("exclude_from_det_metrics", None),
                         record.get("exclude_from_auc", None),
                     )
-                    
-                    # 更新断点
+
                     last_completed = i + 1
                     if effective_interval > 0 and (last_completed % effective_interval == 0):
                         logger.info(
@@ -505,23 +518,41 @@ def run_inference(config: dict):
                             last_completed,
                             checkpoint_file,
                         )
-                        with open(checkpoint_file, "w", encoding="utf-8") as f:
-                            json.dump(
-                                {
-                                    "category": category,
-                                    "processed_count": int(last_completed),
-                                    "results": category_results,
-                                    "timestamp": datetime.now().isoformat(),
-                                    "completed": False,
-                                },
-                                f,
-                                ensure_ascii=False,
-                            )
-                    
+                        try:
+                            with open(checkpoint_file, "w", encoding="utf-8") as f:
+                                json.dump(
+                                    {
+                                        "category": category,
+                                        "processed_count": int(last_completed),
+                                        "results": category_results,
+                                        "timestamp": datetime.now().isoformat(),
+                                        "completed": False,
+                                    },
+                                    f,
+                                    ensure_ascii=False,
+                                )
+                        except Exception:
+                            logger.exception("Failed to write checkpoint: category=%s", category)
+
                 except Exception as e:
+                    category_failed += 1
+                    reason = "unknown"
+                    try:
+                        err_s = str(e)
+                        err_s_low = err_s.lower()
+                        if "segment_anything" in err_s or "segment-anything" in err_s:
+                            reason = "missing_segment_anything"
+                        elif "cannot identify image file" in err_s_low or "unidentifiedimageerror" in err_s_low:
+                            reason = "image_open_failed"
+                        elif "no such file" in err_s_low or "not found" in err_s_low:
+                            reason = "file_not_found"
+                    except Exception:
+                        reason = "unknown"
+                    fail_reasons[reason] = int(fail_reasons.get(reason, 0)) + 1
                     print(f"处理图像 {img_file} 时出错: {e}")
                     logger.exception("Error processing image=%s | category=%s", img_file, category)
                     continue
+
         except KeyboardInterrupt:
             logger.warning(
                 "KeyboardInterrupt: 保存断点并退出 | category=%s | processed_count=%s | path=%s",
@@ -549,24 +580,46 @@ def run_inference(config: dict):
         all_results[category] = category_results
         print(f"类别 {category} 完成，处理了 {len(category_results)} 张图像")
 
+        try:
+            logger.info(
+                "Category summary: category=%s, total=%s, success=%s, failed=%s, fail_reasons=%s",
+                category,
+                len(image_files),
+                int(category_success),
+                int(category_failed),
+                dict(fail_reasons),
+            )
+        except Exception:
+            pass
+
         # 标记该类别已完成（与 03 对齐：保留 checkpoint 以便下次直接跳过）
         try:
+            completed_ok = True
+            if int(category_success) == 0 and int(category_failed) > 0:
+                completed_ok = False
             with open(checkpoint_file, "w", encoding="utf-8") as f:
                 json.dump(
                     {
                         "category": category,
-                        "processed_count": int(len(image_files)),
+                        "processed_count": int(last_completed),
                         "results": category_results,
                         "timestamp": datetime.now().isoformat(),
-                        "completed": True,
+                        "completed": bool(completed_ok),
+                        "summary": {
+                            "total": int(len(image_files)),
+                            "success": int(category_success),
+                            "failed": int(category_failed),
+                            "fail_reasons": dict(fail_reasons),
+                        },
                     },
                     f,
                     ensure_ascii=False,
                 )
             logger.info(
-                "Checkpoint completed: category=%s, processed=%s, path=%s",
+                "Checkpoint write: category=%s, processed=%s, completed=%s, path=%s",
                 category,
-                len(image_files),
+                int(last_completed),
+                bool(completed_ok),
                 checkpoint_file,
             )
         except Exception:
@@ -588,7 +641,7 @@ def run_inference(config: dict):
             "window_size": int(config.get("window_size", 50)),
             "stride": int(config.get("stride", 5)),
             "hidden_size": int(config.get("hidden_size", 30)),
-            "beta_threshold": float(config.get("beta_threshold", config.get("anomaly_threshold", 0.5))),
+            "beta_threshold": float(config.get("beta_threshold", config.get("anomaly_threshold", 0.2))),
         },
         "results": all_results,
     }

@@ -19,8 +19,9 @@ torch.cuda.manual_seed_all(seed)
 
 class ESN_2D(torch.nn.Module):
     def __init__(self, input_dim=1, n_reservoir=100, spectral_radius=(0.9, 0.9), alpha=5,
-                 connectivity=0.1, noise_level=1e-4, start_node=(1, 1), activation=torch.tanh):
+                 connectivity=0.1, noise_level=1e-4, start_node=(1, 1), activation=torch.tanh, device_override=None):
         super(ESN_2D, self).__init__()
+        self._device = device_override if device_override is not None else device
         self.n_reservoir = n_reservoir  # Number of reservoir neurons
         self.spectral_radius = spectral_radius  # Spectral radius for the reservoir
         self.alpha = alpha  # Ridge regression coefficient
@@ -47,9 +48,9 @@ class ESN_2D(torch.nn.Module):
         W_res_2 *= self.spectral_radius[1] / rho_W_res
 
         # Convert weights to PyTorch tensors
-        self.W_in = torch.nn.Parameter(torch.from_numpy(W_in).float(), requires_grad=False).to(device)
-        self.W_res_1 = torch.nn.Parameter(torch.from_numpy(W_res_1).float(), requires_grad=False).to(device)
-        self.W_res_2 = torch.nn.Parameter(torch.from_numpy(W_res_2).float(), requires_grad=False).to(device)
+        self.W_in = torch.nn.Parameter(torch.from_numpy(W_in).float(), requires_grad=False).to(self._device)
+        self.W_res_1 = torch.nn.Parameter(torch.from_numpy(W_res_1).float(), requires_grad=False).to(self._device)
+        self.W_res_2 = torch.nn.Parameter(torch.from_numpy(W_res_2).float(), requires_grad=False).to(self._device)
 
     # 更新水库状态
     def update_reservoir(self, x, state1, state2):
@@ -58,8 +59,8 @@ class ESN_2D(torch.nn.Module):
         state: [batch_size, n_reservoir]
         """
         # 避免在最内层循环里重复触发 .to(device) 的包装/拷贝。
-        if x.device != device:
-            x = x.to(device)
+        if x.device != self._device:
+            x = x.to(self._device)
         pre_activation = torch.mm(x.unsqueeze(1), self.W_in) + torch.mm(state1, self.W_res_1) + torch.mm(state2, self.W_res_2)
         state_new = self.activation(pre_activation)
         return state_new
@@ -105,7 +106,7 @@ class ESN_2D(torch.nn.Module):
         solver_env = (os.environ.get("RES_SAM_RIDGE_SOLVER", "") or "").strip().lower()
         solver = solver_env
         if not solver:
-            solver = "solve" if (device.type == "cuda" and torch.cuda.is_available()) else "inverse"
+            solver = "solve" if (self._device.type == "cuda" and torch.cuda.is_available()) else "inverse"
 
         if solver == "solve":
             # A @ X = B  -> X = solve(A, B)
@@ -134,13 +135,13 @@ class ESN_2D(torch.nn.Module):
         """
         # 避免每次无条件 detach()/to(device) 触发额外的 tensor 包装/拷贝。
         # 在 no_grad 推理下不需要 detach；仅在 device/dtype 不匹配时才转换。
-        if input_image.device != device or input_image.dtype != torch.float32:
-            input_image = input_image.to(device=device, dtype=torch.float32)
+        if input_image.device != self._device or input_image.dtype != torch.float32:
+            input_image = input_image.to(device=self._device, dtype=torch.float32)
         batch, height, width = input_image.shape
-        initial_state = torch.zeros((batch, self.n_reservoir), dtype=torch.float32, device=device)
+        initial_state = torch.zeros((batch, self.n_reservoir), dtype=torch.float32, device=self._device)
 
-        prev_row = torch.zeros((batch, width, self.n_reservoir), dtype=torch.float32, device=device)
-        curr_row = torch.zeros((batch, width, self.n_reservoir), dtype=torch.float32, device=device)
+        prev_row = torch.zeros((batch, width, self.n_reservoir), dtype=torch.float32, device=self._device)
+        curr_row = torch.zeros((batch, width, self.n_reservoir), dtype=torch.float32, device=self._device)
 
         curr_row[:, 0, :] = self.update_reservoir(input_image[:, 0, 0], initial_state, initial_state)  # init
         for t in range(1, width):
@@ -173,8 +174,8 @@ class ESN_2D(torch.nn.Module):
                 targets_chunks.append(input_image[:, h, start_t:width])
 
         if not pre_states_chunks:
-            pre_states = torch.zeros((batch, 0, 2 * self.n_reservoir), dtype=torch.float32, device=device)
-            targets = torch.zeros((batch, 0), dtype=torch.float32, device=device)
+            pre_states = torch.zeros((batch, 0, 2 * self.n_reservoir), dtype=torch.float32, device=self._device)
+            targets = torch.zeros((batch, 0), dtype=torch.float32, device=self._device)
         else:
             pre_states = torch.cat(pre_states_chunks, dim=1)
             targets = torch.cat(targets_chunks, dim=1)

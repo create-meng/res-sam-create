@@ -47,6 +47,8 @@ CONFIG = {
     
     # 图像预处理 - 使用论文原始尺寸
     'image_size': (369, 369),
+
+    'device': 'auto',
     
     # 随机种子
     'random_seed': 42,
@@ -184,6 +186,7 @@ def build_feature_bank(config: dict, resume: bool = True):
         stride=config['stride'],
         anomaly_threshold=config.get('beta_threshold', config.get('anomaly_threshold', 0.5)),  # Feature Bank 构建阶段不使用，仅保持口径一致
         region_coarse_threshold=config.get('beta_threshold', config.get('region_coarse_threshold', 0.5)),  # Feature Bank 构建阶段不使用，仅保持口径一致
+        device=config.get('device', 'cuda'),
     )
     
     # 处理每个数据来源
