@@ -17,7 +17,9 @@ import random
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+sys.path.insert(0, BASE_DIR)
 
 import numpy as np
 import torch
@@ -31,7 +33,7 @@ import cv2
 CONFIG = {
     # V3 推理结果（final bboxes）
     "predictions_path": os.path.join(
-        os.path.dirname(os.path.dirname(__file__)),
+        BASE_DIR,
         "outputs",
         "predictions_v3",
         "auto_predictions_v3.json",
@@ -39,13 +41,13 @@ CONFIG = {
     # 数据目录（open-source annotated 子集，按复现范围锁定）
     "test_data_dirs": {
         "cavities": os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
+            BASE_DIR,
             "data",
             "GPR_data",
             "augmented_cavities",
         ),
         "utilities": os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
+            BASE_DIR,
             "data",
             "GPR_data",
             "augmented_utilities",
@@ -54,7 +56,7 @@ CONFIG = {
     # VOC 标注（用于真实类别标签）
     "annotation_dirs": {
         "cavities": os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
+            BASE_DIR,
             "data",
             "GPR_data",
             "augmented_cavities",
@@ -62,7 +64,7 @@ CONFIG = {
             "VOC_XML_format",
         ),
         "utilities": os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
+            BASE_DIR,
             "data",
             "GPR_data",
             "augmented_utilities",
@@ -81,14 +83,14 @@ CONFIG = {
     "n_clusters": 2,
     # 输出
     "output_dir": os.path.join(
-        os.path.dirname(os.path.dirname(__file__)),
+        BASE_DIR,
         "outputs",
         "metrics_v3",
     ),
     "output_file": "clustering_v3.json",
     # 断点
     "checkpoint_dir": os.path.join(
-        os.path.dirname(os.path.dirname(__file__)),
+        BASE_DIR,
         "outputs",
         "checkpoints_v3",
     ),
@@ -96,6 +98,22 @@ CONFIG = {
     # 随机种子
     "random_seed": 42,
 }
+
+
+def _to_abs(base_dir: str, p: str) -> str:
+    if not p:
+        return p
+    if os.path.isabs(p):
+        return p
+
+    base_name = os.path.basename(base_dir)
+    p_norm = os.path.normpath(p.replace("/", os.sep))
+    if p_norm.startswith("." + os.sep):
+        p_norm = p_norm[2:]
+    if p_norm == base_name or p_norm.startswith(base_name + os.sep):
+        p_norm = p_norm[len(base_name) + 1 :]
+
+    return os.path.abspath(os.path.join(base_dir, p_norm))
 
 
 def parse_voc_xml(xml_path: str):
@@ -229,6 +247,14 @@ def compute_clustering_metrics(true_labels: np.ndarray, pred_labels: np.ndarray)
 
 
 def main():
+    global CONFIG
+    CONFIG = dict(CONFIG)
+    CONFIG["predictions_path"] = _to_abs(BASE_DIR, CONFIG.get("predictions_path", ""))
+    CONFIG["output_dir"] = _to_abs(BASE_DIR, CONFIG.get("output_dir", ""))
+    CONFIG["checkpoint_dir"] = _to_abs(BASE_DIR, CONFIG.get("checkpoint_dir", ""))
+    CONFIG["test_data_dirs"] = {k: _to_abs(BASE_DIR, v) for k, v in CONFIG.get("test_data_dirs", {}).items()}
+    CONFIG["annotation_dirs"] = {k: _to_abs(BASE_DIR, v) for k, v in CONFIG.get("annotation_dirs", {}).items()}
+
     np.random.seed(CONFIG["random_seed"])
     random.seed(CONFIG["random_seed"])
     torch.manual_seed(CONFIG["random_seed"])

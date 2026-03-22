@@ -132,6 +132,14 @@ python 02_inference_auto_v3.py
 python 04_evaluate_and_visualize_v3.py
 ```
 
+说明：V3 实验脚本已统一按仓库根目录解析关键路径（Feature Bank / outputs / checkpoints / sam 权重等），因此可从任意工作目录运行；若习惯从仓库根目录启动，也可直接：`python experiments/02_inference_auto_v3.py`。
+
+KNN 后端（用于 Feature Bank 1-NN 检索）默认策略：
+
+- **Windows/CPU**：默认使用 `sklearn`（避免 faiss 的 DLL 依赖问题）。
+- **Linux/GPU**：未显式指定时默认优先尝试 `faiss_gpu`（失败自动回退 `faiss_cpu` / `sklearn`）。
+- 可用环境变量强制指定：`RES_SAM_KNN_BACKEND=sklearn|faiss_cpu|faiss_gpu`。
+
 Windows（或不手动 activate 环境）可用：
 
 ```bash

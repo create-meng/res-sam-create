@@ -17,7 +17,8 @@ import random
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE_DIR)
 
 import numpy as np
 import torch
@@ -28,13 +29,13 @@ CONFIG = {
     # 数据目录（open-source annotated 子集）
     "test_data_dirs": {
         "cavities": os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
+            BASE_DIR,
             "data",
             "GPR_data",
             "augmented_cavities",
         ),
         "utilities": os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
+            BASE_DIR,
             "data",
             "GPR_data",
             "augmented_utilities",
@@ -51,27 +52,27 @@ CONFIG = {
     # SAM 配置
     "sam_model_type": "vit_b",
     "sam_checkpoint": os.path.join(
-        os.path.dirname(os.path.dirname(__file__)),
+        BASE_DIR,
         "sam",
         "sam_vit_b_01ec64.pth",
     ),
     # Feature Bank
     "feature_bank_path": os.path.join(
-        os.path.dirname(os.path.dirname(__file__)),
+        BASE_DIR,
         "outputs",
         "feature_banks_v3",
         "feature_bank_v3.pth",
     ),
     # 输出
     "output_dir": os.path.join(
-        os.path.dirname(os.path.dirname(__file__)),
+        BASE_DIR,
         "outputs",
         "metrics_v3",
     ),
     "output_file": "ablation_wo_sam_v3.json",
     # 断点
     "checkpoint_dir": os.path.join(
-        os.path.dirname(os.path.dirname(__file__)),
+        BASE_DIR,
         "outputs",
         "checkpoints_v3",
     ),
@@ -85,6 +86,22 @@ CONFIG = {
     "min_region_area": 100,
     "max_candidates_per_image": 10,
 }
+
+
+def _to_abs(base_dir: str, p: str) -> str:
+    if not p:
+        return p
+    if os.path.isabs(p):
+        return p
+
+    base_name = os.path.basename(base_dir)
+    p_norm = os.path.normpath(p.replace("/", os.sep))
+    if p_norm.startswith("." + os.sep):
+        p_norm = p_norm[2:]
+    if p_norm == base_name or p_norm.startswith(base_name + os.sep):
+        p_norm = p_norm[len(base_name) + 1:]
+
+    return os.path.abspath(os.path.join(base_dir, p_norm))
 
 
 _max_images_env = os.environ.get('MAX_IMAGES_PER_CATEGORY', '').strip()
@@ -241,6 +258,14 @@ def count_patches_with_sam(
 
 
 def main():
+    global CONFIG
+    CONFIG = dict(CONFIG)
+    CONFIG["sam_checkpoint"] = _to_abs(BASE_DIR, CONFIG.get("sam_checkpoint", ""))
+    CONFIG["feature_bank_path"] = _to_abs(BASE_DIR, CONFIG.get("feature_bank_path", ""))
+    CONFIG["output_dir"] = _to_abs(BASE_DIR, CONFIG.get("output_dir", ""))
+    CONFIG["checkpoint_dir"] = _to_abs(BASE_DIR, CONFIG.get("checkpoint_dir", ""))
+    CONFIG["test_data_dirs"] = {k: _to_abs(BASE_DIR, v) for k, v in CONFIG.get("test_data_dirs", {}).items()}
+ 
     np.random.seed(CONFIG["random_seed"])
     random.seed(CONFIG["random_seed"])
     torch.manual_seed(CONFIG["random_seed"])

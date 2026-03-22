@@ -21,6 +21,7 @@ from tqdm import tqdm
 from typing import List, Dict, Any, Tuple, Optional
 import logging
 import os
+import sys
 import time
 from PIL import Image
 import cv2
@@ -241,7 +242,7 @@ class ResSAM:
         # 显式指定 map_location，避免 feature bank 在保存时绑定到 CUDA，导致 CPU 环境加载失败。
         self.feature_bank = torch.load(path, map_location=self.device)
         # NearestNeighbourScorer.fit 期望 List[np.ndarray]
-        feature_bank_np = self.feature_bank.detach().cpu().numpy()
+        feature_bank_np = np.ascontiguousarray(self.feature_bank.detach().cpu().numpy(), dtype=np.float32)
         self.anomaly_scorer.fit([feature_bank_np])
          
         self._init_nn_searcher(feature_bank_np)
@@ -272,8 +273,9 @@ class ResSAM:
 
         if backend == "sklearn":
             from sklearn.neighbors import NearestNeighbors
-            self.nn_searcher = NearestNeighbors(n_neighbors=1, algorithm="ball_tree", n_jobs=-1)
-            self.nn_searcher.fit(feature_bank_np)
+            xb = np.ascontiguousarray(feature_bank_np, dtype=np.float32)
+            self.nn_searcher = NearestNeighbors(n_neighbors=1, algorithm="brute", n_jobs=1)
+            self.nn_searcher.fit(xb)
             self.nn_backend = "sklearn"
             return
 
@@ -282,13 +284,22 @@ class ResSAM:
         if not backend:
             backend = "faiss_gpu" if (self.device == "cuda" and torch.cuda.is_available()) else "faiss_cpu"
 
+        if backend == "sklearn":
+            from sklearn.neighbors import NearestNeighbors
+            xb = np.ascontiguousarray(feature_bank_np, dtype=np.float32)
+            self.nn_searcher = NearestNeighbors(n_neighbors=1, algorithm="brute", n_jobs=1)
+            self.nn_searcher.fit(xb)
+            self.nn_backend = "sklearn"
+            return
+
         try:
             import faiss
         except Exception:
             backend = "sklearn"
             from sklearn.neighbors import NearestNeighbors
-            self.nn_searcher = NearestNeighbors(n_neighbors=1, algorithm="ball_tree", n_jobs=-1)
-            self.nn_searcher.fit(feature_bank_np)
+            xb = np.ascontiguousarray(feature_bank_np, dtype=np.float32)
+            self.nn_searcher = NearestNeighbors(n_neighbors=1, algorithm="brute", n_jobs=1)
+            self.nn_searcher.fit(xb)
             self.nn_backend = "sklearn"
             return
 

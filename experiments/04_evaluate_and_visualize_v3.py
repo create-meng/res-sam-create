@@ -15,7 +15,9 @@ import os
 import json
 from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+sys.path.insert(0, BASE_DIR)
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -26,20 +28,35 @@ from PIL import Image
 # ============ 配置 ============
 CONFIG = {
     # 结果路径 (V3)
-    'predictions_path': os.path.join(os.path.dirname(os.path.dirname(__file__)), 
-                                     'outputs', 'predictions_v3', 'auto_predictions_v3.json'),
+    'predictions_path': os.path.join(
+        BASE_DIR,
+        'outputs',
+        'predictions_v3',
+        'auto_predictions_v3.json',
+    ),
 
     # Click-guided 结果路径 (V3 / Table 1)
-    'click_predictions_path': os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                                           'outputs', 'predictions_v3', 'click_predictions_v3.json'),
+    'click_predictions_path': os.path.join(
+        BASE_DIR,
+        'outputs',
+        'predictions_v3',
+        'click_predictions_v3.json',
+    ),
     
     # 可视化输出
-    'vis_output_dir': os.path.join(os.path.dirname(os.path.dirname(__file__)), 
-                                   'outputs', 'visualizations_v3'),
+    'vis_output_dir': os.path.join(
+        BASE_DIR,
+        'outputs',
+        'visualizations_v3',
+    ),
     
     # 分析输出
-    'analysis_output': os.path.join(os.path.dirname(os.path.dirname(__file__)), 
-                                   'outputs', 'visualizations_v3', '04_evaluate_and_visualize_v3_report.md'),
+    'analysis_output': os.path.join(
+        BASE_DIR,
+        'outputs',
+        'visualizations_v3',
+        '04_evaluate_and_visualize_v3_report.md',
+    ),
     
     # 论文基准结果 (Table 2 - Real-world dataset)
     'paper_baseline': {
@@ -53,6 +70,22 @@ CONFIG = {
     'version': 'V3',
     'alignment_notes': 'Strictly aligned with paper: window_size=50, region-level coarse filtering, feature f=[W_out,b]',
 }
+
+
+def _to_abs(base_dir: str, p: str) -> str:
+    if not p:
+        return p
+    if os.path.isabs(p):
+        return p
+
+    base_name = os.path.basename(base_dir)
+    p_norm = os.path.normpath(p.replace("/", os.sep))
+    if p_norm.startswith("." + os.sep):
+        p_norm = p_norm[2:]
+    if p_norm == base_name or p_norm.startswith(base_name + os.sep):
+        p_norm = p_norm[len(base_name) + 1 :]
+
+    return os.path.abspath(os.path.join(base_dir, p_norm))
 
 
 def _compute_iou(box1: list, box2: list) -> float:
@@ -537,4 +570,9 @@ def main():
 
 
 if __name__ == "__main__":
+    CONFIG = dict(CONFIG)
+    CONFIG['predictions_path'] = _to_abs(BASE_DIR, CONFIG.get('predictions_path', ''))
+    CONFIG['click_predictions_path'] = _to_abs(BASE_DIR, CONFIG.get('click_predictions_path', ''))
+    CONFIG['vis_output_dir'] = _to_abs(BASE_DIR, CONFIG.get('vis_output_dir', ''))
+    CONFIG['analysis_output'] = _to_abs(BASE_DIR, CONFIG.get('analysis_output', ''))
     main()

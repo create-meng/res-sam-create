@@ -19,7 +19,9 @@ import json
 import hashlib
 from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+sys.path.insert(0, BASE_DIR)
 
 import torch
 import numpy as np
@@ -30,12 +32,10 @@ from PIL import Image
 CONFIG = {
     # 数据路径 - 支持多个来源
     'normal_data_sources': {
-        'intact': os.path.join(os.path.dirname(os.path.dirname(__file__)), 
-                               'data', 'GPR_data', 'intact'),
+        'intact': os.path.join(BASE_DIR, 'data', 'GPR_data', 'intact'),
     },
     
-    'output_dir': os.path.join(os.path.dirname(os.path.dirname(__file__)), 
-                               'outputs', 'feature_banks_v3'),
+    'output_dir': os.path.join(BASE_DIR, 'outputs', 'feature_banks_v3'),
     'output_file': 'feature_bank_v3.pth',
     'metadata_file': 'metadata.json',
     
@@ -60,6 +60,22 @@ CONFIG = {
     'version': 'V3',
     'alignment_notes': 'Strictly aligned with paper: window_size=50, feature f=[W_out,b]',
 }
+
+
+def _to_abs(base_dir: str, p: str) -> str:
+    if not p:
+        return p
+    if os.path.isabs(p):
+        return p
+
+    base_name = os.path.basename(base_dir)
+    p_norm = os.path.normpath(p.replace("/", os.sep))
+    if p_norm.startswith("." + os.sep):
+        p_norm = p_norm[2:]
+    if p_norm == base_name or p_norm.startswith(base_name + os.sep):
+        p_norm = p_norm[len(base_name) + 1 :]
+
+    return os.path.abspath(os.path.join(base_dir, p_norm))
 
 
 def get_image_hash(path: str) -> str:
@@ -307,5 +323,8 @@ def build_feature_bank(config: dict, resume: bool = True):
 
 
 if __name__ == "__main__":
+    CONFIG = dict(CONFIG)
+    CONFIG['output_dir'] = _to_abs(BASE_DIR, CONFIG.get('output_dir', ''))
+    CONFIG['normal_data_sources'] = {k: _to_abs(BASE_DIR, v) for k, v in CONFIG.get('normal_data_sources', {}).items()}
     with torch.no_grad():
         feature_bank = build_feature_bank(CONFIG)

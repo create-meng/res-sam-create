@@ -20,7 +20,9 @@ import uuid
 import logging
 from logging.handlers import RotatingFileHandler
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+sys.path.insert(0, BASE_DIR)
 
 import torch
 import numpy as np
@@ -44,55 +46,57 @@ def _require_segment_anything() -> None:
         raise SystemExit(1)
 
 
+def _to_abs(base_dir: str, p: str) -> str:
+    if not p:
+        return p
+    if os.path.isabs(p):
+        return p
+
+    base_name = os.path.basename(base_dir)
+    p_norm = os.path.normpath(p.replace("/", os.sep))
+    if p_norm.startswith("." + os.sep):
+        p_norm = p_norm[2:]
+    if p_norm == base_name or p_norm.startswith(base_name + os.sep):
+        p_norm = p_norm[len(base_name) + 1 :]
+
+    return os.path.abspath(os.path.join(base_dir, p_norm))
+
+
 # ============ 配置 ============
 CONFIG = {
     # Feature Bank 路径 (V3)
     "feature_bank_path": os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), 
-        "outputs", "feature_banks_v3", "feature_bank_v3.pth"
+        BASE_DIR, "outputs", "feature_banks_v3", "feature_bank_v3.pth"
     ),
     "metadata_path": os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), 
-        "outputs", "feature_banks_v3", "metadata.json"
+        BASE_DIR, "outputs", "feature_banks_v3", "metadata.json"
     ),
-    
     # 测试数据
     "test_data_dirs": {
         "cavities": os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), 
-            "data", "GPR_data", "augmented_cavities"
+            BASE_DIR, "data", "GPR_data", "augmented_cavities"
         ),
         "utilities": os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), 
-            "data", "GPR_data", "augmented_utilities"
+            BASE_DIR, "data", "GPR_data", "augmented_utilities"
         ),
         "normal_auc": os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), 
-            "data", "GPR_data", "intact"
+            BASE_DIR, "data", "GPR_data", "intact"
         ),
     },
     "annotation_dirs": {
         "cavities": os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), 
-            "data", "GPR_data", "augmented_cavities", 
-            "annotations", "VOC_XML_format"
+            BASE_DIR, "data", "GPR_data", "augmented_cavities", "annotations", "VOC_XML_format"
         ),
         "utilities": os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), 
-            "data", "GPR_data", "augmented_utilities", 
-            "annotations", "VOC_XML_format"
+            BASE_DIR, "data", "GPR_data", "augmented_utilities", "annotations", "VOC_XML_format"
         ),
     },
-    
     "output_dir": os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), 
-        "outputs", "predictions_v3"
+        BASE_DIR, "outputs", "predictions_v3"
     ),
     "checkpoint_dir": os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), 
-        "outputs", "checkpoints_v3"
+        BASE_DIR, "outputs", "checkpoints_v3"
     ),
-    
     # 论文参数（V3 严格对齐）
     "window_size": 50,  # 论文默认值
     "stride": 5,
@@ -100,29 +104,22 @@ CONFIG = {
     "beta_threshold": 0.2,  # 论文 Eq.(9) 的单一预设阈值 β
     "anomaly_threshold": 0.2,  # 兼容旧字段：内部与 beta_threshold 保持一致
     "region_coarse_threshold": 0.2,  # 兼容旧字段：内部与 beta_threshold 保持一致
-    
     # SAM 参数
     "sam_model_type": "vit_b",
     "sam_checkpoint": os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), 
-        "sam", "sam_vit_b_01ec64.pth"
+        BASE_DIR, "sam", "sam_vit_b_01ec64.pth"
     ),
     "device": "auto",
-    
     # 图像预处理
     "image_size": (369, 369),
-    
     # 推理参数
     "max_candidates_per_image": 10,
     "min_region_area": 100,
     "max_images_per_category": None,
-    
     # 断点
     "checkpoint_interval": 20,
-    
     # 随机种子
     "random_seed": 42,
-    
     # 版本标识
     "version": "V3",
     "alignment_notes": "Strictly aligned with paper: window_size=50, region-level coarse filtering, feature f=[W_out,b]",
@@ -145,27 +142,23 @@ def parse_voc_xml(xml_path: str) -> dict:
     try:
         tree = ET.parse(xml_path)
         root = tree.getroot()
-        
         # 图像信息
-        size = root.find('size')
-        width = int(size.find('width').text)
-        height = int(size.find('height').text)
-        
+        size = root.find("size")
+        width = int(size.find("width").text)
+        height = int(size.find("height").text)
         # 边界框
         bboxes = []
-        for obj in root.findall('object'):
-            bbox = obj.find('bndbox')
-            xmin = int(bbox.find('xmin').text)
-            ymin = int(bbox.find('ymin').text)
-            xmax = int(bbox.find('xmax').text)
-            ymax = int(bbox.find('ymax').text)
-            
+        for obj in root.findall("object"):
+            bbox = obj.find("bndbox")
+            xmin = int(bbox.find("xmin").text)
+            ymin = int(bbox.find("ymin").text)
+            xmax = int(bbox.find("xmax").text)
+            ymax = int(bbox.find("ymax").text)
             bboxes.append([xmin, ymin, xmax, ymax])
-        
         return {
-            'width': width,
-            'height': height,
-            'bboxes': bboxes,
+            "width": width,
+            "height": height,
+            "bboxes": bboxes,
         }
     except Exception as e:
         print(f"Error parsing XML {xml_path}: {e}")
@@ -193,7 +186,7 @@ def load_image_with_orig_size(path: str, size: tuple) -> tuple:
     """加载图像并返回 (orig_w, orig_h, img_array)"""
     with Image.open(path) as im:
         orig_w, orig_h = im.size
-        im_l = im.convert('L')
+        im_l = im.convert("L")
         if size:
             im_l = im_l.resize((size[1], size[0]), Image.BILINEAR)
         img_array = np.array(im_l, dtype=np.float32)
@@ -256,15 +249,30 @@ def run_inference(config: dict):
         config.get("beta_threshold"),
         config.get("image_size"),
     )
-    
+
+    config = dict(config)
+    config["feature_bank_path"] = _to_abs(base_dir, config.get("feature_bank_path", ""))
+    config["metadata_path"] = _to_abs(base_dir, config.get("metadata_path", ""))
+    config["output_dir"] = _to_abs(base_dir, config.get("output_dir", ""))
+    config["checkpoint_dir"] = _to_abs(base_dir, config.get("checkpoint_dir", ""))
+    config["sam_checkpoint"] = _to_abs(base_dir, config.get("sam_checkpoint", ""))
+    config["test_data_dirs"] = {k: _to_abs(base_dir, v) for k, v in config.get("test_data_dirs", {}).items()}
+    config["annotation_dirs"] = {k: _to_abs(base_dir, v) for k, v in config.get("annotation_dirs", {}).items()}
+
+    if not os.path.exists(config["feature_bank_path"]):
+        raise FileNotFoundError(
+            f"Feature bank not found: {config['feature_bank_path']}\n"
+            "Please run 01_build_feature_bank_v3.py first."
+        )
+
     # 创建输出目录
     os.makedirs(config["output_dir"], exist_ok=True)
     os.makedirs(config["checkpoint_dir"], exist_ok=True)
-    
+
     # 设置随机种子
     np.random.seed(config["random_seed"])
     torch.manual_seed(config["random_seed"])
-    
+
     # 导入 ResSAM
     from PatchRes.ResSAM import ResSAM
     
