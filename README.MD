@@ -48,6 +48,18 @@ pip install -r requirements-cpu.txt
 pip install -r requirements-gpu.txt
 ```
 
+国内镜像（可选，用于加速下载；不改变版本口径）：
+
+```bash
+# 临时指定镜像（示例：清华 PyPI）
+pip install -r requirements-gpu.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+说明：
+
+- `requirements-gpu.txt` 已固定使用 PyTorch 官方 CUDA wheels 索引（`--index-url https://download.pytorch.org/whl/cu118`），并保留官方 PyPI 作为兜底。
+- 若你需要使用国内 PyPI 镜像加速，本仓库也已将其写入 `--extra-index-url`，保证 **torch/torchvision/torchaudio** 仍从 PyTorch 官方索引获取。
+
 如果你遇到 pip 的 `hash mismatch`（例如 `nvidia-cudnn-cu11` 的 sha256 不一致），通常是第三方镜像/缓存导致：
 
 - 建议使用官方源（本仓库 `requirements-gpu.txt` 已默认使用 PyTorch 官方 cu118 index + 官方 PyPI）。
