@@ -55,6 +55,20 @@ pip install -r requirements-gpu.txt
 pip install -r requirements-gpu.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
+若你在云平台/国内环境下载 PyTorch CUDA wheels 很慢（`torch-2.3.1+cu118` 等从 `download.pytorch.org` 下载缓慢），可改为使用“PyTorch wheels 镜像”作为 `--index-url`（示例：南京大学镜像；安装的包版本与本仓库固定口径一致）：
+
+```bash
+pip install "torch==2.3.1+cu118" "torchvision==0.18.1+cu118" "torchaudio==2.3.1+cu118" \
+  --index-url https://mirrors.nju.edu.cn/pytorch/whl/cu118 \
+  --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+  --extra-index-url https://pypi.org/simple
+
+# 然后安装本仓库其余依赖（避免重复解析 torch 相关依赖）
+pip install -r requirements-gpu.txt --no-deps
+```
+
+说明：部分镜像站仅提供 wheels 列表页（`-f/--find-links`）且可能不包含带本地版本号的 `+cu118` 包名，出现 `No matching distribution found for torch==...+cu118` 时建议优先使用上述 `--index-url .../cu118` 形式。
+
 说明：
 
 - `requirements-gpu.txt` 已固定使用 PyTorch 官方 CUDA wheels 索引（`--index-url https://download.pytorch.org/whl/cu118`），并保留官方 PyPI 作为兜底。
