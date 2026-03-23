@@ -373,14 +373,24 @@ class ResSAM:
         # 需要去掉 channel 维度
         patches_2d = patches.squeeze(1)  # [num_patches, window_size, window_size]
         if self.device == "cuda" and torch.cuda.is_available() and patches_2d.device.type != "cuda":
-            patches_2d = patches_2d.to(device="cuda", dtype=torch.float32)
+            patches_2d = patches_2d.to(device="cuda", dtype=torch.float32, non_blocking=True)
         elif self.device == "cpu" and patches_2d.device.type != "cpu":
             patches_2d = patches_2d.to(device="cpu", dtype=torch.float32)
         if hasattr(self, "_fitting_count") and isinstance(self._fitting_count, int):
             self._fitting_count += int(patches_2d.shape[0])
 
         # Default batch sizing: larger batch on GPU for throughput; keep CPU default small.
-        batch_size = 128 if (self.device == "cuda" and torch.cuda.is_available()) else 32
+        batch_size = 32
+        if self.device == "cuda" and torch.cuda.is_available():
+            batch_size = 128
+            try:
+                total_mem_gb = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory / (1024 ** 3)
+                if total_mem_gb >= 14:
+                    batch_size = 512
+                elif total_mem_gb >= 10:
+                    batch_size = 256
+            except Exception:
+                batch_size = 128
         try:
             env_bs = os.environ.get("RES_SAM_ESN_BATCH", "").strip()
             if env_bs:
@@ -397,10 +407,62 @@ class ResSAM:
     def _patch_list_to_tensor(self, patches_list: List[np.ndarray]) -> torch.Tensor:
         if not patches_list:
             return torch.zeros((0, 1, int(self.window_size), int(self.window_size)), dtype=torch.float32)
-        arr = np.stack(patches_list, axis=0)
+        if isinstance(patches_list, np.ndarray):
+            arr = patches_list
+        else:
+            arr = np.stack(patches_list, axis=0)
         if arr.dtype != np.float32:
             arr = arr.astype(np.float32, copy=False)
         return torch.from_numpy(arr).unsqueeze(1)
+
+    def _collect_click_candidate_patches(
+        self,
+        image: np.ndarray,
+        bbox: List[int],
+        mask: Optional[np.ndarray],
+    ) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
+        img_h, img_w = image.shape
+        win = int(self.window_size)
+        stride = int(self.stride)
+        half_win = win // 2
+        x1, y1, x2, y2 = bbox
+
+        if (x2 - x1) < win or (y2 - y1) < win:
+            return np.zeros((0, win, win), dtype=np.float32), []
+
+        y_centers = np.arange(y1 + half_win, y2 - half_win, stride, dtype=np.int32)
+        x_centers = np.arange(x1 + half_win, x2 - half_win, stride, dtype=np.int32)
+        if y_centers.size == 0 or x_centers.size == 0:
+            return np.zeros((0, win, win), dtype=np.float32), []
+
+        yy, xx = np.meshgrid(y_centers, x_centers, indexing="ij")
+        yy = yy.reshape(-1)
+        xx = xx.reshape(-1)
+        y_tops = yy - half_win
+        x_lefts = xx - half_win
+
+        valid = (
+            (y_tops >= 0)
+            & ((y_tops + win) <= img_h)
+            & (x_lefts >= 0)
+            & ((x_lefts + win) <= img_w)
+        )
+        if mask is not None:
+            mask_bool = np.asarray(mask, dtype=bool)
+            valid &= mask_bool[yy, xx]
+
+        if not np.any(valid):
+            return np.zeros((0, win, win), dtype=np.float32), []
+
+        y_tops = y_tops[valid]
+        x_lefts = x_lefts[valid]
+        yy = yy[valid]
+        xx = xx[valid]
+
+        view = np.lib.stride_tricks.sliding_window_view(image, (win, win))
+        patches_np = np.ascontiguousarray(view[y_tops, x_lefts], dtype=np.float32)
+        patch_positions = list(zip(xx.tolist(), yy.tolist()))
+        return patches_np, patch_positions
     
     def detect_automatic(
         self,
@@ -588,8 +650,7 @@ class ResSAM:
             x1, y1, x2, y2 = bbox
             
             # 收集 region 内所有 patches（密集采样）
-            all_patches = []
-            patch_positions = []
+            patches_np, patch_positions = self._collect_click_candidate_patches(image, bbox, mask)
             
             for y in range(y1 + half_win, y2 - half_win, self.stride):
                 for x in range(x1 + half_win, x2 - half_win, self.stride):
@@ -698,6 +759,7 @@ class ResSAM:
         positive_points: List[Tuple[int, int]] = None,
         negative_points: List[Tuple[int, int]] = None,
         box: List[int] = None,
+        image_already_prepared: bool = False,
     ) -> Dict[str, Any]:
         """
         Click-guided 模式异常检测
@@ -729,18 +791,22 @@ class ResSAM:
         t_profile = {}
         t0 = time.perf_counter() if profile_enabled else 0.0
 
-        print("Step 1: SAM generating regions from clicks...")
+        verbose_click = bool(os.environ.get("RES_SAM_VERBOSE_CLICK", "").strip())
+        if verbose_click:
+            print("Step 1: SAM generating regions from clicks...")
         candidate_regions = self.sam.generate_masks_from_clicks(
             image,
             positive_points=positive_points,
             negative_points=negative_points,
             box=box,
+            image_already_prepared=image_already_prepared,
         )
 
         if profile_enabled:
             t_profile["sam_click"] = time.perf_counter() - t0
         
-        print(f"  Found {len(candidate_regions)} candidate regions")
+        if verbose_click:
+            print(f"  Found {len(candidate_regions)} candidate regions")
         
         # Step 2: 分析候选区域
         anomaly_regions = []
@@ -763,59 +829,14 @@ class ResSAM:
             all_patches = []
             patch_positions = []
 
-            if mask is None:
-                win = int(self.window_size)
-                stride = int(self.stride)
-                y_centers = np.arange(y1 + half_win, y2 - half_win, stride, dtype=np.int32)
-                x_centers = np.arange(x1 + half_win, x2 - half_win, stride, dtype=np.int32)
-                if y_centers.size > 0 and x_centers.size > 0:
-                    y_tops = (y_centers - half_win).astype(np.int32)
-                    x_lefts = (x_centers - half_win).astype(np.int32)
-
-                    valid_y = (y_tops >= 0) & ((y_tops + win) <= img_h)
-                    valid_x = (x_lefts >= 0) & ((x_lefts + win) <= img_w)
-                    y_tops = y_tops[valid_y]
-                    x_lefts = x_lefts[valid_x]
-                    y_centers = y_centers[valid_y]
-                    x_centers = x_centers[valid_x]
-
-                    if y_tops.size > 0 and x_lefts.size > 0:
-                        view = np.lib.stride_tricks.sliding_window_view(image, (win, win))
-                        patches_grid = view[np.ix_(y_tops, x_lefts)]
-                        all_patches = patches_grid.reshape(-1, win, win).tolist()
-
-                        xx, yy = np.meshgrid(x_centers, y_centers)
-                        patch_positions = list(zip(xx.reshape(-1).tolist(), yy.reshape(-1).tolist()))
-            else:
-                for y in range(y1 + half_win, y2 - half_win, self.stride):
-                    for x in range(x1 + half_win, x2 - half_win, self.stride):
-                        try:
-                            if not bool(mask[y, x]):
-                                continue
-                        except Exception:
-                            pass
-
-                        patch_y1 = y - half_win
-                        patch_y2 = y + half_win
-                        patch_x1 = x - half_win
-                        patch_x2 = x + half_win
-
-                        if patch_y1 < 0 or patch_y2 > img_h or patch_x1 < 0 or patch_x2 > img_w:
-                            continue
-
-                        patch = image[patch_y1:patch_y2, patch_x1:patch_x2]
-                        if patch.shape == (self.window_size, self.window_size):
-                            all_patches.append(patch)
-                            patch_positions.append((x, y))
-
-            if len(all_patches) == 0:
+            if patches_np.shape[0] == 0:
                 continue
 
             if profile_enabled:
                 t_profile["collect_patches"] = t_profile.get("collect_patches", 0.0) + (time.perf_counter() - t_region0)
 
             t_fit0 = time.perf_counter() if profile_enabled else 0.0
-            patches_tensor = self._patch_list_to_tensor(all_patches)
+            patches_tensor = self._patch_list_to_tensor(patches_np)
             features = self._fit_patches(patches_tensor)
 
             if profile_enabled:

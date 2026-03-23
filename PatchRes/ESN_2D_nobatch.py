@@ -106,7 +106,7 @@ class ESN_2D(torch.nn.Module):
         solver_env = (os.environ.get("RES_SAM_RIDGE_SOLVER", "") or "").strip().lower()
         solver = solver_env
         if not solver:
-            solver = "solve" if (self._device.type == "cuda" and torch.cuda.is_available()) else "inverse"
+            solver = "solve"
 
         if solver == "solve":
             # A @ X = B  -> X = solve(A, B)
@@ -203,4 +203,3 @@ def normalize(image, normpr):
     std = np.std(image) * normpr
     normalized_image = (image - np.mean(image, axis=0)) / std   # (image - np.min(image))  / (np.max(image) - np.min(image))
     return normalized_image
-

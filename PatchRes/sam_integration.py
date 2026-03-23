@@ -16,6 +16,9 @@ import numpy as np
 from PIL import Image
 from typing import List, Tuple, Optional, Dict, Any
 import cv2
+import os
+import hashlib
+from collections import OrderedDict
 
 
 def _to_uint8_gray(image: np.ndarray) -> np.ndarray:
@@ -82,6 +85,9 @@ class SAMIntegration:
         self._sam = None
         self._predictor = None
         self._mask_generator = None
+        self._prepared_image_ref = None
+        self._prepared_image_key = None
+        self._image_embedding_cache = OrderedDict()
     
     def _load_sam(self):
         """延迟加载 SAM 模型"""
@@ -232,6 +238,7 @@ class SAMIntegration:
         positive_points: List[Tuple[int, int]] = None,
         negative_points: List[Tuple[int, int]] = None,
         box: List[int] = None,
+        image_already_prepared: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         基于 click 提示生成 mask (Click-guided 模式)
@@ -258,7 +265,7 @@ class SAMIntegration:
         image = _to_uint8_rgb(image)
         
         # 设置图像
-        self._predictor.set_image(image)
+        self.prepare_image(image, force=not image_already_prepared)
         
         # 准备输入
         point_coords = None
@@ -311,6 +318,62 @@ class SAMIntegration:
         candidate_regions.sort(key=lambda x: x['score'], reverse=True)
         
         return candidate_regions
+
+    def prepare_image(self, image: np.ndarray, force: bool = False) -> np.ndarray:
+        self._load_sam()
+        image_rgb = _to_uint8_rgb(image)
+        cache_key = self._make_image_cache_key(image_rgb)
+        if (not force) and (self._prepared_image_key == cache_key):
+            return image_rgb
+
+        cached_state = None if force else self._image_embedding_cache.get(cache_key)
+        if cached_state is not None:
+            self._restore_predictor_state(cached_state)
+        else:
+            self._predictor.set_image(image_rgb)
+            self._store_predictor_state(cache_key)
+        self._prepared_image_ref = image_rgb
+        self._prepared_image_key = cache_key
+        return image_rgb
+
+    def clear_prepared_image(self) -> None:
+        self._prepared_image_ref = None
+        self._prepared_image_key = None
+
+    def _make_image_cache_key(self, image_rgb: np.ndarray) -> str:
+        contiguous = np.ascontiguousarray(image_rgb)
+        digest = hashlib.blake2b(contiguous.view(np.uint8), digest_size=16).hexdigest()
+        return f"{contiguous.shape}|{contiguous.dtype}|{digest}"
+
+    def _cache_capacity(self) -> int:
+        try:
+            env_value = int((os.environ.get("RES_SAM_SAM_CACHE_SIZE", "") or "").strip())
+            if env_value > 0:
+                return env_value
+        except Exception:
+            pass
+        return 128
+
+    def _store_predictor_state(self, cache_key: str) -> None:
+        features = getattr(self._predictor, "features", None)
+        if features is None:
+            return
+        state = {
+            "features": features.detach().clone(),
+            "input_size": tuple(getattr(self._predictor, "input_size", ())),
+            "original_size": tuple(getattr(self._predictor, "original_size", ())),
+        }
+        self._image_embedding_cache[cache_key] = state
+        self._image_embedding_cache.move_to_end(cache_key)
+        while len(self._image_embedding_cache) > self._cache_capacity():
+            self._image_embedding_cache.popitem(last=False)
+
+    def _restore_predictor_state(self, state: Dict[str, Any]) -> None:
+        self._predictor.reset_image()
+        self._predictor.features = state["features"]
+        self._predictor.input_size = tuple(state["input_size"])
+        self._predictor.original_size = tuple(state["original_size"])
+        self._predictor.is_image_set = True
     
     def extract_region(
         self,
