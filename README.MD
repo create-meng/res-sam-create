@@ -183,6 +183,12 @@ conda run -n res-sam python experiments/03_inference_click_v3.py
 conda run -n res-sam python experiments/04_evaluate_and_visualize_v3.py
 ```
 
+### 4) SSH上传文件
+在本地终端运行,例如
+```bash
+scp -P 42034 outputs1.zip root@xj-member.bitahub.com:/root/res-sam-create/
+```
+
 ## 实验脚本
 
 ### V3 版本 (推荐)
