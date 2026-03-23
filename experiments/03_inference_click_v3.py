@@ -338,6 +338,22 @@ def _sample_clicks_from_gt_bbox(gt_box_resized: list, pos_clicks: int, neg_click
     return pos_points, neg_points
 
 
+def _save_click_checkpoint(checkpoint_path: str, cfg_name: str, category: str, processed_count: int, results: list, completed: bool):
+    with open(checkpoint_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "click_config": cfg_name,
+                "category": category,
+                "processed_count": int(processed_count),
+                "results": results,
+                "timestamp": datetime.now().isoformat(),
+                "completed": bool(completed),
+            },
+            f,
+            ensure_ascii=False,
+        )
+
+
 def run_click_guided(config: dict):
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
