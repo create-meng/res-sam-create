@@ -27,7 +27,6 @@ from tqdm import tqdm
 from sklearn.cluster import KMeans, AgglomerativeClustering
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 from PIL import Image
-import cv2
 
 
 CONFIG = {
@@ -75,6 +74,7 @@ CONFIG = {
     # V3 模型参数（必须与 feature bank/inference 对齐）
     "hidden_size": 30,
     "window_size": 50,
+    "stride": 5,
     "spectral_radius": 0.9,
     "connectivity": 0.1,
     # 图像预处理（需与 v3 推理一致，以便 bbox 缩放）
@@ -95,6 +95,8 @@ CONFIG = {
         "checkpoints_v3",
     ),
     "checkpoint_file": "checkpoint_clustering_v3.json",
+    # 断点写盘频率（按用户要求固定为 50；不影响聚类口径，只影响恢复粒度）
+    "checkpoint_every": 50,
     # 随机种子
     "random_seed": 42,
 }
@@ -189,6 +191,62 @@ def _crop_region(img: np.ndarray, bbox: list) -> np.ndarray:
     if x2 <= x1 or y2 <= y1:
         return np.zeros((0, 0), dtype=img.dtype)
     return img[y1:y2, x1:x2]
+
+
+def _extract_region_patches(
+    img: np.ndarray,
+    bbox: list,
+    window_size: int,
+    stride: int,
+) -> tuple[list, list]:
+    """Extract centered patches inside a candidate bbox.
+
+    This follows the paper more closely than resizing the whole region:
+    each point inside the retained anomaly region acts as a patch center,
+    and patches that extend beyond the image boundary are skipped.
+    """
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    h, w = img.shape[:2]
+    half_win = int(window_size) // 2
+
+    x_start = max(x1 + half_win, half_win)
+    y_start = max(y1 + half_win, half_win)
+    x_stop = min(x2 - half_win, w - half_win)
+    y_stop = min(y2 - half_win, h - half_win)
+
+    if x_start >= x_stop or y_start >= y_stop:
+        return [], []
+
+    patches = []
+    positions = []
+
+    for y in range(y_start, y_stop, stride):
+        patch_y1 = y - half_win
+        patch_y2 = y + half_win
+        if patch_y1 < 0 or patch_y2 > h:
+            continue
+        for x in range(x_start, x_stop, stride):
+            patch_x1 = x - half_win
+            patch_x2 = x + half_win
+            if patch_x1 < 0 or patch_x2 > w:
+                continue
+
+            patch = img[patch_y1:patch_y2, patch_x1:patch_x2]
+            if patch.shape == (window_size, window_size):
+                patches.append(patch)
+                positions.append((int(x), int(y)))
+
+    return patches, positions
+
+
+def _aggregate_region_features(features: list[np.ndarray]) -> np.ndarray:
+    """Aggregate patch-level features into a single region feature."""
+    if not features:
+        return np.zeros((0,), dtype=np.float32)
+    if len(features) == 1:
+        return features[0].astype(np.float32, copy=False)
+    stacked = np.stack([np.asarray(f, dtype=np.float32) for f in features], axis=0)
+    return stacked.mean(axis=0)
 
 
 def fcm_clustering(X: np.ndarray, n_clusters: int, max_iter: int = 100, m: float = 2.0) -> np.ndarray:
@@ -313,8 +371,9 @@ def main():
             flat.append({"category": category, "record": r})
 
     resized_h, resized_w = CONFIG["image_size"]
-
     window = int(CONFIG.get("window_size", 50))
+    stride = int(CONFIG.get("stride", 5))
+    checkpoint_every = int(CONFIG.get("checkpoint_every", 50))
 
     last_completed = start_pos
 
@@ -359,23 +418,24 @@ def main():
                                 resized_w,
                             )
 
-                            region = _crop_region(img, pred_box_resized)
-                            if region.size == 0:
+                            patches, patch_positions = _extract_region_patches(
+                                img,
+                                pred_box_resized,
+                                window_size=window,
+                                stride=stride,
+                            )
+                            if not patches:
                                 continue
 
                             any_valid_region = True
 
-                            # 区域级再拟合：将 region resize 成 window_size x window_size 再拟合，得到 f=[W_out,b]
-                            # 说明：当前 ESN_2D.forward 需要固定 HxW，V3 暂按 window_size 做对齐。
-                            region_rs = cv2.resize(
-                                region.astype(np.float32),
-                                (window, window),
-                                interpolation=cv2.INTER_LINEAR,
-                            )
-                            region_tensor = torch.tensor(region_rs, dtype=torch.float32).unsqueeze(0)  # [1,H,W]
-
+                            # 论文口径：对 region 内每个有效 patch 单独做 2D-ESN 拟合，
+                            # 再将 patch 级动态特征聚合成 region 级特征用于聚类。
+                            patch_tensor = torch.tensor(np.stack(patches, axis=0), dtype=torch.float32)
                             with torch.no_grad():
-                                feat = esn.forward(region_tensor).detach().cpu().numpy().reshape(-1)
+                                patch_feats = esn.forward(patch_tensor).detach().cpu().numpy()
+
+                            feat = _aggregate_region_features([pf for pf in patch_feats])
 
                             items.append(
                                 {
@@ -384,6 +444,9 @@ def main():
                                     "bbox_idx": int(bbox_idx),
                                     "pred_bbox_orig": [int(v) for v in pred_box_orig],
                                     "pred_bbox_resized": [int(v) for v in pred_box_resized],
+                                    "region_patch_count": int(len(patches)),
+                                    "region_patch_positions": [list(map(int, pos)) for pos in patch_positions[:20]],
+                                    "aggregation_method": "mean",
                                     "skipped": False,
                                     "feature": feat.tolist(),
                                     "true_label": 0 if category == "cavities" else 1,
@@ -395,7 +458,7 @@ def main():
 
             last_completed = idx + 1
 
-            if (idx + 1) % 50 == 0:
+            if checkpoint_every > 0 and (idx + 1) % checkpoint_every == 0:
                 with open(checkpoint_path, "w", encoding="utf-8") as f:
                     json.dump(
                         {

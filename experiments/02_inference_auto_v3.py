@@ -117,7 +117,7 @@ CONFIG = {
     "min_region_area": 100,
     "max_images_per_category": None,
     # 断点
-    "checkpoint_interval": 20,
+    "checkpoint_interval": 50,
     # 随机种子
     "random_seed": 42,
     # 版本标识
@@ -342,7 +342,7 @@ def run_inference(config: dict):
         print(f"找到 {len(image_files)} 张图像")
         logger.info("Category images: category=%s, num_images=%s", category, len(image_files))
 
-        checkpoint_interval = int(config.get("checkpoint_interval", 20))
+        checkpoint_interval = int(config.get("checkpoint_interval", 50))
         effective_interval = checkpoint_interval
         if len(image_files) > 0 and len(image_files) <= checkpoint_interval:
             effective_interval = 1
