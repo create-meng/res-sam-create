@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="${1:-$PWD}"
+# Resolve the repo root even when the script is launched from scripts/.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="${1:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 cd "$REPO_DIR"
-
-python -m pip install --upgrade pip setuptools wheel \
-  -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # Install CUDA 11.8 wheels from mirror first so pip does not fall back to
 # the default PyTorch host during dependency resolution.
