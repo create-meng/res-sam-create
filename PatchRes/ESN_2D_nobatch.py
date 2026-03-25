@@ -51,6 +51,7 @@ class ESN_2D(torch.nn.Module):
         self.W_in = torch.nn.Parameter(torch.from_numpy(W_in).float(), requires_grad=False).to(self._device)
         self.W_res_1 = torch.nn.Parameter(torch.from_numpy(W_res_1).float(), requires_grad=False).to(self._device)
         self.W_res_2 = torch.nn.Parameter(torch.from_numpy(W_res_2).float(), requires_grad=False).to(self._device)
+        self._w_in_flat = self.W_in[0].view(1, 1, 1, -1) if int(self.W_in.shape[0]) == 1 else None
 
     # 更新水库状态
     def update_reservoir(self, x, state1, state2):
@@ -62,6 +63,17 @@ class ESN_2D(torch.nn.Module):
         if x.device != self._device:
             x = x.to(self._device)
         pre_activation = torch.mm(x.unsqueeze(1), self.W_in) + torch.mm(state1, self.W_res_1) + torch.mm(state2, self.W_res_2)
+        state_new = self.activation(pre_activation)
+        return state_new
+
+    def update_reservoir_from_input_term(self, input_term, state1, state2):
+        """
+        input_term: [batch_size, n_reservoir]
+        state: [batch_size, n_reservoir]
+        """
+        if input_term.device != self._device:
+            input_term = input_term.to(self._device)
+        pre_activation = input_term + torch.mm(state1, self.W_res_1) + torch.mm(state2, self.W_res_2)
         state_new = self.activation(pre_activation)
         return state_new
     
@@ -139,13 +151,22 @@ class ESN_2D(torch.nn.Module):
             input_image = input_image.to(device=self._device, dtype=torch.float32)
         batch, height, width = input_image.shape
         initial_state = torch.zeros((batch, self.n_reservoir), dtype=torch.float32, device=self._device)
+        input_terms = None
+        if self._w_in_flat is not None:
+            input_terms = input_image.unsqueeze(-1) * self._w_in_flat
 
         prev_row = torch.zeros((batch, width, self.n_reservoir), dtype=torch.float32, device=self._device)
         curr_row = torch.zeros((batch, width, self.n_reservoir), dtype=torch.float32, device=self._device)
 
-        curr_row[:, 0, :] = self.update_reservoir(input_image[:, 0, 0], initial_state, initial_state)  # init
+        if input_terms is not None:
+            curr_row[:, 0, :] = self.update_reservoir_from_input_term(input_terms[:, 0, 0, :], initial_state, initial_state)  # init
+        else:
+            curr_row[:, 0, :] = self.update_reservoir(input_image[:, 0, 0], initial_state, initial_state)  # init
         for t in range(1, width):
-            curr_row[:, t, :] = self.update_reservoir(input_image[:, 0, t], curr_row[:, t - 1, :], initial_state)
+            if input_terms is not None:
+                curr_row[:, t, :] = self.update_reservoir_from_input_term(input_terms[:, 0, t, :], curr_row[:, t - 1, :], initial_state)
+            else:
+                curr_row[:, t, :] = self.update_reservoir(input_image[:, 0, t], curr_row[:, t - 1, :], initial_state)
 
         start_h = int(self.start_node[0])
         start_t = int(self.start_node[1])
@@ -155,13 +176,23 @@ class ESN_2D(torch.nn.Module):
         for h in range(1, height):
             prev_row, curr_row = curr_row, prev_row
             curr_row.zero_()
-            curr_row[:, 0, :] = self.update_reservoir(input_image[:, h, 0], initial_state, prev_row[:, 0, :])
+            if input_terms is not None:
+                curr_row[:, 0, :] = self.update_reservoir_from_input_term(input_terms[:, h, 0, :], initial_state, prev_row[:, 0, :])
+            else:
+                curr_row[:, 0, :] = self.update_reservoir(input_image[:, h, 0], initial_state, prev_row[:, 0, :])
             for t in range(1, width):
-                curr_row[:, t, :] = self.update_reservoir(
-                    input_image[:, h, t],
-                    curr_row[:, t - 1, :],
-                    prev_row[:, t, :],
-                )
+                if input_terms is not None:
+                    curr_row[:, t, :] = self.update_reservoir_from_input_term(
+                        input_terms[:, h, t, :],
+                        curr_row[:, t - 1, :],
+                        prev_row[:, t, :],
+                    )
+                else:
+                    curr_row[:, t, :] = self.update_reservoir(
+                        input_image[:, h, t],
+                        curr_row[:, t - 1, :],
+                        prev_row[:, t, :],
+                    )
 
             if h >= start_h and start_t < width:
                 if start_t <= 0:

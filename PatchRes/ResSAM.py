@@ -398,7 +398,7 @@ class ResSAM:
         except Exception:
             batch_size = batch_size
         feats = []
-        with torch.no_grad():
+        with torch.inference_mode():
             for start in range(0, int(patches_2d.shape[0]), batch_size):
                 end = min(start + batch_size, int(patches_2d.shape[0]))
                 feats.append(self.esn.forward(patches_2d[start:end]))
