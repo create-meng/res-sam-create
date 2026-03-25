@@ -11,6 +11,9 @@ else
   git clone "$REPO_URL" "$TARGET_DIR"
 fi
 
+echo "Updating repo..."
+git -C "$TARGET_DIR" pull
+
 echo "[2/2] Running GitHub post-clone setup..."
 bash "$TARGET_DIR/scripts/setup_after_clone_github.sh" "$TARGET_DIR"
 

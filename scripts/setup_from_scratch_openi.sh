@@ -13,6 +13,9 @@ else
   git clone "$REPO_URL" "$TARGET_DIR"
 fi
 
+echo "Updating repo..."
+git -C "$TARGET_DIR" pull
+
 echo "[2/2] Running OpenI post-clone setup..."
 bash "$TARGET_DIR/scripts/setup_after_clone_openi.sh" "$TARGET_DIR" "$SAM_WEIGHT_URL"
 
