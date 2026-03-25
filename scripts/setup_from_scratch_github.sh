@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_URL="${1:-https://github.com/create-meng/res-sam-create.git}"
-TARGET_DIR="${2:-/root/res-sam-create}"
+TARGET_DIR="${2:-$PWD/res-sam-create}"
 
 echo "[1/2] Cloning repo from GitHub..."
 if [ -d "$TARGET_DIR/.git" ]; then
