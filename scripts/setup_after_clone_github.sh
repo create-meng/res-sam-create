@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Resolve the repo root even when the script is launched from scripts/.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${1:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 cd "$REPO_DIR"
 
-# Install CUDA 11.8 wheels from mirror first so pip does not fall back to
-# the default PyTorch host during dependency resolution.
+echo "[1/3] Installing CUDA 11.8 torch wheels..."
 python -m pip install \
   "torch==2.3.1+cu118" \
   "torchvision==0.18.1+cu118" \
@@ -17,14 +15,32 @@ python -m pip install \
   --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple \
   --timeout 120
 
-# Install the remaining Python packages from the Tsinghua PyPI mirror only.
+echo "[2/4] Installing remaining Python dependencies..."
 grep -vi "segment-anything" requirements-gpu.txt \
   | grep -Ev "^(--index-url|--extra-index-url|torch|torchvision|torchaudio)" \
   | python -m pip install -r /dev/stdin \
       -i https://pypi.tuna.tsinghua.edu.cn/simple \
       --timeout 120
 
-# segment-anything is available on PyPI, so this avoids a direct GitHub clone.
+echo "[3/4] Installing segment-anything..."
 python -m pip install "segment-anything==1.0" \
   -i https://pypi.tuna.tsinghua.edu.cn/simple \
   --timeout 120
+
+echo "[4/5] Ensuring git-lfs is available..."
+if ! git lfs version >/dev/null 2>&1; then
+  if command -v conda >/dev/null 2>&1; then
+    conda install -c conda-forge git-lfs -y
+  else
+    echo "git-lfs is not available and conda was not found."
+    echo "Please install git-lfs first, then rerun this script."
+    exit 1
+  fi
+fi
+
+echo "[5/5] Pulling SAM checkpoint via Git LFS..."
+git lfs install
+git lfs pull
+
+echo
+echo "GitHub post-clone setup completed."
