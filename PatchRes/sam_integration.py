@@ -265,7 +265,9 @@ class SAMIntegration:
         image = _to_uint8_rgb(image)
         
         # 设置图像
-        self.prepare_image(image, force=not image_already_prepared)
+        # Prefer content-keyed cache reuse to avoid recomputing the same image
+        # embedding across different click configurations.
+        self.prepare_image(image, force=False)
         
         # 准备输入
         point_coords = None
@@ -352,7 +354,7 @@ class SAMIntegration:
                 return env_value
         except Exception:
             pass
-        return 128
+        return 256
 
     def _store_predictor_state(self, cache_key: str) -> None:
         features = getattr(self._predictor, "features", None)

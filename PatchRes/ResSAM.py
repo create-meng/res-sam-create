@@ -826,8 +826,7 @@ class ResSAM:
 
             # 论文 Page 11：candidate region 内每个点为中心提取 patch（越界排除）
             # 实现上按 stride 采样中心点以控制计算量（stride=5 与论文默认一致）。
-            all_patches = []
-            patch_positions = []
+            patches_np, patch_positions = self._collect_click_candidate_patches(image, bbox, mask)
 
             if patches_np.shape[0] == 0:
                 continue

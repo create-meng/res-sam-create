@@ -356,6 +356,10 @@ def _save_click_checkpoint(checkpoint_path: str, cfg_name: str, category: str, p
 
 def run_click_guided(config: dict):
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    image_cache = {}
+    gt_cache = {}
+    image_cache_hits = 0
+    gt_cache_hits = 0
 
     log_dir = os.path.join(base_dir, 'outputs', 'logs')
     os.makedirs(log_dir, exist_ok=True)
@@ -544,9 +548,20 @@ def run_click_guided(config: dict):
 
                     xml_name = os.path.splitext(img_file)[0] + ".xml"
                     xml_path = os.path.join(annotation_dir, xml_name)
-                    gt = parse_voc_xml(xml_path) if os.path.exists(xml_path) else None
+                    if xml_path in gt_cache:
+                        gt = gt_cache[xml_path]
+                        gt_cache_hits += 1
+                    else:
+                        gt = parse_voc_xml(xml_path) if os.path.exists(xml_path) else None
+                        gt_cache[xml_path] = gt
 
-                    img = load_image(img_path, config["image_size"])
+                    image_cache_key = (img_path, tuple(config["image_size"]))
+                    if image_cache_key in image_cache:
+                        img = image_cache[image_cache_key]
+                        image_cache_hits += 1
+                    else:
+                        img = load_image(img_path, config["image_size"])
+                        image_cache[image_cache_key] = img
                     img_h, img_w = img.shape
 
                     gt_boxes = []
@@ -735,6 +750,13 @@ def run_click_guided(config: dict):
 
     print(f"\n结果保存至: {output_path}")
     logger.info(f"Results saved: {output_path}")
+    logger.info(
+        "cache_summary | image_cache_entries=%s | image_cache_hits=%s | gt_cache_entries=%s | gt_cache_hits=%s",
+        len(image_cache),
+        image_cache_hits,
+        len(gt_cache),
+        gt_cache_hits,
+    )
     return all_results
 
 
