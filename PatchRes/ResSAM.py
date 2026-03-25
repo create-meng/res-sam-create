@@ -405,11 +405,13 @@ class ResSAM:
         return torch.cat(feats, dim=0) if feats else torch.zeros((0, 2 * self.hidden_size + 1), dtype=torch.float32)
 
     def _patch_list_to_tensor(self, patches_list: List[np.ndarray]) -> torch.Tensor:
-        if not patches_list:
-            return torch.zeros((0, 1, int(self.window_size), int(self.window_size)), dtype=torch.float32)
         if isinstance(patches_list, np.ndarray):
             arr = patches_list
+            if arr.size == 0 or arr.shape[0] == 0:
+                return torch.zeros((0, 1, int(self.window_size), int(self.window_size)), dtype=torch.float32)
         else:
+            if not patches_list:
+                return torch.zeros((0, 1, int(self.window_size), int(self.window_size)), dtype=torch.float32)
             arr = np.stack(patches_list, axis=0)
         if arr.dtype != np.float32:
             arr = arr.astype(np.float32, copy=False)
