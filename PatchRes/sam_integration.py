@@ -294,7 +294,10 @@ class SAMIntegration:
             point_coords=point_coords,
             point_labels=point_labels,
             box=box_np,
-            multimask_output=True,  # 输出多个 mask
+            # Paper workflow uses SAM to provide an approximate candidate
+            # region, then Res-SAM refines it. Keep the best prompt-consistent
+            # mask instead of expanding to multiple parallel masks.
+            multimask_output=False,
         )
         
         # 转换为候选区域格式
@@ -316,10 +319,9 @@ class SAMIntegration:
                     'score': float(score),
                 })
         
-        # 按分数排序
+        # 按分数排序，并在 click-guided 模式下仅保留主候选区。
         candidate_regions.sort(key=lambda x: x['score'], reverse=True)
-        
-        return candidate_regions
+        return candidate_regions[:1]
 
     def prepare_image(self, image: np.ndarray, force: bool = False) -> np.ndarray:
         self._load_sam()

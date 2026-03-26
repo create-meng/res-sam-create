@@ -417,6 +417,25 @@ class ResSAM:
             arr = arr.astype(np.float32, copy=False)
         return torch.from_numpy(arr).unsqueeze(1)
 
+    def _score_features_against_bank(self, features_np: np.ndarray) -> np.ndarray:
+        if self.nn_searcher is None:
+            raise RuntimeError(
+                "Feature bank searcher not initialized. Call load_feature_bank() or build_feature_bank() first."
+            )
+
+        if features_np is None or getattr(features_np, "size", 0) == 0:
+            return np.zeros((0,), dtype=np.float32)
+
+        if getattr(self, "nn_backend", "sklearn") == "sklearn":
+            distances, _ = self.nn_searcher.kneighbors(features_np)
+            return distances.reshape(-1).astype(np.float32, copy=False)
+
+        import numpy as _np
+
+        xq = _np.ascontiguousarray(features_np.astype(_np.float32, copy=False))
+        dists, _ = self.nn_searcher.search(xq, 1)
+        return _np.sqrt(_np.maximum(dists.reshape(-1), 0.0)).astype(_np.float32, copy=False)
+
     def _collect_click_candidate_patches(
         self,
         image: np.ndarray,
@@ -568,70 +587,54 @@ class ResSAM:
                 num_discarded += 1
                 continue
 
-            if mask is not None:
-                try:
-                    crop_mask = mask[y1:y2, x1:x2]
-                    if crop_mask is not None and crop_mask.shape == crop.shape:
-                        crop = crop * crop_mask.astype(crop.dtype)
-                except Exception:
-                    pass
-
-            try:
-                crop_rs = cv2.resize(
-                    crop.astype(np.float32),
-                    (int(self.window_size), int(self.window_size)),
-                    interpolation=cv2.INTER_LINEAR,
-                )
-            except Exception:
+            # Paper-aligned coarse filtering: evaluate local centered patches
+            # inside the coarse region rather than collapsing the entire crop
+            # into one resized patch.
+            patches_np, _ = self._collect_click_candidate_patches(image, bbox, mask)
+            if patches_np.size == 0:
                 if debug_coarse:
                     print(
-                        f"  [coarse][discard][{region_idx}] reason=resize_failed "
-                        f"bbox={bbox} crop_shape={getattr(crop, 'shape', None)} window_size={self.window_size}")
+                        f"  [coarse][discard][{region_idx}] reason=no_valid_region_patches "
+                        f"bbox={bbox} crop_shape={getattr(crop, 'shape', None)}")
                 num_discarded += 1
                 continue
 
-            patches_tensor = torch.tensor(np.array([crop_rs]), dtype=torch.float32).unsqueeze(1)
+            coarse_max_patches = int(os.environ.get("RES_SAM_COARSE_MAX_PATCHES", "64") or "64")
+            if coarse_max_patches > 0 and patches_np.shape[0] > coarse_max_patches:
+                sample_idx = np.linspace(0, patches_np.shape[0] - 1, coarse_max_patches, dtype=np.int32)
+                patches_np = patches_np[sample_idx]
+
+            patches_tensor = self._patch_list_to_tensor(patches_np)
             features = self._fit_patches(patches_tensor)
 
-            # 计算与 Feature Bank 的最近邻距离（region-level score）
+            # ??? Feature Bank ???????region-level score?
             features_np = features.detach().cpu().numpy()
-            if self.nn_searcher is None:
-                raise RuntimeError(
-                    "Feature bank searcher not initialized. Call load_feature_bank() or build_feature_bank() first."
-                )
-            if getattr(self, "nn_backend", "sklearn") == "sklearn":
-                distances, _ = self.nn_searcher.kneighbors(features_np)
-                d0 = float(distances.flatten()[0])
-            else:
-                import numpy as _np
-
-                xq = _np.ascontiguousarray(features_np.astype(_np.float32, copy=False))
-                dists, _ = self.nn_searcher.search(xq, 1)
-                d0 = float(_np.sqrt(max(float(dists.reshape(-1)[0]), 0.0)))
-
-            region_max_score = d0
-            region_mean_score = d0
+            scores = self._score_features_against_bank(features_np)
+            region_max_score = float(np.max(scores))
+            region_mean_score = float(np.mean(scores))
             
-            # 粗筛阈值：保留异常分数高于阈值的 region
+            # ???????????????? region
             if region_max_score > self.beta_threshold:
                 if debug_coarse:
                     print(
                         f"  [coarse][retain][{region_idx}] bbox={bbox} area={region_area} "
-                        f"score={region_max_score:.6f} beta={self.beta_threshold:.6f}")
+                        f"max_score={region_max_score:.6f} mean_score={region_mean_score:.6f} "
+                        f"num_patches={int(scores.shape[0])} beta={self.beta_threshold:.6f}")
                 retained_regions.append({
                     'bbox': bbox,
                     'mask': mask,
                     'coarse_max_score': region_max_score,
                     'coarse_mean_score': region_mean_score,
+                    'num_region_patches': int(scores.shape[0]),
                     'stability_score': region.get('stability_score', 0),
                 })
             else:
                 if debug_coarse:
                     print(
                         f"  [coarse][discard][{region_idx}] reason=score_le_beta bbox={bbox} area={region_area} "
-                        f"score={region_max_score:.6f} beta={self.beta_threshold:.6f}")
+                        f"max_score={region_max_score:.6f} mean_score={region_mean_score:.6f} "
+                        f"num_patches={int(scores.shape[0])} beta={self.beta_threshold:.6f}")
                 num_discarded += 1
-        
         print(f"  Retained {len(retained_regions)} regions after coarse filtering (discarded {num_discarded})")
         
         # 按粗筛分数排序（高的优先）
@@ -652,58 +655,22 @@ class ResSAM:
             x1, y1, x2, y2 = bbox
             
             # 收集 region 内所有 patches（密集采样）
+            # ?? region ??? patches??????
             patches_np, patch_positions = self._collect_click_candidate_patches(image, bbox, mask)
-            
-            for y in range(y1 + half_win, y2 - half_win, self.stride):
-                for x in range(x1 + half_win, x2 - half_win, self.stride):
-                    # 检查是否在 mask 内
-                    if mask is not None:
-                        try:
-                            if not bool(mask[y, x]):
-                                continue
-                        except Exception:
-                            pass
-                    
-                    # 提取 centered patch
-                    patch_y1 = y - half_win
-                    patch_y2 = y + half_win
-                    patch_x1 = x - half_win
-                    patch_x2 = x + half_win
-                    
-                    if patch_y1 < 0 or patch_y2 > img_h or patch_x1 < 0 or patch_x2 > img_w:
-                        continue
-                    
-                    patch = image[patch_y1:patch_y2, patch_x1:patch_x2]
-                    if patch.shape == (self.window_size, self.window_size):
-                        all_patches.append(patch)
-                        patch_positions.append((x, y))
-            
-            if len(all_patches) == 0:
+
+            if patches_np.size == 0 or len(patch_positions) == 0:
                 continue
             
-            # 批量处理所有 patches
-            patches_tensor = torch.tensor(np.array(all_patches), dtype=torch.float32).unsqueeze(1)
+            # ?????? patches
+            patches_tensor = self._patch_list_to_tensor(patches_np)
             features = self._fit_patches(patches_tensor)
             
-            # 计算每个 patch 与 Feature Bank 的最近邻距离（论文 Eq.(7)）
+            # ???? patch ? Feature Bank ????????? Eq.(7)?
             features_np = features.detach().cpu().numpy()
-            if self.nn_searcher is None:
-                raise RuntimeError(
-                    "Feature bank searcher not initialized. Call load_feature_bank() or build_feature_bank() first."
-                )
-            if getattr(self, "nn_backend", "sklearn") == "sklearn":
-                distances, _ = self.nn_searcher.kneighbors(features_np)
-                scores = distances.flatten()
-            else:
-                import numpy as _np
-
-                xq = _np.ascontiguousarray(features_np.astype(_np.float32, copy=False))
-                dists, _ = self.nn_searcher.search(xq, 1)
-                scores = _np.sqrt(_np.maximum(dists.reshape(-1), 0.0))
+            scores = self._score_features_against_bank(features_np)
             
-            # 更新进度条
             region_iter.set_postfix({
-                'patches': len(all_patches),
+                'patches': len(patch_positions),
                 'max_score': f'{scores.max():.2f}'
             })
             

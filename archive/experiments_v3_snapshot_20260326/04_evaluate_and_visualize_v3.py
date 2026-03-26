@@ -22,7 +22,10 @@ sys.path.insert(0, BASE_DIR)
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, auc, precision_recall_curve
-import cv2
+try:
+    import cv2
+except Exception:
+    cv2 = None
 from PIL import Image
 
 # ============ 配置 ============
@@ -58,15 +61,29 @@ CONFIG = {
         '04_evaluate_and_visualize_v3_report.md',
     ),
     
-    # 论文基准结果 (Table 2 - Real-world dataset)
-    'paper_baseline': {
-        'Precision': 0.880,
-        'Recall': 0.955,
-        'F1': 0.916,
-        'AUC': 0.872,
+    # Paper reference selected for this repo's local dataset mapping.
+    # Local rule:
+    # - intact -> normal
+    # - augmented_cavities -> cavities
+    # - augmented_utilities -> pipes/utilities
+    # The raw cavities/Utilities folders are not used here because they
+    # do not provide the required annotation files for this evaluation.
+    'paper_reference': {
+        'dataset_name': 'Open-source (paper Table 1/2)',
+        'dataset_note': 'Local evaluation uses intact + augmented_cavities + augmented_utilities as the nearest runnable proxy to the paper open-source setting.',
+        'auto': {
+            'Precision': 0.842,
+            'Recall': 0.877,
+            'F1': 0.859,
+            'AUC': 0.832,
+        },
+        'click': {
+            '5/5': {'AUC': 0.823, 'F1': 0.852},
+            '5/3': {'AUC': 0.827, 'F1': 0.863},
+            '3/1': {'AUC': 0.832, 'F1': 0.850},
+        },
     },
-    
-    # 版本标识
+
     'version': 'V3',
     'alignment_notes': 'Strictly aligned with paper: window_size=50, region-level coarse filtering, feature f=[W_out,b]',
 }
@@ -322,95 +339,102 @@ def plot_threshold_analysis(results: dict, output_path: str):
     return best_thresh
 
 
-def generate_comparison_table(metrics: dict, paper_baseline: dict) -> str:
-    """生成与论文的对比表格（V3 版本）"""
-    md = """# Res-SAM V3 复现结果分析
+def generate_comparison_table(metrics: dict, paper_reference: dict) -> str:
+    """生成中文对比报告。"""
+    auto_baseline = paper_reference.get('auto', {})
+    dataset_name = paper_reference.get('dataset_name', 'Paper reference')
+    dataset_note = paper_reference.get('dataset_note', '')
 
-## 一、V3 严格对齐改进
+    lines = [
+        '# Res-SAM V3 评估报告',
+        '',
+        '## 数据集对应关系',
+        f'- 论文参考结果: {dataset_name}',
+        f'- 本地评估数据: intact + augmented_cavities + augmented_utilities',
+        f'- 类别映射: cavities -> cavities, utilities -> pipes/utilities, normal_auc -> intact',
+        f'- 说明: {dataset_note}',
+        '',
+        '## 全自动模式直接对比',
+        '',
+        '| 指标 | 论文 | 本地 | 差值 |',
+        '|---|---:|---:|---:|',
+    ]
 
-### 论文对齐项
-- ✅ **window_size = 50**（论文默认值，V2 使用 30）
-- ✅ **特征口径 f = [W_out, b]**（论文 Eq.(2)-(3)，特征维度 61）
-- ✅ **Region 级粗筛**（论文 Fully Automatic 关键流程）
-- ✅ **严格一对一 IoU 匹配评估**（IoU 阈值 0.5）
-
----
-
-## 二、评估指标对比
-
-### Table: 复现结果 V3 vs 论文基准
-
-| 指标 | 论文 (Real-world) | 复现 V3 | 差距 |
-|------|-------------------|---------|------|
-"""
-    
     for metric in ['Precision', 'Recall', 'F1', 'AUC']:
-        paper_val = paper_baseline.get(metric, 0)
-        our_val = metrics.get(metric.lower(), 0)
+        paper_val = auto_baseline.get(metric, 0.0)
+        our_val = metrics.get(metric.lower(), 0.0)
         diff = our_val - paper_val
-        diff_str = f"+{diff:.3f}" if diff > 0 else f"{diff:.3f}"
-        md += f"| {metric} | {paper_val:.3f} | {our_val:.3f} | {diff_str} |\n"
-    
-    md += f"""
----
+        metric_cn = {
+            'Precision': 'Precision',
+            'Recall': 'Recall',
+            'F1': 'F1',
+            'AUC': 'AUC',
+        }[metric]
+        lines.append(f'| {metric_cn} | {paper_val:.3f} | {our_val:.3f} | {diff:+.3f} |')
 
-## 三、详细统计
+    lines.extend([
+        '',
+        '## 全自动模式统计',
+        '',
+        f'- TP: {metrics["tp"]}',
+        f'- FP: {metrics["fp"]}',
+        f'- FN: {metrics["fn"]}',
+        f'- Region 级粗筛丢弃数: {metrics["coarse_discarded"]}',
+        '',
+        '## 分类别结果',
+        '',
+        '| 类别 | TP | FP | FN | Precision | Recall | F1 | 粗筛丢弃数 |',
+        '|---|---:|---:|---:|---:|---:|---:|---:|',
+    ])
 
-### 总体统计
-- **TP (True Positive)**: {metrics['tp']}
-- **FP (False Positive)**: {metrics['fp']}
-- **FN (False Negative)**: {metrics['fn']}
-- **Region 级粗筛丢弃数**: {metrics['coarse_discarded']}
-
-### 各类别统计
-
-| 类别 | TP | FP | FN | 粗筛丢弃 |
-|------|----|----|----|----|
-"""
-    
     for cat, cat_metrics in metrics.get('per_category', {}).items():
-        md += f"| {cat} | {cat_metrics['tp']} | {cat_metrics['fp']} | {cat_metrics['fn']} | {cat_metrics['coarse_discarded']} |\n"
-    
-    md += f"""
----
+        tp = cat_metrics.get('tp', 0)
+        fp = cat_metrics.get('fp', 0)
+        fn = cat_metrics.get('fn', 0)
+        prec = tp / (tp + fp) if (tp + fp) else 0.0
+        rec = tp / (tp + fn) if (tp + fn) else 0.0
+        f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0
+        lines.append(
+            f'| {cat} | {tp} | {fp} | {fn} | {prec:.3f} | {rec:.3f} | {f1:.3f} | {cat_metrics.get("coarse_discarded", 0)} |'
+        )
 
-## 四、V3 改进说明
+    lines.extend([
+        '',
+        f'*生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}*',
+        '*版本: V3（论文对齐评估脚本）*',
+    ])
 
-### 核心改进
+    return '\n'.join(lines)
 
-1. **特征口径修正**
-   - 论文 Eq.(2)-(3): f = [W_out, b]
-   - V2: 仅使用 W_out（维度 900）
-   - V3: 使用 [W_out, b]（维度 61）
-   - 影响：特征维度大幅降低，计算效率提升
 
-2. **window_size 恢复**
-   - 论文默认: 50
-   - V2 工程妥协: 30
-   - V3: 严格使用 50
-   - 影响：patch 更大，包含更多上下文
+def generate_click_summary(click_metrics_map: dict, paper_reference: dict) -> str:
+    """生成中文 click-guided 对比报告。"""
+    click_baseline = paper_reference.get('click', {})
+    lines = [
+        '## Click-guided 模式直接对比',
+        '',
+        '| 点击配置 | 论文 AUC | 本地 AUC | 差值 | 论文 F1 | 本地 F1 | 差值 |',
+        '|---|---:|---:|---:|---:|---:|---:|',
+    ]
 
-3. **Region 级粗筛**
-   - 论文 Fully Automatic 流程关键步骤
-   - V2: 缺失
-   - V3: 完整实现
-   - 流程: SAM coarse regions → 2D-ESN 拟合 → Feature Bank 比较 → discard normal-like
-   - 效果: 减少后续精细分析的候选数量
+    def _sort_key(name: str):
+        part = name.replace('click_', '')
+        a, b = part.split('/')
+        return (-int(a), -int(b))
 
-4. **评估口径统一**
-   - 严格一对一 IoU 匹配
-   - IoU 阈值 0.5
-   - 与论文 Table 2 评估方式一致
+    for click_key in sorted(click_metrics_map.keys(), key=_sort_key):
+        label = click_key.replace('click_', '')
+        local_metrics = click_metrics_map[click_key]
+        paper_metrics = click_baseline.get(label, {})
+        paper_auc = paper_metrics.get('AUC', 0.0)
+        paper_f1 = paper_metrics.get('F1', 0.0)
+        local_auc = local_metrics.get('auc', 0.0)
+        local_f1 = local_metrics.get('f1', 0.0)
+        lines.append(
+            f'| {label} | {paper_auc:.3f} | {local_auc:.3f} | {local_auc - paper_auc:+.3f} | {paper_f1:.3f} | {local_f1:.3f} | {local_f1 - paper_f1:+.3f} |'
+        )
 
----
-
----
-
-*生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*
-*版本: V3 (Strict Paper Alignment)*
-"""
-    
-    return md
+    return '\n'.join(lines) + '\n'
 
 
 def visualize_sample_results(
@@ -518,7 +542,7 @@ def main():
         best_thresh = plot_threshold_analysis(results, thresh_path)
         print(f"最佳阈值: {best_thresh:.2f}")
 
-        report_parts.append(generate_comparison_table(metrics, CONFIG['paper_baseline']))
+        report_parts.append(generate_comparison_table(metrics, CONFIG['paper_reference']))
     else:
         print(f"警告: 预测结果文件不存在: {CONFIG['predictions_path']}")
         print("跳过 automatic 评估：请先运行 02_inference_auto_v3.py")
@@ -536,21 +560,12 @@ def main():
         click_keys = sorted(list(click_results_all.keys()))
         print(f"\n加载 click-guided 结果: {len(click_keys)} 个 click 配置")
 
-        click_summary_lines = [
-            "\n## V3 Click-guided Evaluation (Table 1)",
-            "",
-            "| Click Config | Precision | Recall | F1 | AUC |",
-            "|---|---:|---:|---:|---:|",
-        ]
-
+        click_metrics_map = {}
         for click_key in click_keys:
             click_results = click_results_all.get(click_key, {})
-            m = compute_metrics(click_results)
-            click_summary_lines.append(
-                f"| {click_key.replace('click_', '')} | {m['precision']:.4f} | {m['recall']:.4f} | {m['f1']:.4f} | {m['auc']:.4f} |"
-            )
+            click_metrics_map[click_key] = compute_metrics(click_results)
 
-        report_parts.append("\n".join(click_summary_lines) + "\n")
+        report_parts.append(generate_click_summary(click_metrics_map, CONFIG['paper_reference']))
     else:
         print(f"\n警告: click-guided 结果文件不存在: {click_path}")
         print("跳过 click 评估：请先运行 03_inference_click_v3.py")
