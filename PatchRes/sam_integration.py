@@ -40,6 +40,54 @@ _SAM_AUTOMATIC_MASK_GENERATOR_KWARGS = {
 }
 
 
+def _patch_sam_automatic_mask_generator_generate_masks() -> None:
+    """
+    segment_anything SamAutomaticMaskGenerator._generate_masks can call
+    torchvision box_area(data['crop_boxes']) when len(crop_boxes) > 1,
+    even if no masks survived filtering. Then crop_boxes may be an empty
+    1D tensor (shape [0]) instead of [0,4], causing IndexError in box_area.
+    See: https://github.com/facebookresearch/segment-anything/issues/614
+    """
+    try:
+        from segment_anything import SamAutomaticMaskGenerator
+    except ImportError:
+        return
+    if getattr(SamAutomaticMaskGenerator._generate_masks, "_res_sam_patched", False):
+        return
+
+    from torchvision.ops.boxes import batched_nms, box_area
+
+    from segment_anything.utils.amg import MaskData, generate_crop_boxes
+
+    def _generate_masks_fixed(self, image: np.ndarray) -> Any:
+        orig_size = image.shape[:2]
+        crop_boxes, layer_idxs = generate_crop_boxes(
+            orig_size, self.crop_n_layers, self.crop_overlap_ratio
+        )
+
+        data = MaskData()
+        for crop_box, layer_idx in zip(crop_boxes, layer_idxs):
+            crop_data = self._process_crop(image, crop_box, layer_idx, orig_size)
+            data.cat(crop_data)
+
+        if len(crop_boxes) > 1 and len(data["crop_boxes"]) > 0:
+            scores = 1 / box_area(data["crop_boxes"])
+            scores = scores.to(data["boxes"].device)
+            keep_by_nms = batched_nms(
+                data["boxes"].float(),
+                scores,
+                torch.zeros_like(data["boxes"][:, 0]),
+                iou_threshold=self.crop_nms_thresh,
+            )
+            data.filter(keep_by_nms)
+
+        data.to_numpy()
+        return data
+
+    _generate_masks_fixed._res_sam_patched = True
+    SamAutomaticMaskGenerator._generate_masks = _generate_masks_fixed
+
+
 def _to_uint8_gray(image: np.ndarray) -> np.ndarray:
     """Convert input image to uint8 grayscale with minimal peak memory."""
     if image.dtype == np.uint8:
@@ -120,6 +168,8 @@ class SAMIntegration:
                 "segment-anything 未安装。请运行: pip install segment-anything\n"
                 "或从 https://github.com/facebookresearch/segment-anything 安装"
             )
+
+        _patch_sam_automatic_mask_generator_generate_masks()
         
         # 确定模型路径
         if self.checkpoint_path is None:
