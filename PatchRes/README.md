@@ -18,7 +18,7 @@ The data for this project is organized as follows:
 
 This project works well with **python>=3.8** (recommended **python=3.9**).
 
-For Res-SAM V3 experiments, see scripts under `../experiments/`.
+For Res-SAM **V4/V5** experiments, see `../experiments/`（`*_v4.py` / `*_v5.py`）and `../experiments/run_all.py`. V3 snapshot lives under `../archive/experiments_v3_snapshot_20260326/`.
 
 Ensure you have the necessary dependencies installed. You can install them using the requirements.txt file:
 

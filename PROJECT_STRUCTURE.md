@@ -85,29 +85,29 @@
 - `augmented_utilities/` 全部图片（有 GT bbox）
 - 每张图都有对应的 VOC XML 标注
 
-## 关键参数（论文）
+## 关键参数（论文 + 本仓库主线）
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
-| window_size | 50×50 | patch 尺寸 |
-| stride | 5~10 | 滑动步长 |
+| window_size | 50×50 | patch 尺寸（论文默认） |
+| stride | 5 | 滑动步长（论文默认；非 5~10 泛称） |
 | hidden_size | 30 | reservoir 神经元数 |
-| anomaly_threshold (β) | 0.1~0.5 | 异常判定阈值 |
+| beta_threshold (Eq.9 β) | 默认 **0.1** | 与作者 `PatchRes/main.py` 对齐；见 `experiments/paper_constants.py` 的 `DEFAULT_BETA_THRESHOLD`，可在各脚本 `CONFIG` 覆盖 |
 | init_normal_samples | 20 | Feature Bank 初始样本数 |
+| 评测 IoU | 0.5 | 预测与 GT 是否匹配（与 β 不同）；见 `EVAL_DETECTION_IOU_THRESHOLD` |
 
-## 待创建目录
+## 实验脚本目录（现状）
+
+主线为 `experiments/*_v4.py`、`*_v5.py` 与 `run_all.py`（`--version v4` \| `v5`）。下文「待创建目录」为早期草稿，**以仓库内实际 `experiments/` 为准**。
 
 ```
-Res-SAM-main/
-├── experiments/              # 复现实验脚本
-│   ├── 01_build_feature_bank.py
-│   ├── 02_inference_auto.py
-│   ├── 03_inference_click.py
-│   ├── 04_evaluate.py
-│   └── 05_clustering.py
-├── outputs/                  # 输出结果
-│   ├── feature_banks/
-│   ├── predictions/
-│   └── metrics/
-└── PLAN.md                   # 复现计划书
+experiments/
+├── paper_constants.py
+├── 01_build_feature_bank_v4.py / v5.py
+├── 02_inference_auto_v4.py / v5.py
+├── … 
+└── run_all.py
+
+# 运行生成（仓库根目录下，非 experiments 子目录）
+outputs/feature_banks_v4/、outputs/predictions_v4/ 等
 ```
