@@ -722,7 +722,8 @@ class ResSAM:
             cached_scores = region.get("scores")
             if cached_pos is not None and cached_scores is not None:
                 patch_positions = cached_pos
-                scores = np.asarray(cached_scores, dtype=np.float32, copy=False)
+                # NumPy 1.x: np.asarray has no `copy=` (added in NumPy 2); np.array supports copy=False on 1.19+.
+                scores = np.array(cached_scores, dtype=np.float32, copy=False)
             else:
                 patches_np, patch_positions = self._collect_click_candidate_patches(
                     image, bbox, mask
