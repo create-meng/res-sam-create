@@ -30,6 +30,9 @@ from .ESN_2D_nobatch import ESN_2D
 from .common import NearestNeighbourScorer
 from .sam_integration import SAMIntegration
 
+# Feature bank on-disk bundle: tensor + 2D-ESN weights (author minimal code only saves tensors).
+FEATURE_BANK_BUNDLE_FORMAT = "res_sam_fb_v2"
+
 
 class ResSAM:
     """
@@ -50,8 +53,9 @@ class ResSAM:
     connectivity : float
         ESN 连接率。当前实现默认 0.1。
         该值同样属于实现级 ESN 超参数，现阶段未在已核对的论文正文段落中看到明确给值。
-    anomaly_threshold : float
-        异常判定阈值
+    beta_threshold : float
+        论文 Eq.(9) 的单一阈值 β（与最近邻距离 ``s(f*)`` 比较）。
+        与作者仓库 ``PatchRes`` 里 historically 命名的 ``anomaly_threshold`` 是同一物理量；本类对外推荐关键字 ``beta_threshold``。
     sam_model_type : str
         SAM 模型类型: "vit_l"（本仓库主线与作者公开仓库默认）、"vit_b"（显存紧张时可选）、"vit_h"
     sam_checkpoint : str
@@ -67,20 +71,33 @@ class ResSAM:
         stride: int = 5,
         spectral_radius: float = 0.9,
         connectivity: float = 0.1,
-        anomaly_threshold: float = 0.5,
-        region_coarse_threshold: float = 0.5,  # 论文 Eq.(9) 要求单一 β 阈值，与 anomaly_threshold 保持一致
+        beta_threshold: float = 0.1,
         sam_model_type: str = "vit_l",
         sam_checkpoint: str = None,
         device: str = "auto",
+        *,
+        anomaly_threshold: Optional[float] = None,
+        region_coarse_threshold: Optional[float] = None,
     ):
         self.hidden_size = hidden_size
         self.window_size = window_size
         self.stride = stride
         self.spectral_radius = spectral_radius
         self.connectivity = connectivity
-        # 论文 Eq.(9) 给出单一预设阈值 β。这里保留旧参数名作为兼容入口，但内部统一为 beta_threshold。
-        self.beta_threshold = float(anomaly_threshold)
-        self.anomaly_threshold = self.beta_threshold
+        # Eq.(9) β：单一阈值。推荐只传 beta_threshold；anomaly_threshold / region_coarse_threshold 仅为旧调用兼容。
+        if anomaly_threshold is not None and region_coarse_threshold is not None:
+            if float(anomaly_threshold) != float(region_coarse_threshold):
+                raise ValueError(
+                    "anomaly_threshold and region_coarse_threshold disagree; use beta_threshold only (single β)."
+                )
+        if anomaly_threshold is not None:
+            _beta = float(anomaly_threshold)
+        elif region_coarse_threshold is not None:
+            _beta = float(region_coarse_threshold)
+        else:
+            _beta = float(beta_threshold)
+        self.beta_threshold = _beta
+        self.anomaly_threshold = self.beta_threshold  # 与 PatchRes 命名兼容，即 β
         self.region_coarse_threshold = self.beta_threshold
         _device_in = (device if device is not None else "").strip().lower() if isinstance(device, str) else device
         if _device_in in {"", None, "auto"}:
@@ -244,9 +261,41 @@ class ResSAM:
         return self.feature_bank
 
     def load_feature_bank(self, path: str):
-        """加载预存的 Feature Bank"""
-        # 显式指定 map_location，避免 feature bank 在保存时绑定到 CUDA，导致 CPU 环境加载失败。
-        self.feature_bank = torch.load(path, map_location=self.device)
+        """加载预存的 Feature Bank（支持 v2 捆绑包：特征 + ESN state_dict；兼容旧版仅张量）。"""
+        # 先加载到 CPU，再把张量迁到目标设备；ESN 权重通过 load_state_dict 写入当前模块。
+        try:
+            raw = torch.load(path, map_location="cpu", weights_only=False)
+        except TypeError:
+            raw = torch.load(path, map_location="cpu")
+
+        if isinstance(raw, dict) and raw.get("format") == FEATURE_BANK_BUNDLE_FORMAT:
+            fb = raw.get("feature_bank")
+            if not isinstance(fb, torch.Tensor):
+                raise ValueError("Invalid feature bank bundle: missing feature_bank tensor")
+            self.feature_bank = fb.to(self.device)
+            esd = raw.get("esn_state_dict")
+            if not isinstance(esd, dict):
+                raise ValueError("Invalid feature bank bundle: missing esn_state_dict")
+            self.esn.load_state_dict(esd, strict=True)
+        elif isinstance(raw, torch.Tensor):
+            self.feature_bank = raw.to(self.device)
+            logger_fb = logging.getLogger(__name__)
+            msg = (
+                "[FeatureBank] Legacy tensor-only file (no ESN weights in file). "
+                "Inference relies on ESN init matching build-time RNG; re-run 01 to emit %s bundle."
+                % FEATURE_BANK_BUNDLE_FORMAT
+            )
+            print(msg, flush=True)
+            try:
+                logger_fb.warning(msg)
+            except Exception:
+                pass
+        else:
+            raise ValueError(
+                "Unrecognized feature bank file: expected Tensor or bundle with format=%s"
+                % FEATURE_BANK_BUNDLE_FORMAT
+            )
+
         # NearestNeighbourScorer.fit 期望 List[np.ndarray]
         feature_bank_np = np.ascontiguousarray(self.feature_bank.detach().cpu().numpy(), dtype=np.float32)
         self.anomaly_scorer.fit([feature_bank_np])
@@ -322,9 +371,14 @@ class ResSAM:
         self.nn_backend = backend
     
     def save_feature_bank(self, path: str):
-        """保存 Feature Bank"""
-        torch.save(self.feature_bank, path)
-        print(f"Feature Bank saved to {path}")
+        """保存 Feature Bank：v2 捆绑包含 2D-ESN 权重，推理时与建库阶段同一水库（对齐官方仅存向量的不足）。"""
+        bundle = {
+            "format": FEATURE_BANK_BUNDLE_FORMAT,
+            "feature_bank": self.feature_bank.detach().cpu(),
+            "esn_state_dict": {k: v.detach().cpu() for k, v in self.esn.state_dict().items()},
+        }
+        torch.save(bundle, path)
+        print(f"Feature Bank bundle ({FEATURE_BANK_BUNDLE_FORMAT}) saved to {path}")
     
     def _extract_patches(self, image: np.ndarray) -> torch.Tensor:
         """
@@ -596,7 +650,9 @@ class ResSAM:
             # Paper-aligned coarse filtering: evaluate local centered patches
             # inside the coarse region rather than collapsing the entire crop
             # into one resized patch.
-            patches_np, _ = self._collect_click_candidate_patches(image, bbox, mask)
+            patches_np, patch_positions = self._collect_click_candidate_patches(
+                image, bbox, mask
+            )
             if patches_np.size == 0:
                 if debug_coarse:
                     print(
@@ -608,13 +664,14 @@ class ResSAM:
             patches_tensor = self._patch_list_to_tensor(patches_np)
             features = self._fit_patches(patches_tensor)
 
-            # ??? Feature Bank ???????region-level score?
+            # Patch scores vs Feature Bank (Eq.(7)-(8)); coarse step uses aggregates to
+            # discard normal-like SAM regions before fine-grained merging.
             features_np = features.detach().cpu().numpy()
             scores = self._score_features_against_bank(features_np)
             region_max_score = float(np.max(scores))
             region_mean_score = float(np.mean(scores))
-            
-            # ???????????????? region
+
+            # Retain region if any patch is sufficiently far from the bank (max > β).
             if region_max_score > self.beta_threshold:
                 if debug_coarse:
                     print(
@@ -628,6 +685,9 @@ class ResSAM:
                     'coarse_mean_score': region_mean_score,
                     'num_region_patches': int(scores.shape[0]),
                     'stability_score': region.get('stability_score', 0),
+                    # Reuse below: same patches/scores as coarse step (avoid duplicate ESN).
+                    'patch_positions': patch_positions,
+                    'scores': np.asarray(scores, dtype=np.float32, order="C"),
                 })
             else:
                 if debug_coarse:
@@ -657,22 +717,25 @@ class ResSAM:
         for i, region in region_iter:
             bbox = region['bbox']
             mask = region['mask']
-            x1, y1, x2, y2 = bbox
-            
-            # 收集 region 内所有 patches（密集采样）
-            # ?? region ??? patches??????
-            patches_np, patch_positions = self._collect_click_candidate_patches(image, bbox, mask)
 
-            if patches_np.size == 0 or len(patch_positions) == 0:
+            cached_pos = region.get("patch_positions")
+            cached_scores = region.get("scores")
+            if cached_pos is not None and cached_scores is not None:
+                patch_positions = cached_pos
+                scores = np.asarray(cached_scores, dtype=np.float32, copy=False)
+            else:
+                patches_np, patch_positions = self._collect_click_candidate_patches(
+                    image, bbox, mask
+                )
+                if patches_np.size == 0 or len(patch_positions) == 0:
+                    continue
+                patches_tensor = self._patch_list_to_tensor(patches_np)
+                features = self._fit_patches(patches_tensor)
+                features_np = features.detach().cpu().numpy()
+                scores = self._score_features_against_bank(features_np)
+
+            if len(patch_positions) == 0:
                 continue
-            
-            # ?????? patches
-            patches_tensor = self._patch_list_to_tensor(patches_np)
-            features = self._fit_patches(patches_tensor)
-            
-            # ???? patch ? Feature Bank ????????? Eq.(7)?
-            features_np = features.detach().cpu().numpy()
-            scores = self._score_features_against_bank(features_np)
             
             region_iter.set_postfix({
                 'patches': len(patch_positions),
@@ -1000,6 +1063,6 @@ if __name__ == "__main__":
         hidden_size=30,
         window_size=50,
         stride=5,
-        anomaly_threshold=0.5,
+        beta_threshold=0.1,
     )
     print("✓ ResSAM 初始化成功")
