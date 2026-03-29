@@ -67,9 +67,8 @@ outputs.zip
 LOG.txt
 log.txt
 
-# Archive (legacy outputs are artifacts; do not track)
-archive/legacy_outputs/
-archive/outputs_v3*/
+# Archive: entire directory is local-only; do not commit
+archive/
 
 # Media
 *.mp4
