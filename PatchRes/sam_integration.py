@@ -20,6 +20,25 @@ import os
 import hashlib
 from collections import OrderedDict
 
+# SamAutomaticMaskGenerator：与论文作者公开仓库 zhouxr6066/Res-SAM 中 sam/sam.py 一致
+# （Zenodo v1.0.0 / GitHub main 同源）。未在官方显式传入的项使用 segment_anything
+# SamAutomaticMaskGenerator.__init__ 的库默认（与官方调用方式一致）。
+# 参考：https://github.com/zhouxr6066/Res-SAM/blob/main/sam/sam.py
+_SAM_AUTOMATIC_MASK_GENERATOR_KWARGS = {
+    "points_per_side": 32,
+    "points_per_batch": 64,
+    "pred_iou_thresh": 0.95,
+    "stability_score_thresh": 0.95,
+    "stability_score_offset": 1.0,
+    "box_nms_thresh": 0.7,
+    "crop_n_layers": 1,
+    "crop_nms_thresh": 0.7,
+    "crop_overlap_ratio": 512 / 1500,
+    "crop_n_points_downscale_factor": 2,
+    "min_mask_region_area": 1000,
+    "output_mode": "binary_mask",
+}
+
 
 def _to_uint8_gray(image: np.ndarray) -> np.ndarray:
     """Convert input image to uint8 grayscale with minimal peak memory."""
@@ -61,7 +80,7 @@ class SAMIntegration:
     
     def __init__(
         self, 
-        model_type: str = "vit_b",
+        model_type: str = "vit_l",
         checkpoint_path: str = None,
         device: str = "cuda",
     ):
@@ -119,7 +138,7 @@ class SAMIntegration:
                 "./",
             ]
             for dir_path in possible_dirs:
-                path = os.path.join(dir_path, default_paths.get(self.model_type, "sam_vit_b_01ec64.pth"))
+                path = os.path.join(dir_path, default_paths.get(self.model_type, "sam_vit_l_0b3195.pth"))
                 if os.path.exists(path):
                     self.checkpoint_path = path
                     break
@@ -154,19 +173,10 @@ class SAMIntegration:
         # 创建 predictor (用于 click-guided 模式)
         self._predictor = SamPredictor(self._sam)
         
-        # 创建 mask generator (用于 automatic 模式)
-        # 参数调整：生成更大更完整的区域
+        # 与官方仓库 sam/sam.py 中 SamAutomaticMaskGenerator(...) 一致，见 _SAM_AUTOMATIC_MASK_GENERATOR_KWARGS。
         self._mask_generator = SamAutomaticMaskGenerator(
             self._sam,
-            points_per_side=32,       # 增加采样点
-            points_per_batch=64,
-            pred_iou_thresh=0.75,     # 降低阈值保留更多区域
-            stability_score_thresh=0.80,  # 降低稳定性阈值
-            stability_score_offset=1.0,
-            crop_n_layers=1,          # 启用裁剪层增加覆盖
-            crop_overlap_ratio=0.3,
-            crop_n_points_downscale_factor=2,
-            min_mask_region_area=50,  # 降低最小区域
+            **_SAM_AUTOMATIC_MASK_GENERATOR_KWARGS,
         )
         
         print(f"SAM model loaded successfully on {self.device}")
@@ -174,8 +184,8 @@ class SAMIntegration:
     def generate_masks_automatic(
         self, 
         image: np.ndarray,
-        min_area_ratio: float = 0.01,
-        max_area_ratio: float = 0.8,
+        min_area_ratio: Optional[float] = None,
+        max_area_ratio: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """
         自动生成所有可能的 mask (Fully Automatic 模式)
@@ -185,9 +195,11 @@ class SAMIntegration:
         image : np.ndarray
             输入图像 (H, W, C) 或 (H, W)，灰度图会自动转为 RGB
         min_area_ratio : float
-            最小区域面积比例（相对于图像面积）
-        max_area_ratio : float  
-            最大区域面积比例（相对于图像面积）
+            最小区域面积比例（相对于图像面积）。
+            论文未给出这类固定比例阈值，因此这里只把它保留为可选工程过滤参数。
+        max_area_ratio : float
+            最大区域面积比例（相对于图像面积）。
+            同上，默认不启用，避免把工程经验阈值误写成论文口径。
             
         Returns:
         --------
@@ -203,18 +215,25 @@ class SAMIntegration:
         # 统一转换为 uint8 RGB（避免构造 (H,W,3) float32 的中间数组造成内存峰值）
         image = _to_uint8_rgb(image)
         
-        # 生成 masks
+        # 生成 masks；与官方 sam/sam.py 中 predict_mask 一致：仅使用 area < 2e4 的 mask
         masks = self._mask_generator.generate(image)
+        masks = [m for m in masks if m.get("area", 0) < 2e4]
         
-        # 过滤和排序
+        # 面积过滤保持可选。
+        # 论文没有给出固定的 candidate-region 面积比例阈值，因此仅在调用方显式提供时启用。
         img_area = image.shape[0] * image.shape[1]
-        min_area = int(img_area * min_area_ratio)
-        max_area = int(img_area * max_area_ratio)
+        min_area = int(img_area * min_area_ratio) if min_area_ratio is not None else None
+        max_area = int(img_area * max_area_ratio) if max_area_ratio is not None else None
         
         candidate_regions = []
         for mask_info in masks:
             area = mask_info['area']
-            if min_area <= area <= max_area:
+            area_ok = True
+            if min_area is not None:
+                area_ok = area_ok and (area >= min_area)
+            if max_area is not None:
+                area_ok = area_ok and (area <= max_area)
+            if area_ok:
                 # 转换 bbox 格式: SAM 使用 [x, y, w, h] -> 转为 [x1, y1, x2, y2]
                 x, y, w, h = mask_info['bbox']
                 bbox = [int(x), int(y), int(x + w), int(y + h)]
@@ -501,7 +520,7 @@ def check_sam_installation():
         return False
 
 
-def download_sam_weights(model_type: str = "vit_b", save_dir: str = "./models/"):
+def download_sam_weights(model_type: str = "vit_l", save_dir: str = "./models/"):
     """下载 SAM 模型权重"""
     import os
     os.makedirs(save_dir, exist_ok=True)
@@ -538,7 +557,7 @@ if __name__ == "__main__":
     
     # 测试初始化
     try:
-        sam = SAMIntegration(model_type="vit_b")
+        sam = SAMIntegration(model_type="vit_l")
         print("✓ SAMIntegration 初始化成功")
     except Exception as e:
         print(f"✗ 初始化失败: {e}")

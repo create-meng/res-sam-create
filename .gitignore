@@ -31,12 +31,10 @@ venv/
 ENV/
 env/
 
-# SAM 模型权重（太大）
-sam/sam_vit_l_0b3195.pth
-sam/sam_vit_h_4b8939.pth
-sam/sam_vit_b_01ec64.pth
+# SAM 等本地权重：默认忽略 *.pth；仓库内由 Git LFS 跟踪的 sam/sam_vit_l_0b3195.pth 需取消忽略
 *.pth
 !outputs/feature_banks/features.pth
+!sam/sam_vit_l_0b3195.pth
 
 # 输出文件（可选，如果不想追踪结果）
 outputs/feature_banks/

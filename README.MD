@@ -187,45 +187,47 @@ git lfs pull
 
 #### 方案 3：不依赖 Git LFS，直接手动下载权重
 
-如果你暂时不想安装 Git LFS，也可以只手动下载本项目运行所需的 SAM 权重文件到 `sam/` 目录：
+如果你暂时不想安装 Git LFS，也可以只手动下载本项目运行所需的 SAM 权重文件到 `sam/` 目录。
+
+**本仓库主线 SAM 为 ViT-L**：`sam/sam_vit_l_0b3195.pth`（约 1.2GB），与论文作者公开仓库 `zhouxr6066/Res-SAM` 的 `sam/sam.py`、`experiments` 与 `scripts/setup_after_clone_*.sh` 默认一致。**GitHub** 远程可用 Git LFS 托管该完整权重文件。**OpenI** 等平台往往无法上传或拉取如此大的 LFS 对象：请仅 `clone` 后按下方官方地址手动下载到 `sam/`（文件名需一致）。
 
 ```bash
-# Linux/macOS
-curl -L -o sam/sam_vit_b_01ec64.pth https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
+# Linux/macOS（ViT-L，Meta 官方）
+curl -L -o sam/sam_vit_l_0b3195.pth https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth
 ```
 
 ```powershell
-# Windows PowerShell
-Invoke-WebRequest -Uri https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth -OutFile sam\sam_vit_b_01ec64.pth
+# Windows PowerShell（ViT-L）
+Invoke-WebRequest -Uri https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth -OutFile sam\sam_vit_l_0b3195.pth
 ```
 
 #### 方案 4：通过 SSH / SCP 直接拷贝已有权重文件
 
-如果你本地电脑、实验室服务器或云服务器上已经有 `sam_vit_b_01ec64.pth`，也可以直接通过 `scp` 拷贝到当前项目的 `sam/` 目录，而不必重新下载。
+如果你本地电脑、实验室服务器或云服务器上已经有 `sam_vit_l_0b3195.pth`，也可以直接通过 `scp` 拷贝到当前项目的 `sam/` 目录，而不必重新下载。
 
 例如：从远程服务器拷贝到当前机器
 
 ```bash
-scp -P 42034 root@xj-member.bitahub.com:/root/res-sam-create/sam_vit_b_01ec64.pth sam/
+scp -P 42034 root@xj-member.bitahub.com:/root/res-sam-create/sam_vit_l_0b3195.pth sam/
 ```
 
 例如：从本地电脑拷贝到远程服务器
 
 ```bash
-scp -P 42034 sam/sam_vit_b_01ec64.pth root@xj-member.bitahub.com:/root/res-sam-create/
+scp -P 42034 sam/sam_vit_l_0b3195.pth root@xj-member.bitahub.com:/root/res-sam-create/
 ```
 
 如果远程目标目录还没有 `sam/` 文件夹，也可以显式指定完整目标文件名：
 
 ```bash
-scp -P 42034 root@xj-member.bitahub.com:/root/res-sam-create/sam_vit_b_01ec64.pth sam/sam_vit_b_01ec64.pth
+scp -P 42034 root@xj-member.bitahub.com:/root/res-sam-create/sam_vit_l_0b3195.pth sam/sam_vit_l_0b3195.pth
 ```
 
 这种方式适合“只想先把主流程跑起来”的情况；如果仓库里后续还有别的 LFS 文件需要拉取，再补装 Git LFS 即可。
 
 #### 方案 5：只跳过 SAM 权重，其它 LFS 文件照常拉取
 
-如果你的问题不是“完全不用 Git LFS”，而是“仓库里其它 LFS 文件都想拉，只是 `sam/sam_vit_b_01ec64.pth` 这个权重不想走 LFS”，可以用下面这组命令：
+如果你的问题不是“完全不用 Git LFS”，而是“仓库里其它 LFS 文件都想拉，只是 `sam/sam_vit_l_0b3195.pth` 这个权重不想走 LFS（或远程未托管）”，可以用下面这组命令：
 
 ```bash
 # 先跳过 LFS smudge，避免 checkout 阶段失败
@@ -235,25 +237,25 @@ git clone https://openi.pcl.ac.cn/create-meng/res-sam.git
 cd res-sam
 
 # 拉取除该权重以外的其它 LFS 对象（数据集等）
-git lfs pull --exclude="sam/sam_vit_b_01ec64.pth"
+git lfs pull --exclude="sam/sam_vit_l_0b3195.pth"
 ```
 
 然后再单独下载权重到 `sam/` 目录（官方地址）：
 
 ```bash
-# Linux/macOS
-curl -L -o sam/sam_vit_b_01ec64.pth https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
+# Linux/macOS（ViT-L）
+curl -L -o sam/sam_vit_l_0b3195.pth https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth
 ```
 
 ```powershell
-# Windows PowerShell
-Invoke-WebRequest -Uri https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth -OutFile sam\sam_vit_b_01ec64.pth
+# Windows PowerShell（ViT-L）
+Invoke-WebRequest -Uri https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth -OutFile sam\sam_vit_l_0b3195.pth
 ```
 
-校验权重文件大小应为几百 MB（不是几 KB 的 LFS 指针文件）：
+校验权重文件大小应为约 1.2GB（ViT-L），不是几 KB 的 LFS 指针文件：
 
 ```bash
-ls -lh sam/sam_vit_b_01ec64.pth
+ls -lh sam/sam_vit_l_0b3195.pth
 ```
 
 ### 第 3 步：快速自检（可选但推荐）
@@ -392,8 +394,8 @@ stride = 5            # 滑动窗口步长 (论文原始值)
 hidden_size = 30      # ESN 隐藏层大小
 anomaly_threshold = beta  # 异常判定阈值（论文 Eq.(9) 的 β）
 
-# SAM 参数
-sam_model_type = "vit_b"  # SAM 模型类型 (内存占用低)
+# SAM 参数（本仓库主线 vit_l，与作者公开仓库一致）
+sam_model_type = "vit_l"
 image_size = (369, 369)   # 论文原始尺寸
 
 # 断点参数
@@ -442,7 +444,7 @@ KNN 后端（用于 Feature Bank 1-NN 检索）默认策略：
     "window_size": 50,
     "stride": 5,
     "hidden_size": 30,
-    "beta_threshold": 0.5
+    "beta_threshold": 0.2
   },
   "results": {"...": "..."}
 }
@@ -495,7 +497,7 @@ Res-SAM/
 │   ├── 07_cross_environment_v3.py      # V3 跨环境
 │   └── run_all.py                      # 主运行脚本
 ├── sam/
-│   └── sam_vit_b_01ec64.pth            # SAM 权重
+│   └── sam_vit_l_0b3195.pth            # SAM ViT-L（GitHub 可用 LFS 托管完整文件；OpenI 常需手动下载）
 ├── data/GPR_data/
 │   ├── intact/                         # 正常样本
 │   ├── augmented_cavities/             # 空洞异常
@@ -509,12 +511,19 @@ Res-SAM/
 2. **SAM 作用** (Fig.5): SAM 能有效减少 2D-ESN 拟合次数，提升效率
 3. **FCM 聚类** (Table 3): 模糊聚类更适合边界模糊的 GPR 异常
 
+## 2026-03 论文口径统一说明
+
+- `03_inference_click_v4.py` / `03_inference_click_v5.py` 的 click 语义已统一为覆盖全部 GT bbox 采样，不再只取第一个框。
+- `06_ablation_wo_sam_v4.py` / `06_ablation_wo_sam_v5.py` 已与主线统一使用单一 `beta_threshold=0.2`，且 click 消融同样覆盖全部 GT bbox。
+- `05_clustering_v4.py` / `05_clustering_v5.py` 已按论文 Methods / Table 3 调整为对最终 anomaly region 直接再次进行 2D-ESN 拟合，不再使用 patch 特征均值聚合作为 region feature。
+- `04_evaluate_and_visualize_v4.py` / `04_evaluate_and_visualize_v5.py` 的论文数值现仅作为参考对照，不再表述为与本地增强评估集的严格同口径复现。
+
 ## V2 版本改进记录
 
 | 日期 | 改进内容 |
 |------|----------|
 | 2026-03-12 | 重写 detect_automatic 严格按照论文流程 |
-| 2026-03-12 | 修复内存问题：切换到 SAM vit_b，预构建 NN 搜索器 |
+| 2026-03-12 | 修复内存问题：曾试用 SAM vit_b；主线已统一为 vit_l（GitHub 托管大文件） |
 | 2026-03-12 | 添加进度条 (tqdm) 和日志系统 |
 | 2026-03-12 | 降低 window_size 到 30 匹配 SAM 候选区域 |
 | 2026-03-13 | 优化断点功能，添加每张图片处理日志 |

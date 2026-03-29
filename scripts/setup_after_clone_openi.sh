@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
+# OpenI 镜像未必托管约 1.2GB 的 SAM ViT-L 权重；若 LFS 不可用，请用下方默认 URL 直链下载到 sam/sam_vit_l_0b3195.pth。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${1:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-SAM_WEIGHT_URL="${2:-https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth}"
+SAM_WEIGHT_URL="${2:-https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth}"
 STATE_DIR="$REPO_DIR/.setup_state"
 STATE_FILE="$STATE_DIR/openi_after_clone.done"
 
@@ -79,16 +80,16 @@ if is_done "lfs_pull"; then
   echo "  - already done, skipping"
 else
   git lfs install
-  git lfs pull --exclude="sam/sam_vit_b_01ec64.pth"
+  git lfs pull --exclude="sam/sam_vit_l_0b3195.pth"
   mark_done "lfs_pull"
 fi
 
 echo "[6/6] Downloading the SAM checkpoint directly..."
-if is_done "sam_weight" && [ -s sam/sam_vit_b_01ec64.pth ]; then
+if is_done "sam_weight" && [ -s sam/sam_vit_l_0b3195.pth ]; then
   echo "  - already done, skipping"
 else
   mkdir -p sam
-  curl -L "$SAM_WEIGHT_URL" -o sam/sam_vit_b_01ec64.pth
+  curl -L "$SAM_WEIGHT_URL" -o sam/sam_vit_l_0b3195.pth
   mark_done "sam_weight"
 fi
 

@@ -30,6 +30,12 @@ from tqdm import tqdm
 from PIL import Image
 import cv2
 
+from experiments.resize_policy import RESIZE_POLICY_VOC_ANNOTATION, target_hw_for_preprocess
+from experiments.dataset_layout import (
+    DATASET_ENHANCED,
+    apply_layout_to_config_02_03,
+)
+
 
 def _require_segment_anything() -> None:
     try:
@@ -64,6 +70,7 @@ def _to_abs(base_dir: str, p: str) -> str:
 
 # ============ 配置 ============
 CONFIG = {
+    "dataset_mode": DATASET_ENHANCED,
     # Feature Bank 路径 (V5)
     "feature_bank_path": os.path.join(
         BASE_DIR, "outputs", "feature_banks_v5", "feature_bank_v5.pth"
@@ -105,16 +112,23 @@ CONFIG = {
     "anomaly_threshold": 0.2,  # 兼容旧字段：内部与 beta_threshold 保持一致
     "region_coarse_threshold": 0.2,  # 兼容旧字段：内部与 beta_threshold 保持一致
     # SAM 参数
-    "sam_model_type": "vit_b",
+    "sam_model_type": "vit_l",
     "sam_checkpoint": os.path.join(
-        BASE_DIR, "sam", "sam_vit_b_01ec64.pth"
+        BASE_DIR, "sam", "sam_vit_l_0b3195.pth"
     ),
     "device": "auto",
     # 图像预处理
+    "resize_policy": RESIZE_POLICY_VOC_ANNOTATION,
     "image_size": (369, 369),
     # 推理参数
-    "max_candidates_per_image": 10,
-    "min_region_area": 100,
+    # The paper does not specify a fixed maximum number of returned regions.
+    # Keep this disabled by default for a closer paper-aligned run.
+    # None means: do not cap the number of retained/final regions.
+    "max_candidates_per_image": None,
+    # The paper does not provide a fixed minimum coarse-region area threshold.
+    # Keep this disabled by default for a closer paper-aligned run.
+    # None means: do not drop coarse regions by area before feature discrimination.
+    "min_region_area": None,
     "max_images_per_category": None,
     # 断点
     "checkpoint_interval": 50,
@@ -242,15 +256,18 @@ def run_inference(config: dict):
     logger.info("=" * 60)
     logger.info(f"log_file={log_file}")
     logger.info(
-        "window_size=%s, stride=%s, hidden_size=%s, beta_threshold=%s, image_size_hw=%s",
+        "window_size=%s, stride=%s, hidden_size=%s, beta_threshold=%s, resize_policy=%s, fixed_image_size_hw=%s",
         config.get("window_size"),
         config.get("stride"),
         config.get("hidden_size"),
         config.get("beta_threshold"),
+        config.get("resize_policy"),
         config.get("image_size"),
     )
 
     config = dict(config)
+    logger.info("dataset_mode=%s", config.get("dataset_mode"))
+    print(f"dataset_mode={config.get('dataset_mode')}", flush=True)
     config["feature_bank_path"] = _to_abs(base_dir, config.get("feature_bank_path", ""))
     config["metadata_path"] = _to_abs(base_dir, config.get("metadata_path", ""))
     config["output_dir"] = _to_abs(base_dir, config.get("output_dir", ""))
@@ -408,9 +425,13 @@ def run_inference(config: dict):
                 annotation_dir = config["annotation_dirs"].get(category)
                 xml_file = os.path.splitext(img_file)[0] + ".xml"
                 xml_path = os.path.join(annotation_dir, xml_file) if annotation_dir else None
+
+                gt = parse_voc_xml(xml_path) if xml_path and os.path.exists(xml_path) else None
+                target_hw = target_hw_for_preprocess(config, gt)
                 
                 try:
-                    orig_w, orig_h, img = load_image_with_orig_size(img_path, config["image_size"])
+                    orig_w, orig_h, img = load_image_with_orig_size(img_path, target_hw)
+                    proc_h, proc_w = int(img.shape[0]), int(img.shape[1])
                     
                     # 推理（V3 detect_automatic 包含 region 级粗筛）
                     result = model.detect_automatic(
@@ -418,9 +439,6 @@ def run_inference(config: dict):
                         min_region_area=config["min_region_area"],
                         max_regions=config["max_candidates_per_image"],
                     )
-                    
-                    # 解析标注
-                    gt = parse_voc_xml(xml_path) if xml_path and os.path.exists(xml_path) else None
                     
                     # 准备结果记录
                     record = {
@@ -440,8 +458,8 @@ def run_inference(config: dict):
                     target_w = int(gt["width"]) if gt and gt.get("width") else int(orig_w)
                     target_h = int(gt["height"]) if gt and gt.get("height") else int(orig_h)
 
-                    resized_w = config["image_size"][1]
-                    resized_h = config["image_size"][0]
+                    resized_w = proc_w
+                    resized_h = proc_h
                     scale_x_img = target_w / resized_w
                     scale_y_img = target_h / resized_h
                     pred_bboxes_resized = record.get("pred_bboxes", [])
@@ -464,8 +482,8 @@ def run_inference(config: dict):
                         _num_gt = len(gt['bboxes'])
                         
                         # 同时提供 GT 的 resize 坐标系（便于与 pred_bboxes 直接对照）
-                        inv_scale_x = config["image_size"][1] / gt["width"]
-                        inv_scale_y = config["image_size"][0] / gt["height"]
+                        inv_scale_x = proc_w / gt["width"]
+                        inv_scale_y = proc_h / gt["height"]
                         
                         gt_boxes_resized = [
                             [
@@ -649,7 +667,9 @@ def run_inference(config: dict):
             "feature_bank_path": config["feature_bank_path"],
             "feature_bank_metadata_path": config.get("metadata_path", ""),
             "preprocess_signature": metadata.get("preprocess_signature", None),
-            "image_size_hw": list(config.get("image_size", (369, 369))),
+            "resize_policy": config.get("resize_policy"),
+            "fixed_image_size_hw": list(config.get("image_size", (369, 369))),
+            "image_preprocess_note": "Per-image HxW follows resize_policy (VOC or native); fixed_image_size_hw only applies when resize_policy=fixed.",
             "window_size": int(config.get("window_size", 50)),
             "stride": int(config.get("stride", 5)),
             "hidden_size": int(config.get("hidden_size", 30)),
@@ -694,5 +714,6 @@ class _RunIdFilter(logging.Filter):
 
 if __name__ == "__main__":
     _require_segment_anything()
+    CONFIG = apply_layout_to_config_02_03(dict(CONFIG), BASE_DIR, "v5")
     with torch.no_grad():
         results = run_inference(CONFIG)

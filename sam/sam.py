@@ -52,6 +52,7 @@ def show_box(box, ax):
 
 
 # sam = sam_model_registry["vit_h"](checkpoint="./sam_vit_h_4b8939.pth").to(device=device)
+# 本仓库主线与作者上游 zhouxr6066/Res-SAM 一致：ViT-L + sam_vit_l_0b3195.pth（GitHub 可用 Git LFS 托管完整文件）。
 sam = sam_model_registry["vit_l"](checkpoint=os.path.join(os.path.dirname(__file__), 'sam_vit_l_0b3195.pth')).to(device=device)
 mask_generator = SamAutomaticMaskGenerator(
     sam,

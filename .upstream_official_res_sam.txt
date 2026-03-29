@@ -1,0 +1,9 @@
+Upstream reference (for AMG kwargs / predict_mask-style filtering parity):
+  https://github.com/zhouxr6066/Res-SAM/blob/main/sam/sam.py
+  Zenodo: 10.5281/zenodo.17615326
+
+  Local clone for offline diff (same parent folder as this fork’s Res-SAM/):
+    Res-SAM-official/  →  remote https://github.com/zhouxr6066/Res-SAM.git
+
+  This fork: default SAM backbone matches upstream — vit_l + sam/sam_vit_l_0b3195.pth;
+  GitHub LFS can host the full file; OpenI mirrors may require manual download — see sam/README_SAM_WEIGHT.txt

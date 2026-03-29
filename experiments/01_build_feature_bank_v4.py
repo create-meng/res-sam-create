@@ -28,9 +28,13 @@ import numpy as np
 from tqdm import tqdm
 from PIL import Image
 
+from experiments.resize_policy import RESIZE_POLICY_VOC_ANNOTATION, target_hw_for_preprocess
+from experiments.dataset_layout import DATASET_ENHANCED, apply_layout_to_config_01
+
 # ============ 配置 ============
 CONFIG = {
-    # 数据路径 - 支持多个来源
+    'dataset_mode': DATASET_ENHANCED,
+    # 数据路径：enhanced 下由 dataset_layout 写入；也可被 open_source 等模式覆盖
     'normal_data_sources': {
         'intact': os.path.join(BASE_DIR, 'data', 'GPR_data', 'intact'),
     },
@@ -45,7 +49,11 @@ CONFIG = {
     'hidden_size': 30,
     'num_normal_samples': 20,  # 每个来源的样本数
     
-    # 图像预处理 - 使用论文原始尺寸
+    # Resize policy: see experiments/resize_policy.py
+    # voc_annotation: intact 无 VOC，本脚本按「原图像素尺寸」逐个样本提取 patch（与论文未规定的全局 369 强制缩放脱钩）。
+    # fixed + image_size: 与旧版一致，便于与历史输出对比。
+    'resize_policy': RESIZE_POLICY_VOC_ANNOTATION,
+    # Only used when resize_policy == "fixed"; ignored for voc_annotation on this script.
     'image_size': (369, 369),
 
     'device': 'auto',
@@ -85,9 +93,9 @@ def get_image_hash(path: str) -> str:
 
 
 def load_normal_images(
-    data_dir: str, 
-    num_samples: int, 
-    size: tuple = (256, 256),
+    data_dir: str,
+    num_samples: int,
+    config: dict,
     random_select: bool = True,
 ) -> tuple:
     """
@@ -96,6 +104,7 @@ def load_normal_images(
     Returns:
     --------
     tuple: (images, paths, hashes)
+        images is np.ndarray [N,H,W] if a fixed resize is used; otherwise a list of [H,W] arrays.
     """
     image_files = [f for f in os.listdir(data_dir) 
                    if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
@@ -107,7 +116,9 @@ def load_normal_images(
         np.random.shuffle(image_files)
     
     selected_files = image_files[:min(num_samples, len(image_files))]
-    
+
+    target_hw = target_hw_for_preprocess(config, None)
+
     images = []
     paths = []
     hashes = []
@@ -118,7 +129,8 @@ def load_normal_images(
         try:
             # 加载并预处理
             img = Image.open(img_path).convert('L')  # 灰度
-            img = img.resize((size[1], size[0]), Image.BILINEAR)
+            if target_hw:
+                img = img.resize((target_hw[1], target_hw[0]), Image.BILINEAR)
             img_array = np.array(img, dtype=np.float32)
             
             # 标准化
@@ -131,8 +143,10 @@ def load_normal_images(
         except Exception as e:
             print(f"Error loading {img_file}: {e}")
             continue
-    
-    return np.array(images), paths, hashes
+
+    if target_hw:
+        return np.array(images), paths, hashes
+    return images, paths, hashes
 
 
 def build_feature_bank(config: dict, resume: bool = True):
@@ -211,7 +225,13 @@ def build_feature_bank(config: dict, resume: bool = True):
         'config': config,
         'preprocess_signature': {
             'color_mode': 'L',
-            'resize': {'enabled': True, 'size_hw': list(config.get('image_size', (369, 369)))},
+            'resize': {
+                'policy': config.get('resize_policy'),
+                'fixed_hw': list(config['image_size']) if config.get('image_size') else None,
+                'note':
+                    'voc_annotation on intact: native per-image HW (no VOC); '
+                    'fixed: uniform image_size.',
+            },
             'normalize': {'enabled': True, 'method': '(x-mean)/(std+1e-8)', 'per_image': True},
         },
         'sources': {},
@@ -238,7 +258,7 @@ def build_feature_bank(config: dict, resume: bool = True):
         images, paths, hashes = load_normal_images(
             source_dir,
             config['num_normal_samples'],
-            config['image_size'],
+            config,
         )
         
         print(f"加载了 {len(images)} 张图像")
@@ -251,7 +271,10 @@ def build_feature_bank(config: dict, resume: bool = True):
             'image_hashes': hashes,
         }
         
-        all_images.append(images)
+        if isinstance(images, list):
+            all_images.extend(images)
+        else:
+            all_images.extend([images[i] for i in range(len(images))])
         
         # 更新断点
         processed_sources[source_name] = {
@@ -271,7 +294,6 @@ def build_feature_bank(config: dict, resume: bool = True):
         print("没有新数据需要处理")
         return None
     
-    all_images = np.concatenate(all_images, axis=0)
     print(f"\n总图像数: {len(all_images)}")
     
     # 构建 Feature Bank
@@ -323,8 +345,9 @@ def build_feature_bank(config: dict, resume: bool = True):
 
 
 if __name__ == "__main__":
-    CONFIG = dict(CONFIG)
+    CONFIG = apply_layout_to_config_01(dict(CONFIG), BASE_DIR, "v4")
     CONFIG['output_dir'] = _to_abs(BASE_DIR, CONFIG.get('output_dir', ''))
     CONFIG['normal_data_sources'] = {k: _to_abs(BASE_DIR, v) for k, v in CONFIG.get('normal_data_sources', {}).items()}
+    print(f"dataset_mode={CONFIG.get('dataset_mode')} | feature_bank_dir={CONFIG.get('output_dir')}", flush=True)
     with torch.no_grad():
         feature_bank = build_feature_bank(CONFIG)

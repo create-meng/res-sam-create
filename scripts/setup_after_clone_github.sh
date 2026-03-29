@@ -73,12 +73,17 @@ else
   mark_done "git_lfs"
 fi
 
-echo "[5/5] Pulling SAM checkpoint via Git LFS..."
+echo "[5/5] SAM checkpoint（GitHub：Git LFS 托管 sam/sam_vit_l_0b3195.pth；可 exclude 后从 Meta 官方直链下载）"
 if is_done "lfs_pull"; then
   echo "  - already done, skipping"
 else
   git lfs install
-  git lfs pull
+  # 主线为 ViT-L（约 1.2GB）；跳过该文件后从 Meta 官方地址拉取同名权重
+  git lfs pull --exclude="sam/sam_vit_l_0b3195.pth"
+  mkdir -p sam
+  if [ ! -s sam/sam_vit_l_0b3195.pth ]; then
+    curl -L -o sam/sam_vit_l_0b3195.pth "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth"
+  fi
   mark_done "lfs_pull"
 fi
 

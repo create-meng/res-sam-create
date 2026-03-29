@@ -18,7 +18,7 @@ Res-SAM: Reservoir-enhanced Segment Anything Model
 import torch
 import numpy as np
 from tqdm import tqdm
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Union, Sequence
 import logging
 import os
 import sys
@@ -44,13 +44,16 @@ class ResSAM:
     stride : int
         滑动窗口步长 (论文默认 5)
     spectral_radius : float
-        ESN 谱半径 (论文默认 0.9)
+        ESN 谱半径。当前实现默认 0.9。
+        该值属于实现级 ESN 超参数，现阶段未在已核对的论文正文段落中看到明确给值，
+        因此不要将其误记为论文明示参数。
     connectivity : float
-        ESN 连接率 (论文默认 0.1)
+        ESN 连接率。当前实现默认 0.1。
+        该值同样属于实现级 ESN 超参数，现阶段未在已核对的论文正文段落中看到明确给值。
     anomaly_threshold : float
         异常判定阈值
     sam_model_type : str
-        SAM 模型类型: "vit_b", "vit_l", "vit_h"
+        SAM 模型类型: "vit_l"（本仓库主线与作者公开仓库默认）、"vit_b"（显存紧张时可选）、"vit_h"
     sam_checkpoint : str
         SAM 权重路径
     device : str
@@ -66,7 +69,7 @@ class ResSAM:
         connectivity: float = 0.1,
         anomaly_threshold: float = 0.5,
         region_coarse_threshold: float = 0.5,  # 论文 Eq.(9) 要求单一 β 阈值，与 anomaly_threshold 保持一致
-        sam_model_type: str = "vit_b",
+        sam_model_type: str = "vit_l",
         sam_checkpoint: str = None,
         device: str = "auto",
     ):
@@ -186,7 +189,7 @@ class ResSAM:
 
     def build_feature_bank(
         self,
-        normal_images: np.ndarray,
+        normal_images: Union[np.ndarray, Sequence[np.ndarray]],
         source_info: str = "unknown",
     ) -> torch.Tensor:
         """
@@ -194,8 +197,8 @@ class ResSAM:
         
         Parameters:
         -----------
-        normal_images : np.ndarray
-            正常样本图像 [N, H, W] 或 [N, C, H, W]
+        normal_images : np.ndarray | sequence of np.ndarray
+            正常样本图像 [N, H, W] / [N, C, H, W]，或与之一致的二维图像数组列表（可变量化 H、W）
         source_info : str
             数据来源信息（用于环境一致性检查）
             
@@ -204,17 +207,20 @@ class ResSAM:
         torch.Tensor
             Feature Bank [num_patches, hidden_size^2]
         """
-        print(f"Building Feature Bank from {len(normal_images)} normal images...")
-        
-        # 确保图像格式正确
-        if len(normal_images.shape) == 4:
-            # [N, C, H, W] -> [N, H, W]
-            normal_images = normal_images.squeeze(1)
-        
+        if isinstance(normal_images, np.ndarray):
+            arr = normal_images
+            if len(arr.shape) == 4:
+                arr = arr.squeeze(1)
+            iter_images: List[np.ndarray] = [arr[i] for i in range(len(arr))]
+        else:
+            iter_images = [np.asarray(x) for x in normal_images]
+
+        print(f"Building Feature Bank from {len(iter_images)} normal images...")
+
         # 提取特征
         all_features = []
 
-        for i, img in enumerate(tqdm(normal_images, desc="Building Feature Bank", unit="img")):
+        for i, img in enumerate(tqdm(iter_images, desc="Building Feature Bank", unit="img")):
             # 滑动窗口提取 patches
             patches = self._extract_patches(img)
             
@@ -444,15 +450,16 @@ class ResSAM:
     ) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
         img_h, img_w = image.shape
         win = int(self.window_size)
-        stride = int(self.stride)
         half_win = win // 2
         x1, y1, x2, y2 = bbox
 
         if (x2 - x1) < win or (y2 - y1) < win:
             return np.zeros((0, win, win), dtype=np.float32), []
 
-        y_centers = np.arange(y1 + half_win, y2 - half_win, stride, dtype=np.int32)
-        x_centers = np.arange(x1 + half_win, x2 - half_win, stride, dtype=np.int32)
+        # Paper wording uses "for each point within the candidate region".
+        # So here we enumerate every valid center point instead of sampling by stride.
+        y_centers = np.arange(y1 + half_win, y2 - half_win, 1, dtype=np.int32)
+        x_centers = np.arange(x1 + half_win, x2 - half_win, 1, dtype=np.int32)
         if y_centers.size == 0 or x_centers.size == 0:
             return np.zeros((0, win, win), dtype=np.float32), []
 
@@ -488,8 +495,8 @@ class ResSAM:
     def detect_automatic(
         self,
         image: np.ndarray,
-        min_region_area: int = 500,
-        max_regions: int = 10,
+        min_region_area: Optional[int] = None,
+        max_regions: Optional[int] = None,
         return_all_candidates: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -511,9 +518,12 @@ class ResSAM:
         image : np.ndarray
             输入图像 [H, W] 或 [H, W, C]
         min_region_area : int
-            最小区域面积
+            最小区域面积。
+            这是可选工程保护阈值；若为 None，则不按面积额外丢弃 coarse region，
+            更接近论文只按特征判别保留/丢弃区域的描述。
         max_regions : int
-            最大返回区域数
+            最大返回区域数。
+            这是可选工程截断；若为 None，则不对 retained/final regions 施加固定上限。
         return_all_candidates : bool
             是否返回所有候选区域
             
@@ -535,11 +545,7 @@ class ResSAM:
         
         # Step 1: SAM 生成 coarse regions
         print("Step 1: SAM generating coarse regions...")
-        coarse_regions = self.sam.generate_masks_automatic(
-            image,
-            min_area_ratio=0.005,
-            max_area_ratio=0.5,
-        )
+        coarse_regions = self.sam.generate_masks_automatic(image)
         
         print(f"  Found {len(coarse_regions)} coarse regions")
         
@@ -570,7 +576,7 @@ class ResSAM:
             
             # 跳过过小区域
             region_area = (x2 - x1) * (y2 - y1)
-            if region_area < min_region_area:
+            if min_region_area is not None and region_area < min_region_area:
                 if debug_coarse:
                     print(
                         f"  [coarse][discard][{region_idx}] reason=area_lt_min "
@@ -598,11 +604,6 @@ class ResSAM:
                         f"bbox={bbox} crop_shape={getattr(crop, 'shape', None)}")
                 num_discarded += 1
                 continue
-
-            coarse_max_patches = int(os.environ.get("RES_SAM_COARSE_MAX_PATCHES", "64") or "64")
-            if coarse_max_patches > 0 and patches_np.shape[0] > coarse_max_patches:
-                sample_idx = np.linspace(0, patches_np.shape[0] - 1, coarse_max_patches, dtype=np.int32)
-                patches_np = patches_np[sample_idx]
 
             patches_tensor = self._patch_list_to_tensor(patches_np)
             features = self._fit_patches(patches_tensor)
@@ -645,9 +646,13 @@ class ResSAM:
         anomaly_regions = []
         
         from tqdm import tqdm
-        region_iter = tqdm(enumerate(retained_regions[:max_regions]), 
-                          total=min(len(retained_regions), max_regions),
-                          desc="  Fine analysis", leave=False)
+        regions_for_fine = retained_regions if max_regions is None else retained_regions[:max_regions]
+        region_iter = tqdm(
+            enumerate(regions_for_fine),
+            total=len(regions_for_fine),
+            desc="  Fine analysis",
+            leave=False,
+        )
         
         for i, region in region_iter:
             bbox = region['bbox']
@@ -711,7 +716,7 @@ class ResSAM:
         print(f"  Detected {len(anomaly_regions)} anomaly regions")
         
         result = {
-            'anomaly_regions': anomaly_regions[:max_regions],
+            'anomaly_regions': anomaly_regions if max_regions is None else anomaly_regions[:max_regions],
             'num_candidates': len(retained_regions),
             'num_coarse_discarded': num_discarded,
             'num_esn_fits': int(getattr(self, "_fitting_count", 0)),
@@ -793,8 +798,7 @@ class ResSAM:
             if (x2 - x1) < self.window_size or (y2 - y1) < self.window_size:
                 continue
 
-            # 论文 Page 11：candidate region 内每个点为中心提取 patch（越界排除）
-            # 实现上按 stride 采样中心点以控制计算量（stride=5 与论文默认一致）。
+            # 论文 Page 11：candidate region 内每个点为中心提取 patch（越界排除）。
             patches_np, patch_positions = self._collect_click_candidate_patches(image, bbox, mask)
 
             if patches_np.shape[0] == 0:

@@ -50,11 +50,11 @@ CONFIG = {
     # 图像预处理
     "image_size": (369, 369),
     # SAM 配置
-    "sam_model_type": "vit_b",
+    "sam_model_type": "vit_l",
     "sam_checkpoint": os.path.join(
         BASE_DIR,
         "sam",
-        "sam_vit_b_01ec64.pth",
+        "sam_vit_l_0b3195.pth",
     ),
     # Feature Bank
     "feature_bank_path": os.path.join(

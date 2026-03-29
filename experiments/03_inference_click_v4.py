@@ -23,6 +23,9 @@ from logging.handlers import RotatingFileHandler
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from experiments.resize_policy import RESIZE_POLICY_VOC_ANNOTATION, target_hw_for_preprocess
+from experiments.dataset_layout import DATASET_ENHANCED, apply_layout_to_config_02_03
+
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -45,6 +48,7 @@ def _require_segment_anything() -> None:
 
 
 CONFIG = {
+    "dataset_mode": DATASET_ENHANCED,
     # Feature Bank 路径（V3）
     "feature_bank_path": os.path.join(
         os.path.dirname(os.path.dirname(__file__)),
@@ -109,14 +113,15 @@ CONFIG = {
     "beta_threshold": 0.2,
     "anomaly_threshold": 0.2,
     "region_coarse_threshold": 0.2,
-    # SAM
-    "sam_model_type": "vit_b",
+    # SAM（本仓库主线与作者上游一致：vit_l + sam_vit_l_0b3195.pth）
+    "sam_model_type": "vit_l",
     "sam_checkpoint": os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), "sam", "sam_vit_b_01ec64.pth"
+        os.path.dirname(os.path.dirname(__file__)), "sam", "sam_vit_l_0b3195.pth"
     ),
 
     "device": "auto",
-    # 图像预处理
+    # experiments/resize_policy.py — default matches VOC / native per image
+    "resize_policy": RESIZE_POLICY_VOC_ANNOTATION,
     "image_size": (369, 369),
     # click 配置（Table 1 的 5/5、5/3、3/1）
     "click_configs": [
@@ -139,15 +144,6 @@ if _max_images_env:
             CONFIG['max_images_per_category'] = _max_images_val
     except Exception:
         pass
-
-
-CONFIG["test_data_dirs"]["normal_auc"] = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),
-    "data",
-    "GPR_data",
-    "augmented_intact",
-)
-CONFIG["annotation_dirs"]["normal_auc"] = ""
 
 
 class _RunIdFilter(logging.Filter):
@@ -396,9 +392,14 @@ def run_click_guided(config: dict):
     logger.info('=' * 60)
     logger.info(f"window_size={config.get('window_size')}, stride={config.get('stride')}, hidden_size={config.get('hidden_size')}")
     logger.info(f"beta_threshold={config.get('beta_threshold')}, anomaly_threshold={config.get('anomaly_threshold')}, region_coarse_threshold={config.get('region_coarse_threshold')}")
-    logger.info(f"image_size_hw={config.get('image_size')}")
+    logger.info(
+        "resize_policy=%s fixed_image_size_hw=%s",
+        config.get("resize_policy"),
+        config.get("image_size"),
+    )
     logger.info(f"feature_bank_path={config.get('feature_bank_path')}")
     logger.info(f"sam_checkpoint={config.get('sam_checkpoint')}")
+    logger.info("dataset_mode=%s", config.get("dataset_mode"))
 
     print("=" * 60, flush=True)
     print("Res-SAM V4: Click-guided Inference", flush=True)
@@ -451,8 +452,6 @@ def run_click_guided(config: dict):
     logger.info('ResSAM initialized and feature bank loaded')
 
     all_results = {}
-
-    resized_h, resized_w = config["image_size"]
 
     for click_cfg in config["click_configs"]:
         cfg_name = click_cfg["name"]
@@ -558,12 +557,13 @@ def run_click_guided(config: dict):
                         gt = parse_voc_xml(xml_path) if os.path.exists(xml_path) else None
                         gt_cache[xml_path] = gt
 
-                    image_cache_key = (img_path, tuple(config["image_size"]))
+                    target_hw = target_hw_for_preprocess(config, gt)
+                    image_cache_key = (img_path, target_hw if target_hw is not None else ("native",))
                     if image_cache_key in image_cache:
                         img = image_cache[image_cache_key]
                         image_cache_hits += 1
                     else:
-                        img = load_image(img_path, config["image_size"])
+                        img = load_image(img_path, target_hw)
                         image_cache[image_cache_key] = img
                     img_h, img_w = img.shape
 
@@ -596,7 +596,7 @@ def run_click_guided(config: dict):
 
                     elif gt_boxes and gt_w and gt_h:
                         gt_boxes_resized = [
-                            _scale_box_to_resized(box, gt_w, gt_h, resized_h, resized_w)
+                            _scale_box_to_resized(box, gt_w, gt_h, img_h, img_w)
                             for box in gt_boxes
                         ]
                         pos_points, neg_points = _sample_clicks_from_gt_boxes(
@@ -617,7 +617,7 @@ def run_click_guided(config: dict):
                         ]
 
                         pred_bboxes = [
-                            _scale_box_to_original(b, gt_w, gt_h, resized_h, resized_w)
+                            _scale_box_to_original(b, gt_w, gt_h, img_h, img_w)
                             for b in pred_bboxes
                         ]
 
@@ -725,7 +725,9 @@ def run_click_guided(config: dict):
                     "feature_bank_path": config.get("feature_bank_path", ""),
                     "feature_bank_metadata_path": config.get("metadata_path", ""),
                     "preprocess_signature": metadata.get("preprocess_signature", None),
-                    "image_size_hw": list(config.get("image_size", (369, 369))),
+                    "resize_policy": config.get("resize_policy"),
+                    "fixed_image_size_hw": list(config.get("image_size", (369, 369))),
+                    "image_preprocess_note": "Per-image HxW follows resize_policy; fixed_image_size_hw only for resize_policy=fixed.",
                     "window_size": int(config.get("window_size", 50)),
                     "stride": int(config.get("stride", 5)),
                     "hidden_size": int(config.get("hidden_size", 30)),
@@ -753,6 +755,8 @@ def run_click_guided(config: dict):
 
 if __name__ == "__main__":
     _require_segment_anything()
+    _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    CONFIG = apply_layout_to_config_02_03(dict(CONFIG), _base, "v4")
     np.random.seed(CONFIG["random_seed"])
     random.seed(CONFIG["random_seed"])
     torch.manual_seed(CONFIG["random_seed"])

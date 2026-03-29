@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_URL="${1:-https://openi.pcl.ac.cn/create-meng/res-sam.git}"
 TARGET_DIR="${2:-$PWD/res-sam}"
-SAM_WEIGHT_URL="${3:-https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth}"
+SAM_WEIGHT_URL="${3:-https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth}"
 
 echo "[1/2] Cloning repo from OpenI with LFS smudge disabled..."
 export GIT_LFS_SKIP_SMUDGE=1

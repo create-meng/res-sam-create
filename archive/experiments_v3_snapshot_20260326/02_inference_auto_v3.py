@@ -105,9 +105,9 @@ CONFIG = {
     "anomaly_threshold": 0.2,  # 兼容旧字段：内部与 beta_threshold 保持一致
     "region_coarse_threshold": 0.2,  # 兼容旧字段：内部与 beta_threshold 保持一致
     # SAM 参数
-    "sam_model_type": "vit_b",
+    "sam_model_type": "vit_l",
     "sam_checkpoint": os.path.join(
-        BASE_DIR, "sam", "sam_vit_b_01ec64.pth"
+        BASE_DIR, "sam", "sam_vit_l_0b3195.pth"
     ),
     "device": "auto",
     # 图像预处理

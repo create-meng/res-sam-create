@@ -13,7 +13,7 @@
 │   │   ├── main.py                  # 独立演示脚本
 │   │   └── features.pth             # [预置] 特征银行（需重建）
 │   ├── sam/                         # SAM 模型
-│   │   └── sam_vit_l_0b3195.pth     # SAM ViT-L 权重
+│   │   └── sam_vit_l_0b3195.pth     # SAM ViT-L（GitHub LFS；OpenI 常需手动下载）
 │   ├── ui/                          # GUI 界面
 │   │   ├── ui_funcs.py              # 主窗口逻辑
 │   │   └── utils.py                 # 工作线程

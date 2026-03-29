@@ -20,12 +20,16 @@ from datetime import datetime
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
+from experiments.resize_policy import RESIZE_POLICY_VOC_ANNOTATION, target_hw_for_preprocess
+from experiments.dataset_layout import DATASET_ENHANCED, apply_layout_to_config_06
+
 import numpy as np
 import torch
 from tqdm import tqdm
 from PIL import Image
 
 CONFIG = {
+    "dataset_mode": DATASET_ENHANCED,
     # 数据目录（open-source annotated 子集）
     "test_data_dirs": {
         "cavities": os.path.join(
@@ -45,16 +49,19 @@ CONFIG = {
     "hidden_size": 30,
     "window_size": 50,
     "stride": 5,
+    "beta_threshold": 0.2,
+    "anomaly_threshold": 0.2,
+    "region_coarse_threshold": 0.2,
     "spectral_radius": 0.9,
     "connectivity": 0.1,
-    # 图像预处理
+    "resize_policy": RESIZE_POLICY_VOC_ANNOTATION,
     "image_size": (369, 369),
-    # SAM 配置
-    "sam_model_type": "vit_b",
+    # SAM 配置（本仓库主线 vit_l）
+    "sam_model_type": "vit_l",
     "sam_checkpoint": os.path.join(
         BASE_DIR,
         "sam",
-        "sam_vit_b_01ec64.pth",
+        "sam_vit_l_0b3195.pth",
     ),
     # Feature Bank
     "feature_bank_path": os.path.join(
@@ -83,8 +90,11 @@ CONFIG = {
     "max_images_per_category": None,
 
     # 与 V3 主推理（02_inference_auto_v3.py）保持一致的 detect_automatic 参数
-    "min_region_area": 100,
-    "max_candidates_per_image": 10,
+    # Keep disabled by default to match the paper more closely:
+    # the Methods text does not define fixed area / count cutoffs here.
+    # None means: do not apply these engineering cutoffs in the ablation run.
+    "min_region_area": None,
+    "max_candidates_per_image": None,
 }
 
 
@@ -163,32 +173,39 @@ def _scale_box_to_resized(gt_box: list, gt_w: int, gt_h: int, resized_h: int, re
     ]
 
 
-def _sample_clicks_from_gt_bbox(gt_box_resized: list, pos_clicks: int, neg_clicks: int, img_w: int, img_h: int):
-    xmin, ymin, xmax, ymax = gt_box_resized
-    # IMPORTANT: This repo's VOC annotations behave like half-open intervals:
-    # [xmin, ymin, xmax, ymax) where xmax/ymax may equal image width/height.
-    xmin = max(0, min(int(xmin), img_w))
-    xmax = max(0, min(int(xmax), img_w))
-    ymin = max(0, min(int(ymin), img_h))
-    ymax = max(0, min(int(ymax), img_h))
+def _normalize_boxes(gt_boxes_resized: list, img_w: int, img_h: int) -> list:
+    normalized_boxes = []
+    for gt_box in gt_boxes_resized or []:
+        xmin, ymin, xmax, ymax = gt_box
+        xmin = max(0, min(int(xmin), img_w))
+        xmax = max(0, min(int(xmax), img_w))
+        ymin = max(0, min(int(ymin), img_h))
+        ymax = max(0, min(int(ymax), img_h))
+        if (xmax - xmin) > 0 and (ymax - ymin) > 0:
+            normalized_boxes.append((xmin, ymin, xmax, ymax))
+    return normalized_boxes
 
+
+def _sample_clicks_from_gt_boxes(gt_boxes_resized: list, pos_clicks: int, neg_clicks: int, img_w: int, img_h: int):
+    normalized_boxes = _normalize_boxes(gt_boxes_resized, img_w, img_h)
     pos_points = []
     neg_points = []
+    if not normalized_boxes:
+        return pos_points, neg_points
 
-    for _ in range(max(0, pos_clicks)):
-        # Sample strictly inside bbox. Since bbox is [xmin, xmax), the max valid x is xmax-1.
-        if (xmax - xmin) <= 0 or (ymax - ymin) <= 0:
-            break
+    for idx in range(max(0, pos_clicks)):
+        xmin, ymin, xmax, ymax = normalized_boxes[idx % len(normalized_boxes)]
         x = random.randint(xmin, max(xmin, xmax - 1))
         y = random.randint(ymin, max(ymin, ymax - 1))
         pos_points.append((x, y))
 
     attempts = 0
-    while len(neg_points) < max(0, neg_clicks) and attempts < 200:
+    max_attempts = max(200, neg_clicks * 50)
+    while len(neg_points) < max(0, neg_clicks) and attempts < max_attempts:
         x = random.randint(0, img_w - 1)
         y = random.randint(0, img_h - 1)
-        # Outside check uses the same half-open containment.
-        if not (xmin <= x < xmax and ymin <= y < ymax):
+        inside_any = any(xmin <= x < xmax and ymin <= y < ymax for xmin, ymin, xmax, ymax in normalized_boxes)
+        if not inside_any:
             neg_points.append((x, y))
         attempts += 1
 
@@ -205,27 +222,31 @@ def count_patches_wo_sam(image: np.ndarray, window_size: int, stride: int) -> in
     return count
 
 
-def count_patches_in_box(image: np.ndarray, box: list, window_size: int, stride: int) -> int:
-    """在给定矩形框内做 centered patch dense 扫描并计数（用于 w/o SAM 的 click-guided：以 GT bbox 模拟用户矩形）。"""
+def count_patches_in_boxes(image: np.ndarray, boxes: list, window_size: int, stride: int) -> int:
+    """在所有 GT 矩形框并集内做 centered patch dense 扫描并计数。"""
     h, w = image.shape
-    if not box or len(box) != 4:
+    if not boxes:
         return 0
-    x1, y1, x2, y2 = box
-    x1 = max(0, min(int(x1), w))
-    x2 = max(0, min(int(x2), w))
-    y1 = max(0, min(int(y1), h))
-    y2 = max(0, min(int(y2), h))
 
     half_win = window_size // 2
-    count = 0
-    for y in range(y1 + half_win, y2 - half_win, stride):
-        for x in range(x1 + half_win, x2 - half_win, stride):
-            if y - half_win < 0 or y + half_win > h:
-                continue
-            if x - half_win < 0 or x + half_win > w:
-                continue
-            count += 1
-    return count
+    centers = set()
+    for box in boxes:
+        if not box or len(box) != 4:
+            continue
+        x1, y1, x2, y2 = box
+        x1 = max(0, min(int(x1), w))
+        x2 = max(0, min(int(x2), w))
+        y1 = max(0, min(int(y1), h))
+        y2 = max(0, min(int(y2), h))
+
+        for y in range(y1 + half_win, y2 - half_win, stride):
+            for x in range(x1 + half_win, x2 - half_win, stride):
+                if y - half_win < 0 or y + half_win > h:
+                    continue
+                if x - half_win < 0 or x + half_win > w:
+                    continue
+                centers.add((int(x), int(y)))
+    return len(centers)
 
 
 def count_patches_with_sam(
@@ -259,7 +280,8 @@ def count_patches_with_sam(
 
 def main():
     global CONFIG
-    CONFIG = dict(CONFIG)
+    CONFIG = apply_layout_to_config_06(dict(CONFIG), BASE_DIR, "v4")
+    print(f"dataset_mode={CONFIG.get('dataset_mode')} | feature_bank={CONFIG.get('feature_bank_path')}", flush=True)
     CONFIG["sam_checkpoint"] = _to_abs(BASE_DIR, CONFIG.get("sam_checkpoint", ""))
     CONFIG["feature_bank_path"] = _to_abs(BASE_DIR, CONFIG.get("feature_bank_path", ""))
     CONFIG["output_dir"] = _to_abs(BASE_DIR, CONFIG.get("output_dir", ""))
@@ -336,15 +358,13 @@ def main():
         hidden_size=CONFIG["hidden_size"],
         window_size=CONFIG["window_size"],
         stride=CONFIG["stride"],
-        anomaly_threshold=0.5,
-        region_coarse_threshold=0.5,
+        anomaly_threshold=CONFIG["beta_threshold"],
+        region_coarse_threshold=CONFIG["beta_threshold"],
         sam_model_type=CONFIG["sam_model_type"],
         sam_checkpoint=CONFIG["sam_checkpoint"],
     )
     if os.path.exists(CONFIG["feature_bank_path"]):
         model.load_feature_bank(CONFIG["feature_bank_path"])
-
-    resized_h, resized_w = CONFIG["image_size"]
 
     last_completed = start_idx
     try:
@@ -355,7 +375,9 @@ def main():
             category = item["category"]
             xml_path = item.get("xml_path")
 
-            img = load_image(img_path, CONFIG["image_size"])
+            gt_pre = parse_voc_xml(xml_path) if xml_path else None
+            target_hw = target_hw_for_preprocess(CONFIG, gt_pre)
+            img = load_image(img_path, target_hw)
             img_h, img_w = img.shape
 
             # Automatic: w/o SAM（整图 dense sliding window）
@@ -366,8 +388,8 @@ def main():
             try:
                 res_auto = model.detect_automatic(
                     img,
-                    min_region_area=int(CONFIG.get("min_region_area", 100)),
-                    max_regions=int(CONFIG.get("max_candidates_per_image", 10)),
+                    min_region_area=CONFIG.get("min_region_area"),
+                    max_regions=CONFIG.get("max_candidates_per_image"),
                 )
                 with_sam_auto = int(res_auto.get("num_esn_fits", 0))
                 num_candidates = int(res_auto.get("num_candidates", 0))
@@ -379,20 +401,24 @@ def main():
 
             # Click-guided：需要 GT bbox 才能模拟点击
             click_records = {}
-            gt = parse_voc_xml(xml_path) if xml_path else None
-            gt_box_resized = None
+            gt = gt_pre
+            gt_boxes_resized = []
             if gt and gt.get("objects"):
                 gt_w = gt.get("width")
                 gt_h = gt.get("height")
                 gt_boxes = [[o["xmin"], o["ymin"], o["xmax"], o["ymax"]] for o in gt["objects"]]
-                gt_box_resized = _scale_box_to_resized(gt_boxes[0], gt_w, gt_h, resized_h, resized_w)
+                gt_boxes_resized = [
+                    _scale_box_to_resized(box, gt_w, gt_h, img_h, img_w)
+                    for box in gt_boxes
+                ]
+                gt_boxes_resized = _normalize_boxes(gt_boxes_resized, img_w, img_h)
 
             for cfg in click_configs:
                 cfg_name = cfg["name"]
                 pos_clicks = cfg["pos_clicks"]
                 neg_clicks = cfg["neg_clicks"]
 
-                if gt_box_resized is None:
+                if not gt_boxes_resized:
                     click_records[cfg_name] = {
                         "wo_sam": 0,
                         "with_sam": 0,
@@ -402,11 +428,13 @@ def main():
                     }
                     continue
 
-                # w/o SAM click-guided：在 GT bbox（模拟用户矩形）内 dense centered patch 扫描
-                wo_sam_click = count_patches_in_box(img, gt_box_resized, CONFIG["window_size"], CONFIG["stride"])
+                # Paper-aligned click ablation: use all GT rectangles rather than only the first one.
+                wo_sam_click = count_patches_in_boxes(img, gt_boxes_resized, CONFIG["window_size"], CONFIG["stride"])
 
                 # Res-SAM click-guided：运行 detect_click_guided，并读取 num_esn_fits
-                pos_points, neg_points = _sample_clicks_from_gt_bbox(gt_box_resized, pos_clicks, neg_clicks, img_w, img_h)
+                pos_points, neg_points = _sample_clicks_from_gt_boxes(
+                    gt_boxes_resized, pos_clicks, neg_clicks, img_w, img_h
+                )
                 try:
                     res_click = model.detect_click_guided(
                         img,
@@ -437,7 +465,7 @@ def main():
                         "num_coarse_discarded": int(num_coarse_discarded),
                     },
                     "click_guided": click_records,
-                    "has_gt": bool(gt_box_resized is not None),
+                    "has_gt": bool(gt_boxes_resized),
                 }
             )
 

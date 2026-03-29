@@ -25,6 +25,9 @@ from datetime import datetime
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
+from experiments.resize_policy import RESIZE_POLICY_VOC_ANNOTATION, target_hw_for_preprocess
+from experiments.dataset_layout import DATASET_ENHANCED, apply_layout_to_config_07
+
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -32,6 +35,7 @@ from sklearn.metrics import roc_curve, auc
 from PIL import Image
 
 CONFIG = {
+    "dataset_mode": DATASET_ENHANCED,
     # Feature Bank 来源（行）
     "feature_bank_sources": {
         "augmented_intact": os.path.join(
@@ -88,14 +92,14 @@ CONFIG = {
     "spectral_radius": 0.9,
     "connectivity": 0.1,
     "beta_threshold": 0.2,
-    # 图像预处理
+    "resize_policy": RESIZE_POLICY_VOC_ANNOTATION,
     "image_size": (369, 369),
-    # SAM 配置
-    "sam_model_type": "vit_b",
+    # SAM 配置（本仓库主线 vit_l）
+    "sam_model_type": "vit_l",
     "sam_checkpoint": os.path.join(
         BASE_DIR,
         "sam",
-        "sam_vit_b_01ec64.pth",
+        "sam_vit_l_0b3195.pth",
     ),
     # 输出
     "output_dir": os.path.join(
@@ -116,9 +120,9 @@ CONFIG = {
     # 限制图片数
     "max_images_per_category": None,
 
-    # 与 V3 推理（02_inference_auto_v3.py）保持一致的 detect_automatic 参数
-    "min_region_area": 100,
-    "max_candidates_per_image": 10,
+    # 正文未给出面积/数量截断；与 02_inference_auto_v5 默认一致（None = 不额外截断）
+    "min_region_area": None,
+    "max_candidates_per_image": None,
 }
 
 
@@ -184,7 +188,8 @@ def compute_iou(box1, box2):
 
 def main():
     global CONFIG
-    CONFIG = dict(CONFIG)
+    CONFIG = apply_layout_to_config_07(dict(CONFIG), BASE_DIR, "v5")
+    print(f"dataset_mode={CONFIG.get('dataset_mode')} | feature_bank={list((CONFIG.get('feature_bank_sources') or {}).values())}", flush=True)
     CONFIG["feature_bank_sources"] = {k: _to_abs(BASE_DIR, v) for k, v in CONFIG.get("feature_bank_sources", {}).items()}
     CONFIG["test_data_dirs"] = {k: _to_abs(BASE_DIR, v) for k, v in CONFIG.get("test_data_dirs", {}).items()}
     CONFIG["annotation_dirs"] = {k: _to_abs(BASE_DIR, v) for k, v in CONFIG.get("annotation_dirs", {}).items()}
@@ -288,13 +293,15 @@ def main():
         try:
             for idx in tqdm(range(start_idx, len(all_images)), desc=f"Testing {fb_name}"):
                 item = all_images[idx]
-                img = load_image(item["path"], CONFIG["image_size"])
+                gt = parse_voc_xml(item["xml_path"]) if item["xml_path"] else None
+                target_hw = target_hw_for_preprocess(CONFIG, gt)
+                img = load_image(item["path"], target_hw)
 
                 # 检测
                 result = model.detect_automatic(
                     img,
-                    min_region_area=int(CONFIG.get("min_region_area", 100)),
-                    max_regions=int(CONFIG.get("max_candidates_per_image", 10)),
+                    min_region_area=CONFIG.get("min_region_area"),
+                    max_regions=CONFIG.get("max_candidates_per_image"),
                 )
                 regions = result.get("anomaly_regions", [])
                 
@@ -303,8 +310,7 @@ def main():
                 else:
                     max_score = 0.0
 
-                # GT
-                gt = parse_voc_xml(item["xml_path"]) if item["xml_path"] else None
+                # GT（已提前解析用于 resize）
                 has_gt = gt is not None and len(gt.get("objects", [])) > 0
 
                 if item.get("category") == "normal_auc":

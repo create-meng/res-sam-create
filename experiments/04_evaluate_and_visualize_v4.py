@@ -19,6 +19,8 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.path.insert(0, BASE_DIR)
 
+from experiments.dataset_layout import DATASET_ENHANCED, apply_layout_to_config_04
+
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, auc, precision_recall_curve
@@ -30,6 +32,7 @@ from PIL import Image
 
 # ============ 配置 ============
 CONFIG = {
+    'dataset_mode': DATASET_ENHANCED,
     # 结果路径 (V4)
     'predictions_path': os.path.join(
         BASE_DIR,
@@ -69,8 +72,8 @@ CONFIG = {
     # The raw cavities/Utilities folders are not used here because they
     # do not provide the required annotation files for this evaluation.
     'paper_reference': {
-        'dataset_name': 'Open-source (paper Table 1/2)',
-        'dataset_note': 'Local evaluation uses augmented_intact + augmented_cavities + augmented_utilities with a fully enhanced evaluation protocol; only the Feature Bank source differs in V4.',
+        'dataset_name': 'Paper Table 1/2 reference (not a strict local reproduction dataset)',
+        'dataset_note': 'Local evaluation uses augmented_intact + augmented_cavities + augmented_utilities. The paper numbers are kept only as external references, not as a like-for-like reproduced test set.',
         'auto': {
             'Precision': 0.842,
             'Recall': 0.877,
@@ -85,7 +88,7 @@ CONFIG = {
     },
 
     'version': 'V4',
-    'alignment_notes': 'Enhanced-eval setup: fb_source=intact, eval=augmented_intact + augmented anomalies, feature f=[W_out,b]',
+    'alignment_notes': 'Paper-aligned method with local enhanced-eval dataset: fb_source=intact, eval=augmented_intact + augmented anomalies, feature f=[W_out,b]',
 }
 
 
@@ -354,7 +357,7 @@ def generate_comparison_table(metrics: dict, paper_reference: dict) -> str:
         f'- 类别映射: cavities -> cavities, utilities -> pipes/utilities, normal_auc -> augmented_intact',
         f'- 说明: {dataset_note}',
         '',
-        '## 全自动模式直接对比',
+        '## 全自动模式参考对照',
         '',
         '| 指标 | 论文 | 本地 | 差值 |',
         '|---|---:|---:|---:|',
@@ -411,7 +414,7 @@ def generate_click_summary(click_metrics_map: dict, paper_reference: dict) -> st
     """生成中文 click-guided 对比报告。"""
     click_baseline = paper_reference.get('click', {})
     lines = [
-        '## Click-guided 模式直接对比',
+        '## Click-guided 模式参考对照',
         '',
         '| 点击配置 | 论文 AUC | 本地 AUC | 差值 | 论文 F1 | 本地 F1 | 差值 |',
         '|---|---:|---:|---:|---:|---:|---:|',
@@ -497,6 +500,7 @@ def main():
     """主函数"""
     print("=" * 60)
     print("Res-SAM V4: 评估和可视化 (Strict Paper Alignment)")
+    print(f"dataset_mode={CONFIG.get('dataset_mode')}")
     print("=" * 60)
     print(f"  window_size = 50")
     print(f"  feature = [W_out, b] (dim=61)")
@@ -585,7 +589,7 @@ def main():
 
 
 if __name__ == "__main__":
-    CONFIG = dict(CONFIG)
+    CONFIG = apply_layout_to_config_04(dict(CONFIG), BASE_DIR, "v4")
     CONFIG['predictions_path'] = _to_abs(BASE_DIR, CONFIG.get('predictions_path', ''))
     CONFIG['click_predictions_path'] = _to_abs(BASE_DIR, CONFIG.get('click_predictions_path', ''))
     CONFIG['vis_output_dir'] = _to_abs(BASE_DIR, CONFIG.get('vis_output_dir', ''))

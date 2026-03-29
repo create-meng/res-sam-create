@@ -60,10 +60,10 @@ CONFIG = {
     'hidden_size': 30,
     'anomaly_threshold': 0.5,  # 初始阈值，会自动优化
     
-    # SAM 参数 - 使用 vit_b 解决内存问题
-    'sam_model_type': 'vit_b',  # vit_b 更小，内存占用低
+    # SAM 参数 - 主线为 vit_l（与作者仓库一致）；显存不足可改 vit_b
+    'sam_model_type': 'vit_l',
     'sam_checkpoint': os.path.join(os.path.dirname(os.path.dirname(__file__)), 
-                                   'sam', 'sam_vit_b_01ec64.pth'),
+                                   'sam', 'sam_vit_l_0b3195.pth'),
     
     # 图像预处理 - 使用论文原始尺寸
     'image_size': (369, 369),

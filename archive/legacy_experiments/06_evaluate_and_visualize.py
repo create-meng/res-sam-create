@@ -325,7 +325,7 @@ def generate_comparison_table(metrics: dict, paper_baseline: dict) -> str:
 
 1. **SAM 模型权重**
    - 需要下载 SAM 预训练权重
-   - 建议使用 vit_b (最小模型)
+   - 主线使用 vit_l；显存不足时可改用 vit_b
 
 2. **环境一致性**
    - Feature Bank 应与测试数据来自同一环境

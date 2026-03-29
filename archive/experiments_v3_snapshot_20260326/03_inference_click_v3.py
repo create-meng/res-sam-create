@@ -110,9 +110,9 @@ CONFIG = {
     "anomaly_threshold": 0.5,
     "region_coarse_threshold": 0.5,
     # SAM
-    "sam_model_type": "vit_b",
+    "sam_model_type": "vit_l",
     "sam_checkpoint": os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), "sam", "sam_vit_b_01ec64.pth"
+        os.path.dirname(os.path.dirname(__file__)), "sam", "sam_vit_l_0b3195.pth"
     ),
 
     "device": "auto",

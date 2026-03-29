@@ -21,6 +21,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.path.insert(0, BASE_DIR)
 
+from experiments.resize_policy import RESIZE_POLICY_VOC_ANNOTATION, target_hw_for_preprocess
+from experiments.dataset_layout import DATASET_ENHANCED, apply_layout_to_config_05
+
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -30,6 +33,7 @@ from PIL import Image
 
 
 CONFIG = {
+    "dataset_mode": DATASET_ENHANCED,
     # V3 推理结果（final bboxes）
     "predictions_path": os.path.join(
         BASE_DIR,
@@ -75,11 +79,17 @@ CONFIG = {
     "hidden_size": 30,
     "window_size": 50,
     "stride": 5,
+    # ESN implementation defaults reused in clustering re-fit.
+    # These are not currently treated as paper-explicit values unless later
+    # evidence from the paper/supplement/official code confirms them.
     "spectral_radius": 0.9,
     "connectivity": 0.1,
-    # 图像预处理（需与 v3 推理一致，以便 bbox 缩放）
+    "resize_policy": RESIZE_POLICY_VOC_ANNOTATION,
     "image_size": (369, 369),
     # 聚类参数
+    # Local binary anomaly-type setup for the current annotated subset
+    # (cavities vs utilities). This is dataset-mapping-dependent, not a
+    # universal paper constant.
     "n_clusters": 2,
     # 输出
     "output_dir": os.path.join(
@@ -193,60 +203,17 @@ def _crop_region(img: np.ndarray, bbox: list) -> np.ndarray:
     return img[y1:y2, x1:x2]
 
 
-def _extract_region_patches(
-    img: np.ndarray,
-    bbox: list,
-    window_size: int,
-    stride: int,
-) -> tuple[list, list]:
-    """Extract centered patches inside a candidate bbox.
-
-    This follows the paper more closely than resizing the whole region:
-    each point inside the retained anomaly region acts as a patch center,
-    and patches that extend beyond the image boundary are skipped.
-    """
+def _extract_region_crop(img: np.ndarray, bbox: list) -> np.ndarray:
+    """Crop the final anomaly region for region-level re-fitting (paper Table 3)."""
     x1, y1, x2, y2 = [int(v) for v in bbox]
     h, w = img.shape[:2]
-    half_win = int(window_size) // 2
-
-    x_start = max(x1 + half_win, half_win)
-    y_start = max(y1 + half_win, half_win)
-    x_stop = min(x2 - half_win, w - half_win)
-    y_stop = min(y2 - half_win, h - half_win)
-
-    if x_start >= x_stop or y_start >= y_stop:
-        return [], []
-
-    patches = []
-    positions = []
-
-    for y in range(y_start, y_stop, stride):
-        patch_y1 = y - half_win
-        patch_y2 = y + half_win
-        if patch_y1 < 0 or patch_y2 > h:
-            continue
-        for x in range(x_start, x_stop, stride):
-            patch_x1 = x - half_win
-            patch_x2 = x + half_win
-            if patch_x1 < 0 or patch_x2 > w:
-                continue
-
-            patch = img[patch_y1:patch_y2, patch_x1:patch_x2]
-            if patch.shape == (window_size, window_size):
-                patches.append(patch)
-                positions.append((int(x), int(y)))
-
-    return patches, positions
-
-
-def _aggregate_region_features(features: list[np.ndarray]) -> np.ndarray:
-    """Aggregate patch-level features into a single region feature."""
-    if not features:
-        return np.zeros((0,), dtype=np.float32)
-    if len(features) == 1:
-        return features[0].astype(np.float32, copy=False)
-    stacked = np.stack([np.asarray(f, dtype=np.float32) for f in features], axis=0)
-    return stacked.mean(axis=0)
+    x1 = max(0, min(x1, w))
+    x2 = max(0, min(x2, w))
+    y1 = max(0, min(y1, h))
+    y2 = max(0, min(y2, h))
+    if x2 <= x1 or y2 <= y1:
+        return np.zeros((0, 0), dtype=img.dtype)
+    return img[y1:y2, x1:x2]
 
 
 def fcm_clustering(X: np.ndarray, n_clusters: int, max_iter: int = 100, m: float = 2.0) -> np.ndarray:
@@ -306,7 +273,8 @@ def compute_clustering_metrics(true_labels: np.ndarray, pred_labels: np.ndarray)
 
 def main():
     global CONFIG
-    CONFIG = dict(CONFIG)
+    CONFIG = apply_layout_to_config_05(dict(CONFIG), BASE_DIR, "v5")
+    print(f"dataset_mode={CONFIG.get('dataset_mode')} | predictions={CONFIG.get('predictions_path')}", flush=True)
     CONFIG["predictions_path"] = _to_abs(BASE_DIR, CONFIG.get("predictions_path", ""))
     CONFIG["output_dir"] = _to_abs(BASE_DIR, CONFIG.get("output_dir", ""))
     CONFIG["checkpoint_dir"] = _to_abs(BASE_DIR, CONFIG.get("checkpoint_dir", ""))
@@ -370,9 +338,6 @@ def main():
         for r in preds:
             flat.append({"category": category, "record": r})
 
-    resized_h, resized_w = CONFIG["image_size"]
-    window = int(CONFIG.get("window_size", 50))
-    stride = int(CONFIG.get("stride", 5))
     checkpoint_every = int(CONFIG.get("checkpoint_every", 50))
 
     last_completed = start_pos
@@ -394,10 +359,12 @@ def main():
                 # 无 GT 的不参与 Table 3（按当前复现范围锁定：仅 annotated 子集出数）
                 items.append({"image_name": image_name, "category": category, "skipped": True, "reason": "no_gt"})
             else:
-                img = load_image(img_path, CONFIG["image_size"]) if img_path else None
+                target_hw = target_hw_for_preprocess(CONFIG, gt)
+                img = load_image(img_path, target_hw) if img_path else None
                 if img is None:
                     items.append({"image_name": image_name, "category": category, "skipped": True, "reason": "missing_image"})
                 else:
+                    proc_h, proc_w = int(img.shape[0]), int(img.shape[1])
                     gt_w = gt.get("width")
                     gt_h = gt.get("height")
 
@@ -414,28 +381,20 @@ def main():
                                 pred_box_orig,
                                 gt_w,
                                 gt_h,
-                                resized_h,
-                                resized_w,
+                                proc_h,
+                                proc_w,
                             )
 
-                            patches, patch_positions = _extract_region_patches(
-                                img,
-                                pred_box_resized,
-                                window_size=window,
-                                stride=stride,
-                            )
-                            if not patches:
+                            region_crop = _extract_region_crop(img, pred_box_resized)
+                            if region_crop.size == 0:
                                 continue
 
                             any_valid_region = True
 
-                            # 论文口径：对 region 内每个有效 patch 单独做 2D-ESN 拟合，
-                            # 再将 patch 级动态特征聚合成 region 级特征用于聚类。
-                            patch_tensor = torch.tensor(np.stack(patches, axis=0), dtype=torch.float32)
+                            # Paper Table 3 / Methods: reapply 2D-ESN to each final anomaly region directly.
+                            region_tensor = torch.tensor(region_crop[None, ...], dtype=torch.float32)
                             with torch.no_grad():
-                                patch_feats = esn.forward(patch_tensor).detach().cpu().numpy()
-
-                            feat = _aggregate_region_features([pf for pf in patch_feats])
+                                feat = esn.forward(region_tensor).detach().cpu().numpy()[0]
 
                             items.append(
                                 {
@@ -444,9 +403,8 @@ def main():
                                     "bbox_idx": int(bbox_idx),
                                     "pred_bbox_orig": [int(v) for v in pred_box_orig],
                                     "pred_bbox_resized": [int(v) for v in pred_box_resized],
-                                    "region_patch_count": int(len(patches)),
-                                    "region_patch_positions": [list(map(int, pos)) for pos in patch_positions[:20]],
-                                    "aggregation_method": "mean",
+                                    "region_shape_hw": [int(region_crop.shape[0]), int(region_crop.shape[1])],
+                                    "refit_level": "region_direct",
                                     "skipped": False,
                                     "feature": feat.tolist(),
                                     "true_label": 0 if category == "cavities" else 1,
