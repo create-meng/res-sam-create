@@ -19,6 +19,10 @@
 对应命令的最短路径如下（**主线 V4 示例**；V3 已归档至 `archive/experiments_v3_snapshot_20260326/`）：
 
 ```bash
+# 若尚未克隆（OpenI 示例；浅克隆 + 跳过 LFS 自动检出）
+export GIT_LFS_SKIP_SMUDGE=1
+git clone --depth 1 https://openi.pcl.ac.cn/create-meng/res-sam.git && cd res-sam
+
 conda create -n res-sam python=3.9 -y
 conda activate res-sam
 pip install -r requirements-gpu.txt   # 或 requirements-cpu.txt
@@ -50,6 +54,30 @@ python experiments/04_evaluate_and_visualize_v4.py
 > 旧输出目录已归档：`archive/legacy_outputs/`
 
 ## 从安装到运行的一条线
+
+### 第 0 步：克隆仓库（推荐浅克隆）
+
+为减少 Git 传输与本地对象数量、加快首次拉取，建议 **`git clone --depth 1`**（只取默认分支最新提交；复现主线通常不需要完整历史）。若日后需要完整提交历史，可执行 `git fetch --unshallow`，或删除目录后重新全量克隆。
+
+检出时建议 **`GIT_LFS_SKIP_SMUDGE=1`**：工作区里先落 LFS 指针文本，再按需 `git lfs pull`，避免大文件在 clone/checkout 阶段失败。
+
+OpenI：
+
+```bash
+export GIT_LFS_SKIP_SMUDGE=1
+git clone --depth 1 https://openi.pcl.ac.cn/create-meng/res-sam.git
+cd res-sam
+```
+
+GitHub：
+
+```bash
+export GIT_LFS_SKIP_SMUDGE=1
+git clone --depth 1 https://github.com/create-meng/res-sam-create.git
+cd res-sam-create
+```
+
+一键脚本（脚本内已浅克隆 + skip smudge）：`bash scripts/setup_from_scratch_openi.sh`、`bash scripts/setup_from_scratch_github.sh`。
 
 ### 第 1 步：安装环境
 
@@ -231,10 +259,10 @@ scp -P 42034 root@xj-member.bitahub.com:/root/res-sam-create/sam_vit_l_0b3195.pt
 如果你的问题不是“完全不用 Git LFS”，而是“仓库里其它 LFS 文件都想拉，只是 `sam/sam_vit_l_0b3195.pth` 这个权重不想走 LFS（或远程未托管）”，可以用下面这组命令：
 
 ```bash
-# 先跳过 LFS smudge，避免 checkout 阶段失败
+# 先跳过 LFS smudge，避免 checkout 阶段失败；浅克隆减轻对象与流量
 export GIT_LFS_SKIP_SMUDGE=1
 
-git clone https://openi.pcl.ac.cn/create-meng/res-sam.git
+git clone --depth 1 https://openi.pcl.ac.cn/create-meng/res-sam.git
 cd res-sam
 
 # 拉取除该权重以外的其它 LFS 对象（数据集等）
