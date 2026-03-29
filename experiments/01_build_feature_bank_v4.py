@@ -30,6 +30,7 @@ from PIL import Image
 
 from experiments.resize_policy import RESIZE_POLICY_VOC_ANNOTATION, target_hw_for_preprocess
 from experiments.dataset_layout import DATASET_ENHANCED, apply_layout_to_config_01
+from experiments.paper_constants import DEFAULT_BETA_THRESHOLD
 
 # ============ 配置 ============
 CONFIG = {
@@ -214,8 +215,7 @@ def build_feature_bank(config: dict, resume: bool = True):
         hidden_size=config['hidden_size'],
         window_size=config['window_size'],  # 50
         stride=config['stride'],
-        anomaly_threshold=config.get('beta_threshold', config.get('anomaly_threshold', 0.5)),  # Feature Bank 构建阶段不使用，仅保持口径一致
-        region_coarse_threshold=config.get('beta_threshold', config.get('region_coarse_threshold', 0.5)),  # Feature Bank 构建阶段不使用，仅保持口径一致
+        beta_threshold=float(config.get('beta_threshold', DEFAULT_BETA_THRESHOLD)),
         device=config.get('device', 'cuda'),
     )
     
@@ -301,9 +301,6 @@ def build_feature_bank(config: dict, resume: bool = True):
     source_info = ", ".join(config['normal_data_sources'].keys())
     feature_bank = model.build_feature_bank(all_images, source_info=source_info)
 
-    # 为保证跨设备复现稳定性，保存前强制转为 CPU tensor（避免 .pth 绑定 CUDA 设备）
-    feature_bank_to_save = feature_bank.detach().cpu()
-    
     # 验证特征维度
     expected_dim = 2 * config['hidden_size'] + 1
     actual_dim = feature_bank.shape[1]
@@ -315,12 +312,14 @@ def build_feature_bank(config: dict, resume: bool = True):
     else:
         print(f"  ✗ 维度不匹配！期望 {expected_dim}，实际 {actual_dim}")
     
-    # 保存 Feature Bank
-    torch.save(feature_bank_to_save, output_path)
+    # 保存 Feature Bank（含 2D-ESN state_dict，与推理阶段同一水库权重）
+    model.save_feature_bank(output_path)
+    feature_bank_to_save = feature_bank.detach().cpu()
     print(f"\nFeature Bank V4 保存至: {output_path}")
     print(f"形状: {feature_bank_to_save.shape}")
     
     # 保存元数据
+    all_metadata['feature_bank_bundle_format'] = 'res_sam_fb_v2'
     all_metadata['feature_bank_shape'] = list(feature_bank_to_save.shape)
     all_metadata['feature_bank_path'] = output_path
     all_metadata['feature_dim_expected'] = expected_dim

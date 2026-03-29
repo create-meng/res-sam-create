@@ -22,6 +22,7 @@ sys.path.insert(0, BASE_DIR)
 
 from experiments.resize_policy import RESIZE_POLICY_VOC_ANNOTATION, target_hw_for_preprocess
 from experiments.dataset_layout import DATASET_ENHANCED, apply_layout_to_config_06
+from experiments.paper_constants import DEFAULT_BETA_THRESHOLD
 
 import numpy as np
 import torch
@@ -49,9 +50,7 @@ CONFIG = {
     "hidden_size": 30,
     "window_size": 50,
     "stride": 5,
-    "beta_threshold": 0.2,
-    "anomaly_threshold": 0.2,
-    "region_coarse_threshold": 0.2,
+    "beta_threshold": DEFAULT_BETA_THRESHOLD,
     "spectral_radius": 0.9,
     "connectivity": 0.1,
     "resize_policy": RESIZE_POLICY_VOC_ANNOTATION,
@@ -358,8 +357,7 @@ def main():
         hidden_size=CONFIG["hidden_size"],
         window_size=CONFIG["window_size"],
         stride=CONFIG["stride"],
-        anomaly_threshold=CONFIG["beta_threshold"],
-        region_coarse_threshold=CONFIG["beta_threshold"],
+        beta_threshold=float(CONFIG["beta_threshold"]),
         sam_model_type=CONFIG["sam_model_type"],
         sam_checkpoint=CONFIG["sam_checkpoint"],
     )

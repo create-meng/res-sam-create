@@ -8,6 +8,9 @@ V3 改进（严格按论文对齐）：
 - 严格一对一 IoU 匹配评估
 
 论文对应：Table 2, Fig.3
+
+评测说明：本脚本中 IoU 匹配阈值使用 EVAL_DETECTION_IOU_THRESHOLD（正文约 p.4「IoU > 0.5 判为检测正确」），
+与 Eq.(9) 特征距离阈值 β（beta_threshold，见 02/03）不是同一参数。
 """
 
 import sys
@@ -20,6 +23,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
 from experiments.dataset_layout import DATASET_ENHANCED, apply_layout_to_config_04
+from experiments.paper_constants import EVAL_DETECTION_IOU_THRESHOLD
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -125,7 +129,7 @@ def _compute_iou(box1: list, box2: list) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def _match_tp_fp_fn(pred_bboxes: list, gt_bboxes: list, iou_thresh: float = 0.5) -> tuple:
+def _match_tp_fp_fn(pred_bboxes: list, gt_bboxes: list, iou_thresh: float = EVAL_DETECTION_IOU_THRESHOLD) -> tuple:
     """一对一 IoU 匹配，返回 (tp, fp, fn)。"""
     pred_bboxes = pred_bboxes or []
     gt_bboxes = gt_bboxes or []
@@ -175,7 +179,7 @@ def compute_metrics(results: dict) -> dict:
         for r in cat_results:
             if r.get('exclude_from_det_metrics', False):
                 continue
-            _tp, _fp, _fn = _match_tp_fp_fn(r.get('pred_bboxes', []), r.get('gt_bboxes', []), iou_thresh=0.5)
+            _tp, _fp, _fn = _match_tp_fp_fn(r.get('pred_bboxes', []), r.get('gt_bboxes', []), iou_thresh=EVAL_DETECTION_IOU_THRESHOLD)
             tp += _tp
             fp += _fp
             fn += _fn
@@ -301,7 +305,7 @@ def plot_threshold_analysis(results: dict, output_path: str):
                     if s is not None and s > thresh
                 ]
 
-                _tp, _fp, _fn = _match_tp_fp_fn(filtered_pred, gt_bboxes, iou_thresh=0.5)
+                _tp, _fp, _fn = _match_tp_fp_fn(filtered_pred, gt_bboxes, iou_thresh=EVAL_DETECTION_IOU_THRESHOLD)
                 tp_total += _tp
                 fp_total += _fp
                 fn_total += _fn

@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from experiments.resize_policy import RESIZE_POLICY_VOC_ANNOTATION, target_hw_for_preprocess
 from experiments.dataset_layout import DATASET_ENHANCED, apply_layout_to_config_02_03
+from experiments.paper_constants import DEFAULT_BETA_THRESHOLD
 
 import torch
 import numpy as np
@@ -110,9 +111,7 @@ CONFIG = {
     "window_size": 50,
     "stride": 5,
     "hidden_size": 30,
-    "beta_threshold": 0.2,
-    "anomaly_threshold": 0.2,
-    "region_coarse_threshold": 0.2,
+    "beta_threshold": DEFAULT_BETA_THRESHOLD,
     # SAM（本仓库主线与作者上游一致：vit_l + sam_vit_l_0b3195.pth）
     "sam_model_type": "vit_l",
     "sam_checkpoint": os.path.join(
@@ -390,7 +389,7 @@ def run_click_guided(config: dict):
     logger.info('Res-SAM V5: Click-guided Inference (Strict Paper Alignment)')
     logger.info('=' * 60)
     logger.info(f"window_size={config.get('window_size')}, stride={config.get('stride')}, hidden_size={config.get('hidden_size')}")
-    logger.info(f"beta_threshold={config.get('beta_threshold')}, anomaly_threshold={config.get('anomaly_threshold')}, region_coarse_threshold={config.get('region_coarse_threshold')}")
+    logger.info(f"beta_threshold (Eq.9 β)={config.get('beta_threshold')}")
     logger.info(
         "resize_policy=%s fixed_image_size_hw=%s",
         config.get("resize_policy"),
@@ -440,8 +439,7 @@ def run_click_guided(config: dict):
         hidden_size=config["hidden_size"],
         window_size=config["window_size"],
         stride=config["stride"],
-        anomaly_threshold=config.get("beta_threshold", config["anomaly_threshold"]),
-        region_coarse_threshold=config.get("beta_threshold", config["region_coarse_threshold"]),
+        beta_threshold=float(config.get("beta_threshold", DEFAULT_BETA_THRESHOLD)),
         sam_model_type=config["sam_model_type"],
         sam_checkpoint=config["sam_checkpoint"],
         device=config.get("device", "cuda"),
@@ -730,7 +728,7 @@ def run_click_guided(config: dict):
                     "window_size": int(config.get("window_size", 50)),
                     "stride": int(config.get("stride", 5)),
                     "hidden_size": int(config.get("hidden_size", 30)),
-                    "beta_threshold": float(config.get("beta_threshold", config.get("anomaly_threshold", 0.5))),
+                    "beta_threshold": float(config.get("beta_threshold", DEFAULT_BETA_THRESHOLD)),
                     "click_configs": config.get("click_configs", []),
                 },
                 "results": all_results,

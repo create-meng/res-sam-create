@@ -35,6 +35,7 @@ from experiments.dataset_layout import (
     DATASET_ENHANCED,
     apply_layout_to_config_02_03,
 )
+from experiments.paper_constants import DEFAULT_BETA_THRESHOLD
 
 
 def _require_segment_anything() -> None:
@@ -108,9 +109,8 @@ CONFIG = {
     "window_size": 50,  # 论文默认值
     "stride": 5,
     "hidden_size": 30,
-    "beta_threshold": 0.2,  # 论文 Eq.(9) 的单一预设阈值 β
-    "anomaly_threshold": 0.2,  # 兼容旧字段：内部与 beta_threshold 保持一致
-    "region_coarse_threshold": 0.2,  # 兼容旧字段：内部与 beta_threshold 保持一致
+    # Eq.(9) β；与作者仓库 PatchRes/main.py / UI 一致默认 0.1（论文只给符号）
+    "beta_threshold": DEFAULT_BETA_THRESHOLD,
     # SAM 参数
     "sam_model_type": "vit_l",
     "sam_checkpoint": os.path.join(
@@ -299,8 +299,7 @@ def run_inference(config: dict):
         hidden_size=config["hidden_size"],
         window_size=config["window_size"],  # 50
         stride=config["stride"],
-        anomaly_threshold=config.get("beta_threshold", config["anomaly_threshold"]),
-        region_coarse_threshold=config.get("beta_threshold", config["region_coarse_threshold"]),
+        beta_threshold=float(config.get("beta_threshold", DEFAULT_BETA_THRESHOLD)),
         sam_model_type=config["sam_model_type"],
         sam_checkpoint=config["sam_checkpoint"],
         device=config.get("device", "auto"),
@@ -311,15 +310,13 @@ def run_inference(config: dict):
     model.load_feature_bank(config["feature_bank_path"])
 
     try:
-        config["beta_threshold"] = float(config.get("beta_threshold", 0.2))
-        config["anomaly_threshold"] = float(config["beta_threshold"])
-        config["region_coarse_threshold"] = float(config["beta_threshold"])
+        config["beta_threshold"] = float(config.get("beta_threshold", DEFAULT_BETA_THRESHOLD))
     except Exception:
         pass
 
-    print(f"最终 beta_threshold = {config.get('beta_threshold')}")
+    print(f"最终 beta_threshold (Eq.9 β) = {config.get('beta_threshold')}")
     try:
-        logger.info("Calibrated beta_threshold=%s", config.get("beta_threshold"))
+        logger.info("beta_threshold (Eq.9 β)=%s", config.get("beta_threshold"))
     except Exception:
         pass
     
@@ -673,7 +670,7 @@ def run_inference(config: dict):
             "window_size": int(config.get("window_size", 50)),
             "stride": int(config.get("stride", 5)),
             "hidden_size": int(config.get("hidden_size", 30)),
-            "beta_threshold": float(config.get("beta_threshold", config.get("anomaly_threshold", 0.2))),
+            "beta_threshold": float(config.get("beta_threshold", DEFAULT_BETA_THRESHOLD)),
         },
         "results": all_results,
     }
