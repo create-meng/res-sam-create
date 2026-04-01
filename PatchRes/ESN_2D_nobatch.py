@@ -48,9 +48,20 @@ class ESN_2D(torch.nn.Module):
         W_res_2 *= self.spectral_radius[1] / rho_W_res
 
         # Convert weights to PyTorch tensors
-        self.W_in = torch.nn.Parameter(torch.from_numpy(W_in).float(), requires_grad=False).to(self._device)
-        self.W_res_1 = torch.nn.Parameter(torch.from_numpy(W_res_1).float(), requires_grad=False).to(self._device)
-        self.W_res_2 = torch.nn.Parameter(torch.from_numpy(W_res_2).float(), requires_grad=False).to(self._device)
+        # Keep tensors as registered Parameters after device move.
+        # NOTE: `nn.Parameter(...).to(device)` may return a Tensor and lose registration.
+        self.W_in = torch.nn.Parameter(
+            torch.from_numpy(W_in).float().to(self._device),
+            requires_grad=False,
+        )
+        self.W_res_1 = torch.nn.Parameter(
+            torch.from_numpy(W_res_1).float().to(self._device),
+            requires_grad=False,
+        )
+        self.W_res_2 = torch.nn.Parameter(
+            torch.from_numpy(W_res_2).float().to(self._device),
+            requires_grad=False,
+        )
         self._w_in_flat = self.W_in[0].view(1, 1, 1, -1) if int(self.W_in.shape[0]) == 1 else None
 
     # 更新水库状态

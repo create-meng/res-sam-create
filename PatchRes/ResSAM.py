@@ -276,7 +276,27 @@ class ResSAM:
             esd = raw.get("esn_state_dict")
             if not isinstance(esd, dict):
                 raise ValueError("Invalid feature bank bundle: missing esn_state_dict")
-            self.esn.load_state_dict(esd, strict=True)
+            try:
+                self.esn.load_state_dict(esd, strict=True)
+            except RuntimeError as e:
+                # Compatibility fallback for old/invalid bundles where ESN fixed reservoir
+                # weights were not serialized (e.g. W_in/W_res_1/W_res_2 missing).
+                missing_keys = [k for k in ("W_in", "W_res_1", "W_res_2") if k not in esd]
+                if not missing_keys:
+                    raise
+                logger_fb = logging.getLogger(__name__)
+                msg = (
+                    "[FeatureBank] Bundle ESN state_dict missing keys %s; "
+                    "fallback to current-runtime ESN (legacy behavior). "
+                    "For deterministic cross-platform inference, rebuild feature bank with latest code."
+                    % str(missing_keys)
+                )
+                print(msg, flush=True)
+                try:
+                    logger_fb.warning(msg)
+                    logger_fb.warning("Original load_state_dict error: %s", str(e))
+                except Exception:
+                    pass
         elif isinstance(raw, torch.Tensor):
             self.feature_bank = raw.to(self.device)
             logger_fb = logging.getLogger(__name__)
