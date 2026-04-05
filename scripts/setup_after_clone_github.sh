@@ -80,9 +80,16 @@ else
   git lfs install
   # 主线为 ViT-L（约 1.2GB）；跳过该文件后从 Meta 官方地址拉取同名权重
   git lfs pull --exclude="sam/sam_vit_l_0b3195.pth"
-  mkdir -p sam
   if [ ! -s sam/sam_vit_l_0b3195.pth ]; then
-    curl -L -o sam/sam_vit_l_0b3195.pth "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth"
+    if [ ! -d sam ] || [ ! -f sam/sam.py ]; then
+      echo "ERROR: expected repo-root sam/ with sam/sam.py (clone layout). cwd=$(pwd)" >&2
+      exit 1
+    fi
+    apt-get update && apt-get install -y aria2
+    aria2c -x 16 -s 16 -k 1M \
+      -o sam_vit_l_0b3195.pth \
+      -d sam \
+      "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth"
   fi
   mark_done "lfs_pull"
 fi

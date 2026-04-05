@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OpenI 镜像未必托管约 1.2GB 的 SAM ViT-L 权重；若 LFS 不可用，请用下方默认 URL 直链下载到 sam/sam_vit_l_0b3195.pth。
+# OpenI 镜像未必托管约 1.2GB 的 SAM ViT-L 权重；若 LFS 不可用，请用默认 URL 经 aria2 下载到 sam/sam_vit_l_0b3195.pth。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -88,8 +88,16 @@ echo "[6/6] Downloading the SAM checkpoint directly..."
 if is_done "sam_weight" && [ -s sam/sam_vit_l_0b3195.pth ]; then
   echo "  - already done, skipping"
 else
-  mkdir -p sam
-  curl -L "$SAM_WEIGHT_URL" -o sam/sam_vit_l_0b3195.pth
+  # 权重必须与 sam/sam.py 同级：仓库根下的 sam/sam_vit_l_0b3195.pth（克隆后已有 sam/，勿放到别的路径）
+  if [ ! -d sam ] || [ ! -f sam/sam.py ]; then
+    echo "ERROR: expected repo-root sam/ with sam/sam.py (clone layout). cwd=$(pwd)" >&2
+    exit 1
+  fi
+  apt-get update && apt-get install -y aria2
+  aria2c -x 16 -s 16 -k 1M \
+    -o sam_vit_l_0b3195.pth \
+    -d sam \
+    "$SAM_WEIGHT_URL"
   mark_done "sam_weight"
 fi
 

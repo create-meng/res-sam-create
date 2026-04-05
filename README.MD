@@ -221,8 +221,13 @@ git lfs pull
 **本仓库主线 SAM 为 ViT-L**：`sam/sam_vit_l_0b3195.pth`（约 1.2GB），与论文作者公开仓库 `zhouxr6066/Res-SAM` 的 `sam/sam.py`、`experiments` 与 `scripts/setup_after_clone_*.sh` 默认一致。**GitHub** 远程可用 Git LFS 托管该完整权重文件。**OpenI** 等平台往往无法上传或拉取如此大的 LFS 对象：请仅 `clone` 后按下方官方地址手动下载到 `sam/`（文件名需一致）。
 
 ```bash
-# Linux/macOS（ViT-L，Meta 官方）
-curl -L -o sam/sam_vit_l_0b3195.pth https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth
+# Linux / WSL（ViT-L，Meta 官方；aria2 多线程；无 root 时在 apt-get 前加 sudo）
+# 请在仓库根目录执行（与 scripts/、sam/ 同级；权重写入克隆自带的 sam/，与 sam/sam.py 同级）
+apt-get update && apt-get install -y aria2
+aria2c -x 16 -s 16 -k 1M \
+  -o sam_vit_l_0b3195.pth \
+  -d sam \
+  "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth"
 ```
 
 ```powershell
@@ -272,8 +277,12 @@ git lfs pull --exclude="sam/sam_vit_l_0b3195.pth"
 然后再单独下载权重到 `sam/` 目录（官方地址）：
 
 ```bash
-# Linux/macOS（ViT-L）
-curl -L -o sam/sam_vit_l_0b3195.pth https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth
+# Linux / WSL（ViT-L；在仓库根目录执行；无 root 时在 apt-get 前加 sudo）
+apt-get update && apt-get install -y aria2
+aria2c -x 16 -s 16 -k 1M \
+  -o sam_vit_l_0b3195.pth \
+  -d sam \
+  "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth"
 ```
 
 ```powershell
