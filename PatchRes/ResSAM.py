@@ -1,4 +1,4 @@
-"""
+﻿"""
 Res-SAM: Reservoir-enhanced Segment Anything Model
 
 论文复现核心模块，整合 SAM 和 2D-ESN。
@@ -12,7 +12,10 @@ Res-SAM: Reservoir-enhanced Segment Anything Model
 论文对应：
 - Fig.2: 整体框架
 - Table 2: Fully Automatic 模式
-- Table 1: Click-guided 模式
+
+当前仓库主线说明：
+- 当前 experiments 主线只保留 fully automatic + clustering。
+- click-guided 方案已从当前仓库主线移除。
 """
 
 import torch
@@ -22,7 +25,6 @@ from typing import List, Dict, Any, Tuple, Optional, Union, Sequence
 import logging
 import os
 import sys
-import time
 from PIL import Image
 import cv2
 
@@ -32,6 +34,23 @@ from .sam_integration import SAMIntegration
 
 # Feature bank on-disk bundle: tensor + 2D-ESN weights (author minimal code only saves tensors).
 FEATURE_BANK_BUNDLE_FORMAT = "res_sam_fb_v2"
+
+def _env_flag(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _strict_faiss_default() -> bool:
+    """
+    Default is STRICT: require faiss unless explicitly allowing sklearn fallback.
+
+    - RES_SAM_ALLOW_SKLEARN_KNN=1: allow sklearn fallback (non-official path)
+    - RES_SAM_REQUIRE_FAISS=1: force strict even if other configs are present
+    """
+    if _env_flag("RES_SAM_REQUIRE_FAISS"):
+        return True
+    if _env_flag("RES_SAM_ALLOW_SKLEARN_KNN"):
+        return False
+    return True
 
 
 class ResSAM:
@@ -78,12 +97,14 @@ class ResSAM:
         *,
         anomaly_threshold: Optional[float] = None,
         region_coarse_threshold: Optional[float] = None,
+        feature_with_bias: bool = True,
     ):
         self.hidden_size = hidden_size
         self.window_size = window_size
         self.stride = stride
         self.spectral_radius = spectral_radius
         self.connectivity = connectivity
+        self.feature_with_bias = bool(feature_with_bias)
         # Eq.(9) β：单一阈值。推荐只传 beta_threshold；anomaly_threshold / region_coarse_threshold 仅为旧调用兼容。
         if anomaly_threshold is not None and region_coarse_threshold is not None:
             if float(anomaly_threshold) != float(region_coarse_threshold):
@@ -164,6 +185,11 @@ class ResSAM:
             dists, _ = index.search(xb, k)
             nn_dists = np.sqrt(np.maximum(dists[:, 1], 0.0))
         except Exception:
+            if _strict_faiss_default():
+                raise RuntimeError(
+                    "Failed to calibrate beta threshold because faiss is unavailable (strict-faiss default). "
+                    "Set RES_SAM_ALLOW_SKLEARN_KNN=1 to permit sklearn fallback."
+                )
             try:
                 from sklearn.neighbors import NearestNeighbors
 
@@ -172,7 +198,7 @@ class ResSAM:
                 dists, _ = nn.kneighbors(feature_bank_np, n_neighbors=k)
                 nn_dists = dists[:, 1]
             except Exception as e:
-                raise RuntimeError(f"Failed to calibrate beta threshold: {e}")
+                raise RuntimeError(f"Failed to calibrate beta threshold (sklearn fallback): {e}")
 
         nn_dists = np.asarray(nn_dists, dtype=np.float64)
         nn_dists = nn_dists[np.isfinite(nn_dists)]
@@ -341,12 +367,18 @@ class ResSAM:
         print(f"Feature Bank loaded: shape={self.feature_bank.shape}")
 
     def _init_nn_searcher(self, feature_bank_np: np.ndarray):
+        strict_faiss = _strict_faiss_default()
         backend_env = (os.environ.get("RES_SAM_KNN_BACKEND", "") or "").strip().lower()
         backend = backend_env
         if backend and backend not in {"sklearn", "faiss_cpu", "faiss_gpu"}:
             backend = ""
 
         if backend == "sklearn":
+            if strict_faiss:
+                raise RuntimeError(
+                    "Strict-faiss default: do not use RES_SAM_KNN_BACKEND=sklearn. "
+                    "Set RES_SAM_ALLOW_SKLEARN_KNN=1 if you really want sklearn fallback."
+                )
             from sklearn.neighbors import NearestNeighbors
             xb = np.ascontiguousarray(feature_bank_np, dtype=np.float32)
             self.nn_searcher = NearestNeighbors(n_neighbors=1, algorithm="brute", n_jobs=1)
@@ -370,6 +402,11 @@ class ResSAM:
         try:
             import faiss
         except Exception:
+            if strict_faiss:
+                raise ImportError(
+                    "Strict-faiss default but faiss could not be imported in ResSAM._init_nn_searcher. "
+                    "Fix faiss install, or set RES_SAM_ALLOW_SKLEARN_KNN=1 to permit sklearn fallback."
+                ) from None
             backend = "sklearn"
             from sklearn.neighbors import NearestNeighbors
             xb = np.ascontiguousarray(feature_bank_np, dtype=np.float32)
@@ -445,12 +482,11 @@ class ResSAM:
             
         Returns:
         --------
-        torch.Tensor
-            特征 [num_patches, 2*hidden_size + 1]
-            论文定义的动态特征 f = [W_out, b]
+         torch.Tensor
+            特征张量。论文主线默认形状为 [num_patches, 2*hidden_size+1]，
+            对应 Eq.(3)/(8) 中真实求解的 f=[W_out,b]。
+            若显式关闭 feature_with_bias，则退化为官方兼容口径 [W_out]。
         """
-        # ESN_2D.forward 期望输入 [batch_size, height, width]
-        # 需要去掉 channel 维度
         patches_2d = patches.squeeze(1)  # [num_patches, window_size, window_size]
         if self.device == "cuda" and torch.cuda.is_available() and patches_2d.device.type != "cuda":
             patches_2d = patches_2d.to(device="cuda", dtype=torch.float32, non_blocking=True)
@@ -482,7 +518,16 @@ class ResSAM:
             for start in range(0, int(patches_2d.shape[0]), batch_size):
                 end = min(start + batch_size, int(patches_2d.shape[0]))
                 feats.append(self.esn.forward(patches_2d[start:end]))
-        return torch.cat(feats, dim=0) if feats else torch.zeros((0, 2 * self.hidden_size + 1), dtype=torch.float32)
+        if feats:
+            features = torch.cat(feats, dim=0)
+        else:
+            base_dim = 2 * self.hidden_size + 1
+            features = torch.zeros((0, base_dim), dtype=torch.float32)
+        # Paper-first mainline: ESN already solves f=[W_out, b]. Only trim the
+        # last bias term when an explicit official-compatibility fallback is requested.
+        if (not self.feature_with_bias) and int(features.shape[1]) == (2 * self.hidden_size + 1):
+            features = features[:, :-1]
+        return features
 
     def _patch_list_to_tensor(self, patches_list: List[np.ndarray]) -> torch.Tensor:
         if isinstance(patches_list, np.ndarray):
@@ -516,7 +561,7 @@ class ResSAM:
         dists, _ = self.nn_searcher.search(xq, 1)
         return _np.sqrt(_np.maximum(dists.reshape(-1), 0.0)).astype(_np.float32, copy=False)
 
-    def _collect_click_candidate_patches(
+    def _collect_candidate_patches(
         self,
         image: np.ndarray,
         bbox: List[int],
@@ -527,13 +572,13 @@ class ResSAM:
         half_win = win // 2
         x1, y1, x2, y2 = bbox
 
-        if (x2 - x1) < win or (y2 - y1) < win:
+        if x2 <= x1 or y2 <= y1:
             return np.zeros((0, win, win), dtype=np.float32), []
 
-        # Paper wording uses "for each point within the candidate region".
-        # So here we enumerate every valid center point instead of sampling by stride.
-        y_centers = np.arange(y1 + half_win, y2 - half_win, 1, dtype=np.int32)
-        x_centers = np.arange(x1 + half_win, x2 - half_win, 1, dtype=np.int32)
+        # Paper wording is "each point in the candidate region serves as the center"
+        # and only patches extending beyond image boundaries are excluded.
+        y_centers = np.arange(y1, y2, 1, dtype=np.int32)
+        x_centers = np.arange(x1, x2, 1, dtype=np.int32)
         if y_centers.size == 0 or x_centers.size == 0:
             return np.zeros((0, win, win), dtype=np.float32), []
 
@@ -543,16 +588,7 @@ class ResSAM:
         y_tops = yy - half_win
         x_lefts = xx - half_win
 
-        valid = (
-            (y_tops >= 0)
-            & ((y_tops + win) <= img_h)
-            & (x_lefts >= 0)
-            & ((x_lefts + win) <= img_w)
-        )
-        if mask is not None:
-            mask_bool = np.asarray(mask, dtype=bool)
-            valid &= mask_bool[yy, xx]
-
+        valid = (y_tops >= 0) & ((y_tops + win) <= img_h) & (x_lefts >= 0) & ((x_lefts + win) <= img_w)
         if not np.any(valid):
             return np.zeros((0, win, win), dtype=np.float32), []
 
@@ -565,6 +601,127 @@ class ResSAM:
         patches_np = np.ascontiguousarray(view[y_tops, x_lefts], dtype=np.float32)
         patch_positions = list(zip(xx.tolist(), yy.tolist()))
         return patches_np, patch_positions
+
+    def _extract_region_feature(self, image: np.ndarray, bbox: List[int], mask: Optional[np.ndarray]) -> torch.Tensor:
+        """
+        Fit a retained SAM coarse region itself for automatic coarse filtering.
+
+        Paper order:
+        1. fit each coarse region with 2D-ESN;
+        2. retain anomaly-like regions;
+        3. then convert retained regions to enclosing rectangles.
+
+        We therefore fit the irregular SAM mask directly through the masked
+        2D-ESN path instead of approximating it by a zero-filled rectangle.
+        """
+        base_dim = 2 * self.hidden_size + (1 if self.feature_with_bias else 0)
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        if x2 <= x1 or y2 <= y1:
+            return torch.zeros((0, base_dim), dtype=torch.float32)
+
+        crop = np.array(image[y1:y2, x1:x2], dtype=np.float32, copy=True)
+        if crop.size == 0:
+            return torch.zeros((0, base_dim), dtype=torch.float32)
+
+        if mask is None:
+            crop = np.ascontiguousarray(crop, dtype=np.float32)
+            crop_tensor = torch.from_numpy(crop).unsqueeze(0).unsqueeze(0)
+            return self._fit_patches(crop_tensor)
+
+        mask_crop = np.asarray(mask[y1:y2, x1:x2], dtype=bool)
+        if mask_crop.shape != crop.shape or (not np.any(mask_crop)):
+            return torch.zeros((0, base_dim), dtype=torch.float32)
+
+        crop_tensor = torch.from_numpy(np.ascontiguousarray(crop, dtype=np.float32)).unsqueeze(0)
+        mask_tensor = torch.from_numpy(np.ascontiguousarray(mask_crop, dtype=np.bool_)).unsqueeze(0)
+        if self.device == "cuda" and torch.cuda.is_available():
+            crop_tensor = crop_tensor.to(device="cuda", dtype=torch.float32, non_blocking=True)
+            mask_tensor = mask_tensor.to(device="cuda", non_blocking=True)
+        elif self.device == "cpu":
+            crop_tensor = crop_tensor.to(device="cpu", dtype=torch.float32)
+            mask_tensor = mask_tensor.to(device="cpu")
+
+        if hasattr(self, "_fitting_count") and isinstance(self._fitting_count, int):
+            self._fitting_count += 1
+
+        with torch.inference_mode():
+            features = self.esn.forward_masked(crop_tensor, mask_tensor)
+        if (not self.feature_with_bias) and int(features.shape[1]) == (2 * self.hidden_size + 1):
+            features = features[:, :-1]
+        return features
+
+    def _merge_overlapping_anomaly_patches(
+        self,
+        image_shape: Tuple[int, int],
+        anomaly_positions: List[Tuple[int, int]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Merge anomaly patches by overlap connectivity within one candidate region.
+
+        Paper text specifies that overlapping anomaly-relevant patches are
+        merged. Therefore we first convert each anomaly-centered patch into its
+        patch box, group boxes by overlap connectivity, and then take the
+        smallest enclosing rectangle for each connected overlap group.
+        """
+        if not anomaly_positions:
+            return []
+
+        img_h, img_w = image_shape
+        half_win = int(self.window_size) // 2
+        patch_boxes: List[Tuple[int, int, int, int]] = []
+        for cx, cy in anomaly_positions:
+            x1 = max(0, int(cx) - half_win)
+            y1 = max(0, int(cy) - half_win)
+            x2 = min(img_w, int(cx) + half_win)
+            y2 = min(img_h, int(cy) + half_win)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            patch_boxes.append((x1, y1, x2, y2))
+
+        if not patch_boxes:
+            return []
+
+        def _boxes_overlap(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> bool:
+            return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+
+        n = len(patch_boxes)
+        visited = [False] * n
+        merged_regions: List[Dict[str, Any]] = []
+
+        for start_idx in range(n):
+            if visited[start_idx]:
+                continue
+
+            stack = [start_idx]
+            visited[start_idx] = True
+            component_indices: List[int] = []
+
+            while stack:
+                idx = stack.pop()
+                component_indices.append(idx)
+                box_i = patch_boxes[idx]
+                for j in range(n):
+                    if visited[j]:
+                        continue
+                    if _boxes_overlap(box_i, patch_boxes[j]):
+                        visited[j] = True
+                        stack.append(j)
+
+            component_boxes = [patch_boxes[idx] for idx in component_indices]
+            x1_all = min(box[0] for box in component_boxes)
+            y1_all = min(box[1] for box in component_boxes)
+            x2_all = max(box[2] for box in component_boxes)
+            y2_all = max(box[3] for box in component_boxes)
+            if x2_all <= x1_all or y2_all <= y1_all:
+                continue
+            merged_regions.append(
+                {
+                    "bbox": [int(x1_all), int(y1_all), int(x2_all), int(y2_all)],
+                    "num_anomaly_patches": int(len(component_boxes)),
+                }
+            )
+
+        return merged_regions
     
     def detect_automatic(
         self,
@@ -623,16 +780,6 @@ class ResSAM:
         
         print(f"  Found {len(coarse_regions)} coarse regions")
         
-        # 过滤有效区域：尺寸必须 >= window_size
-        valid_coarse_regions = []
-        for region in coarse_regions:
-            bbox = region['bbox']
-            w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            if w >= self.window_size and h >= self.window_size:
-                valid_coarse_regions.append(region)
-        
-        print(f"  Valid coarse regions (>={self.window_size}x{self.window_size}): {len(valid_coarse_regions)}")
-        
         # Step 2: Region 级粗筛（论文 Fully Automatic 关键步骤）
         # 对每个 coarse region 做 2D-ESN 拟合并与 Feature Bank 比较
         # discard normal-like; retain potential anomaly regions
@@ -641,9 +788,7 @@ class ResSAM:
         retained_regions = []
         num_discarded = 0
         
-        half_win = self.window_size // 2
-        
-        for region_idx, region in enumerate(valid_coarse_regions):
+        for region_idx, region in enumerate(coarse_regions):
             bbox = region['bbox']
             mask = region['mask']
             x1, y1, x2, y2 = bbox
@@ -658,63 +803,42 @@ class ResSAM:
                 num_discarded += 1
                 continue
             
-            crop = image[y1:y2, x1:x2]
-            if crop.size == 0:
+            # Paper-first automatic mode: discriminate the SAM region itself
+            # before converting it to a candidate rectangle.
+            region_feature = self._extract_region_feature(image, bbox, mask)
+            region_feature_np = region_feature.detach().cpu().numpy()
+            region_scores = self._score_features_against_bank(region_feature_np)
+            if region_scores.size == 0:
                 if debug_coarse:
                     print(
-                        f"  [coarse][discard][{region_idx}] reason=empty_crop "
-                        f"bbox={bbox} crop_shape={getattr(crop, 'shape', None)}")
+                        f"  [coarse][discard][{region_idx}] reason=no_region_score "
+                        f"bbox={bbox}")
                 num_discarded += 1
                 continue
+            region_max_score = float(np.max(region_scores))
+            region_mean_score = float(np.mean(region_scores))
 
-            # Paper-aligned coarse filtering: evaluate local centered patches
-            # inside the coarse region rather than collapsing the entire crop
-            # into one resized patch.
-            patches_np, patch_positions = self._collect_click_candidate_patches(
-                image, bbox, mask
-            )
-            if patches_np.size == 0:
-                if debug_coarse:
-                    print(
-                        f"  [coarse][discard][{region_idx}] reason=no_valid_region_patches "
-                        f"bbox={bbox} crop_shape={getattr(crop, 'shape', None)}")
-                num_discarded += 1
-                continue
-
-            patches_tensor = self._patch_list_to_tensor(patches_np)
-            features = self._fit_patches(patches_tensor)
-
-            # Patch scores vs Feature Bank (Eq.(7)-(8)); coarse step uses aggregates to
-            # discard normal-like SAM regions before fine-grained merging.
-            features_np = features.detach().cpu().numpy()
-            scores = self._score_features_against_bank(features_np)
-            region_max_score = float(np.max(scores))
-            region_mean_score = float(np.mean(scores))
-
-            # Retain region if any patch is sufficiently far from the bank (max > β).
+            # Retain coarse region when its region-level feature exceeds beta.
             if region_max_score > self.beta_threshold:
                 if debug_coarse:
                     print(
                         f"  [coarse][retain][{region_idx}] bbox={bbox} area={region_area} "
                         f"max_score={region_max_score:.6f} mean_score={region_mean_score:.6f} "
-                        f"num_patches={int(scores.shape[0])} beta={self.beta_threshold:.6f}")
+                        f"num_region_features={int(region_scores.shape[0])} beta={self.beta_threshold:.6f}")
                 retained_regions.append({
                     'bbox': bbox,
                     'mask': mask,
                     'coarse_max_score': region_max_score,
                     'coarse_mean_score': region_mean_score,
-                    'num_region_patches': int(scores.shape[0]),
+                    'num_region_features': int(region_scores.shape[0]),
                     'stability_score': region.get('stability_score', 0),
-                    # Reuse below: same patches/scores as coarse step (avoid duplicate ESN).
-                    'patch_positions': patch_positions,
-                    'scores': np.asarray(scores, dtype=np.float32, order="C"),
                 })
             else:
                 if debug_coarse:
                     print(
                         f"  [coarse][discard][{region_idx}] reason=score_le_beta bbox={bbox} area={region_area} "
                         f"max_score={region_max_score:.6f} mean_score={region_mean_score:.6f} "
-                        f"num_patches={int(scores.shape[0])} beta={self.beta_threshold:.6f}")
+                        f"num_region_features={int(region_scores.shape[0])} beta={self.beta_threshold:.6f}")
                 num_discarded += 1
         print(f"  Retained {len(retained_regions)} regions after coarse filtering (discarded {num_discarded})")
         
@@ -738,22 +862,15 @@ class ResSAM:
             bbox = region['bbox']
             mask = region['mask']
 
-            cached_pos = region.get("patch_positions")
-            cached_scores = region.get("scores")
-            if cached_pos is not None and cached_scores is not None:
-                patch_positions = cached_pos
-                # NumPy 1.x: np.asarray has no `copy=` (added in NumPy 2); np.array supports copy=False on 1.19+.
-                scores = np.array(cached_scores, dtype=np.float32, copy=False)
-            else:
-                patches_np, patch_positions = self._collect_click_candidate_patches(
-                    image, bbox, mask
-                )
-                if patches_np.size == 0 or len(patch_positions) == 0:
-                    continue
-                patches_tensor = self._patch_list_to_tensor(patches_np)
-                features = self._fit_patches(patches_tensor)
-                features_np = features.detach().cpu().numpy()
-                scores = self._score_features_against_bank(features_np)
+            patches_np, patch_positions = self._collect_candidate_patches(
+                image, bbox, None
+            )
+            if patches_np.size == 0 or len(patch_positions) == 0:
+                continue
+            patches_tensor = self._patch_list_to_tensor(patches_np)
+            features = self._fit_patches(patches_tensor)
+            features_np = features.detach().cpu().numpy()
+            scores = self._score_features_against_bank(features_np)
 
             if len(patch_positions) == 0:
                 continue
@@ -772,27 +889,31 @@ class ResSAM:
             
             if len(anomaly_positions) > 0:
                 # 计算异常 patches 的最小包围框
-                anomaly_x = [p[0] for p in anomaly_positions]
-                anomaly_y = [p[1] for p in anomaly_positions]
+                component_regions = self._merge_overlapping_anomaly_patches(
+                    (img_h, img_w),
+                    anomaly_positions,
+                )
                 
-                final_x1 = max(0, min(anomaly_x) - half_win)
-                final_y1 = max(0, min(anomaly_y) - half_win)
-                final_x2 = min(img_w, max(anomaly_x) + half_win)
-                final_y2 = min(img_h, max(anomaly_y) + half_win)
-                
-                final_bbox = [int(final_x1), int(final_y1), int(final_x2), int(final_y2)]
-                max_score = float(max(scores))
-                avg_score = float(np.mean(scores))
-                
-                anomaly_regions.append({
-                    'bbox': final_bbox,
-                    'mask': mask,
-                    'avg_anomaly_score': avg_score,
-                    'max_anomaly_score': max_score,
-                    'coarse_max_score': region['coarse_max_score'],
-                    'stability_score': region.get('stability_score', 0),
-                    'num_anomaly_patches': len(anomaly_positions),
-                })
+                for component in component_regions:
+                    final_bbox = component["bbox"]
+                    x1, y1, x2, y2 = final_bbox
+                    component_scores = [
+                        float(s)
+                        for (px, py), s in zip(patch_positions, scores)
+                        if (s > self.beta_threshold) and (x1 <= px < x2) and (y1 <= py < y2)
+                    ]
+                    if not component_scores:
+                        continue
+
+                    anomaly_regions.append({
+                        'bbox': final_bbox,
+                        'mask': mask,
+                        'avg_anomaly_score': float(np.mean(component_scores)),
+                        'max_anomaly_score': float(np.max(component_scores)),
+                        'coarse_max_score': region['coarse_max_score'],
+                        'stability_score': region.get('stability_score', 0),
+                        'num_anomaly_patches': int(component['num_anomaly_patches']),
+                    })
         
         # 按异常分数排序
         anomaly_regions.sort(key=lambda x: x['max_anomaly_score'], reverse=True)
@@ -811,7 +932,7 @@ class ResSAM:
         
         return result
     
-    def detect_click_guided(
+    def _removed_click_guided_mode(
         self,
         image: np.ndarray,
         positive_points: List[Tuple[int, int]] = None,
@@ -820,7 +941,7 @@ class ResSAM:
         image_already_prepared: bool = False,
     ) -> Dict[str, Any]:
         """
-        Click-guided 模式异常检测
+        Click-guided 模式已移除。
         
         Parameters:
         -----------
@@ -838,145 +959,9 @@ class ResSAM:
         Dict
             检测结果
         """
-        # 确保灰度图
-        if len(image.shape) == 3:
-            image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-
-        self._fitting_count = 0
-
-        profile_enabled = bool(os.environ.get("RES_SAM_PROFILE", "").strip())
-        logger = logging.getLogger(__name__)
-        t_profile = {}
-        t0 = time.perf_counter() if profile_enabled else 0.0
-
-        verbose_click = bool(os.environ.get("RES_SAM_VERBOSE_CLICK", "").strip())
-        if verbose_click:
-            print("Step 1: SAM generating regions from clicks...")
-        candidate_regions = self.sam.generate_masks_from_clicks(
-            image,
-            positive_points=positive_points,
-            negative_points=negative_points,
-            box=box,
-            image_already_prepared=image_already_prepared,
+        raise NotImplementedError(
+            "Click-guided mode has been removed from this repository. Use detect_automatic() instead."
         )
-
-        if profile_enabled:
-            t_profile["sam_click"] = time.perf_counter() - t0
-        
-        if verbose_click:
-            print(f"  Found {len(candidate_regions)} candidate regions")
-        
-        # Step 2: 分析候选区域
-        anomaly_regions = []
-
-        img_h, img_w = image.shape
-        half_win = self.window_size // 2
-        
-        for region in candidate_regions:
-            t_region0 = time.perf_counter() if profile_enabled else 0.0
-            bbox = region['bbox']
-            mask = region['mask']
-
-            # 候选框必须能容纳 patch
-            x1, y1, x2, y2 = bbox
-            if (x2 - x1) < self.window_size or (y2 - y1) < self.window_size:
-                continue
-
-            # 论文 Page 11：candidate region 内每个点为中心提取 patch（越界排除）。
-            patches_np, patch_positions = self._collect_click_candidate_patches(image, bbox, mask)
-
-            if patches_np.shape[0] == 0:
-                continue
-
-            if profile_enabled:
-                t_profile["collect_patches"] = t_profile.get("collect_patches", 0.0) + (time.perf_counter() - t_region0)
-
-            t_fit0 = time.perf_counter() if profile_enabled else 0.0
-            patches_tensor = self._patch_list_to_tensor(patches_np)
-            features = self._fit_patches(patches_tensor)
-
-            if profile_enabled:
-                t_profile["esn_fit"] = t_profile.get("esn_fit", 0.0) + (time.perf_counter() - t_fit0)
-
-            # 论文 Eq.(7)-(8)：s(f*) = min_{f in M} L2(f*, f)
-            t_nn0 = time.perf_counter() if profile_enabled else 0.0
-            # 在 CPU 推理时避免不必要的 .cpu() 拷贝；在 CUDA 推理时仍显式搬运到 CPU。
-            if features.device.type == "cpu":
-                features_np = features.detach().numpy()
-            else:
-                features_np = features.detach().cpu().numpy()
-            if self.nn_searcher is None:
-                raise RuntimeError("Feature bank searcher not initialized. Call load_feature_bank() or build_feature_bank() first.")
-            if getattr(self, "nn_backend", "sklearn") == "sklearn":
-                distances, _ = self.nn_searcher.kneighbors(features_np)
-                scores = distances.flatten()
-            else:
-                import numpy as _np
-                xq = _np.ascontiguousarray(features_np.astype(_np.float32, copy=False))
-                dists, _ = self.nn_searcher.search(xq, 1)
-                scores = _np.sqrt(_np.maximum(dists.reshape(-1), 0.0))
-
-            if profile_enabled:
-                t_profile["knn_cpu"] = t_profile.get("knn_cpu", 0.0) + (time.perf_counter() - t_nn0)
-
-            # 论文 Eq.(9)：s(f*) > β 判为 abnormal
-            anomaly_positions = [
-                pos for pos, s in zip(patch_positions, scores)
-                if s > self.beta_threshold
-            ]
-
-            if len(anomaly_positions) == 0:
-                continue
-
-            anomaly_x = [p[0] for p in anomaly_positions]
-            anomaly_y = [p[1] for p in anomaly_positions]
-
-            final_x1 = max(0, min(anomaly_x) - half_win)
-            final_y1 = max(0, min(anomaly_y) - half_win)
-            final_x2 = min(img_w, max(anomaly_x) + half_win)
-            final_y2 = min(img_h, max(anomaly_y) + half_win)
-
-            final_bbox = [int(final_x1), int(final_y1), int(final_x2), int(final_y2)]
-            avg_score = float(np.mean(scores))
-            max_score = float(np.max(scores))
-
-            anomaly_regions.append({
-                'bbox': final_bbox,
-                'mask': mask,
-                'avg_anomaly_score': avg_score,
-                'max_anomaly_score': max_score,
-                'sam_score': region.get('score', 0),
-                'num_anomaly_patches': len(anomaly_positions),
-            })
-        
-        # 过滤
-        filtered_regions = [
-            r for r in anomaly_regions 
-            if r['max_anomaly_score'] > self.beta_threshold
-        ]
-        filtered_regions.sort(key=lambda x: x['max_anomaly_score'], reverse=True)
-
-        if profile_enabled:
-            try:
-                msg = (
-                    "[PROFILE][click_guided] sam_click=%.3fs collect_patches=%.3fs esn_fit=%.3fs knn_cpu=%.3fs"
-                    % (
-                        float(t_profile.get("sam_click", 0.0)),
-                        float(t_profile.get("collect_patches", 0.0)),
-                        float(t_profile.get("esn_fit", 0.0)),
-                        float(t_profile.get("knn_cpu", 0.0)),
-                    )
-                )
-                print(msg)
-                logger.info(msg)
-            except Exception:
-                pass
-        
-        return {
-            'anomaly_regions': filtered_regions,
-            'num_candidates': len(candidate_regions),
-            'num_esn_fits': int(getattr(self, "_fitting_count", 0)),
-        }
     
     def visualize_detection(
         self,
@@ -993,7 +978,7 @@ class ResSAM:
         image : np.ndarray
             原始图像
         result : Dict
-            detect_automatic 或 detect_click_guided 的返回结果
+            detect_automatic 的返回结果
         output_path : str
             保存路径
         show_scores : bool

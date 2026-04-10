@@ -178,6 +178,17 @@ class ConcatMerger(_BaseMerger):
         return features.reshape(len(features), -1)
 
 
+def _require_faiss_if_strict() -> None:
+    """Set RES_SAM_REQUIRE_FAISS=1 to match upstream (no sklearn NN fallback)."""
+    flag = (os.environ.get("RES_SAM_REQUIRE_FAISS") or "").strip().lower()
+    if flag in ("1", "true", "yes") and faiss is None:
+        raise ImportError(
+            "RES_SAM_REQUIRE_FAISS is set but faiss could not be imported. "
+            "Install faiss-cpu or faiss-gpu compatible with your Python/OS, "
+            "or unset RES_SAM_REQUIRE_FAISS to allow the sklearn fallback."
+        )
+
+
 class NearestNeighbourScorer(object):
     def __init__(self, n_nearest_neighbours: int, nn_method=None) -> None:
         """
@@ -191,6 +202,7 @@ class NearestNeighbourScorer(object):
         self.feature_merger = ConcatMerger()
 
         self.n_nearest_neighbours = n_nearest_neighbours
+        _require_faiss_if_strict()
         if faiss is None:
             self.nn_method = SklearnNN(num_workers=4)
         else:

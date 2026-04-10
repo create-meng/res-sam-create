@@ -3,12 +3,14 @@ SAM (Segment Anything Model) 集成模块
 
 功能：
 - 加载 SAM 模型
-- 支持 automatic mask generation 和 click-guided 模式
+- 当前主线使用 automatic mask generation
 - 生成候选异常区域
 
 论文对应：
 - Fig.2: SAM 用于定位候选区域
-- Table 1: click-guided vs automatic 模式对比
+
+当前仓库主线说明：
+- click-guided 相关接口仍保留在底层模块中，但已不属于当前 experiments 主线。
 """
 
 import torch
@@ -17,23 +19,22 @@ from PIL import Image
 from typing import List, Tuple, Optional, Dict, Any
 import cv2
 import os
-import hashlib
-from collections import OrderedDict
+import logging
 
-# SamAutomaticMaskGenerator：与论文作者公开仓库 zhouxr6066/Res-SAM 中 sam/sam.py 一致
-# （Zenodo v1.0.0 / GitHub main 同源）。未在官方显式传入的项使用 segment_anything
-# SamAutomaticMaskGenerator.__init__ 的库默认（与官方调用方式一致）。
+_logger = logging.getLogger(__name__)
+# 统计：多 crop 层且无任何 mask 通过滤时，原库会在 NMS 处崩溃；本补丁跳过该步。
+_sam_amg_skip_nms_empty_crop_count = 0
+
+# SamAutomaticMaskGenerator：与作者仓库 zhouxr6066/Res-SAM 的 sam/sam.py 显式参数一致，
+# 仅传入作者在 sam.py 里写出的 8 个关键字；其余全部使用当前已安装 segment_anything
+# 版本的构造函数默认值（与作者在官方仓库中的写法一致）。
 # 参考：https://github.com/zhouxr6066/Res-SAM/blob/main/sam/sam.py
 _SAM_AUTOMATIC_MASK_GENERATOR_KWARGS = {
     "points_per_side": 32,
-    "points_per_batch": 64,
     "pred_iou_thresh": 0.95,
     "stability_score_thresh": 0.95,
-    "stability_score_offset": 1.0,
-    "box_nms_thresh": 0.7,
     "crop_n_layers": 1,
-    "crop_nms_thresh": 0.7,
-    "crop_overlap_ratio": 512 / 1500,
+    "box_nms_thresh": 0.7,
     "crop_n_points_downscale_factor": 2,
     "min_mask_region_area": 1000,
     "output_mode": "binary_mask",
@@ -60,6 +61,7 @@ def _patch_sam_automatic_mask_generator_generate_masks() -> None:
     from segment_anything.utils.amg import MaskData, generate_crop_boxes
 
     def _generate_masks_fixed(self, image: np.ndarray) -> Any:
+        global _sam_amg_skip_nms_empty_crop_count
         orig_size = image.shape[:2]
         crop_boxes, layer_idxs = generate_crop_boxes(
             orig_size, self.crop_n_layers, self.crop_overlap_ratio
@@ -70,16 +72,26 @@ def _patch_sam_automatic_mask_generator_generate_masks() -> None:
             crop_data = self._process_crop(image, crop_box, layer_idx, orig_size)
             data.cat(crop_data)
 
-        if len(crop_boxes) > 1 and len(data["crop_boxes"]) > 0:
-            scores = 1 / box_area(data["crop_boxes"])
-            scores = scores.to(data["boxes"].device)
-            keep_by_nms = batched_nms(
-                data["boxes"].float(),
-                scores,
-                torch.zeros_like(data["boxes"][:, 0]),
-                iou_threshold=self.crop_nms_thresh,
-            )
-            data.filter(keep_by_nms)
+        if len(crop_boxes) > 1:
+            if len(data["crop_boxes"]) > 0:
+                scores = 1 / box_area(data["crop_boxes"])
+                scores = scores.to(data["boxes"].device)
+                keep_by_nms = batched_nms(
+                    data["boxes"].float(),
+                    scores,
+                    torch.zeros_like(data["boxes"][:, 0]),
+                    iou_threshold=self.crop_nms_thresh,
+                )
+                data.filter(keep_by_nms)
+            else:
+                _sam_amg_skip_nms_empty_crop_count += 1
+                _logger.warning(
+                    "[SAM_AMG_PATCH] skip crop-level NMS: multi-layer crops (%d) but no boxes "
+                    "survived filtering (would trigger segment-anything#614 crash in unpatched "
+                    "torchvision box_area path). Total skip count=%d",
+                    len(crop_boxes),
+                    _sam_amg_skip_nms_empty_crop_count,
+                )
 
         data.to_numpy()
         return data
@@ -150,11 +162,7 @@ class SAMIntegration:
         
         # 延迟加载模型
         self._sam = None
-        self._predictor = None
         self._mask_generator = None
-        self._prepared_image_ref = None
-        self._prepared_image_key = None
-        self._image_embedding_cache = OrderedDict()
     
     def _load_sam(self):
         """延迟加载 SAM 模型"""
@@ -162,7 +170,7 @@ class SAMIntegration:
             return
         
         try:
-            from segment_anything import sam_model_registry, SamPredictor, SamAutomaticMaskGenerator
+            from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
         except ImportError:
             raise ImportError(
                 "segment-anything 未安装。请运行: pip install segment-anything\n"
@@ -221,7 +229,6 @@ class SAMIntegration:
         self._sam.to(device=self.device)
         
         # 创建 predictor (用于 click-guided 模式)
-        self._predictor = SamPredictor(self._sam)
         
         # 与官方仓库 sam/sam.py 中 SamAutomaticMaskGenerator(...) 一致，见 _SAM_AUTOMATIC_MASK_GENERATOR_KWARGS。
         self._mask_generator = SamAutomaticMaskGenerator(
@@ -301,7 +308,7 @@ class SAMIntegration:
         
         return candidate_regions
     
-    def generate_masks_from_clicks(
+    def _removed_click_guided_masks(
         self,
         image: np.ndarray,
         positive_points: List[Tuple[int, int]] = None,
@@ -328,7 +335,9 @@ class SAMIntegration:
         List[Dict]
             候选区域列表
         """
-        self._load_sam()
+        raise NotImplementedError(
+            "Click-guided mode has been removed from this repository. Use generate_masks_automatic() instead."
+        )
 
         # 统一转换为 uint8 RGB（避免构造 (H,W,3) float32 的中间数组造成内存峰值）
         image = _to_uint8_rgb(image)
@@ -358,96 +367,41 @@ class SAMIntegration:
         if box:
             box_np = np.array(box)
         
-        # 预测
+        # 预测（对齐作者开源仓库：multimask_output=True，取 scores 最大者）
         masks, scores, logits = self._predictor.predict(
             point_coords=point_coords,
             point_labels=point_labels,
             box=box_np,
-            # Paper workflow uses SAM to provide an approximate candidate
-            # region, then Res-SAM refines it. Keep the best prompt-consistent
-            # mask instead of expanding to multiple parallel masks.
-            multimask_output=False,
+            multimask_output=True,
         )
-        
-        # 转换为候选区域格式
-        candidate_regions = []
-        for i, (mask, score) in enumerate(zip(masks, scores)):
-            # 计算 bbox
-            rows = np.any(mask, axis=1)
-            cols = np.any(mask, axis=0)
-            if rows.any() and cols.any():
-                y_min, y_max = np.where(rows)[0][[0, -1]]
-                x_min, x_max = np.where(cols)[0][[0, -1]]
-                # bbox 统一为半开区间 [x1, y1, x2, y2) 以匹配 numpy 切片 image[y1:y2, x1:x2]
-                bbox = [int(x_min), int(y_min), int(x_max) + 1, int(y_max) + 1]
-                
-                candidate_regions.append({
-                    'bbox': bbox,
-                    'mask': mask,
-                    'area': int(np.sum(mask)),
-                    'score': float(score),
-                })
-        
-        # 按分数排序，并在 click-guided 模式下仅保留主候选区。
-        candidate_regions.sort(key=lambda x: x['score'], reverse=True)
-        return candidate_regions[:1]
 
-    def prepare_image(self, image: np.ndarray, force: bool = False) -> np.ndarray:
-        self._load_sam()
-        image_rgb = _to_uint8_rgb(image)
-        cache_key = self._make_image_cache_key(image_rgb)
-        if (not force) and (self._prepared_image_key == cache_key):
-            return image_rgb
-
-        cached_state = None if force else self._image_embedding_cache.get(cache_key)
-        if cached_state is not None:
-            self._restore_predictor_state(cached_state)
-        else:
-            self._predictor.set_image(image_rgb)
-            self._store_predictor_state(cache_key)
-        self._prepared_image_ref = image_rgb
-        self._prepared_image_key = cache_key
-        return image_rgb
-
-    def clear_prepared_image(self) -> None:
-        self._prepared_image_ref = None
-        self._prepared_image_key = None
-
-    def _make_image_cache_key(self, image_rgb: np.ndarray) -> str:
-        contiguous = np.ascontiguousarray(image_rgb)
-        digest = hashlib.blake2b(contiguous.view(np.uint8), digest_size=16).hexdigest()
-        return f"{contiguous.shape}|{contiguous.dtype}|{digest}"
-
-    def _cache_capacity(self) -> int:
+        if masks is None or scores is None or len(masks) == 0:
+            return []
         try:
-            env_value = int((os.environ.get("RES_SAM_SAM_CACHE_SIZE", "") or "").strip())
-            if env_value > 0:
-                return env_value
+            best_idx = int(np.asarray(scores).argmax())
         except Exception:
-            pass
-        return 256
+            best_idx = 0
+        best_mask = masks[best_idx]
+        best_score = float(np.asarray(scores)[best_idx]) if len(np.asarray(scores).shape) > 0 else float(scores)
 
-    def _store_predictor_state(self, cache_key: str) -> None:
-        features = getattr(self._predictor, "features", None)
-        if features is None:
-            return
-        state = {
-            "features": features.detach().clone(),
-            "input_size": tuple(getattr(self._predictor, "input_size", ())),
-            "original_size": tuple(getattr(self._predictor, "original_size", ())),
-        }
-        self._image_embedding_cache[cache_key] = state
-        self._image_embedding_cache.move_to_end(cache_key)
-        while len(self._image_embedding_cache) > self._cache_capacity():
-            self._image_embedding_cache.popitem(last=False)
+        # 转换为候选区域格式（click-guided 仅保留主候选区）
+        rows = np.any(best_mask, axis=1)
+        cols = np.any(best_mask, axis=0)
+        if not (rows.any() and cols.any()):
+            return []
+        y_min, y_max = np.where(rows)[0][[0, -1]]
+        x_min, x_max = np.where(cols)[0][[0, -1]]
+        # bbox 统一为半开区间 [x1, y1, x2, y2) 以匹配 numpy 切片 image[y1:y2, x1:x2]
+        bbox = [int(x_min), int(y_min), int(x_max) + 1, int(y_max) + 1]
+        return [
+            {
+                "bbox": bbox,
+                "mask": best_mask,
+                "area": int(np.sum(best_mask)),
+                "score": best_score,
+            }
+        ]
 
-    def _restore_predictor_state(self, state: Dict[str, Any]) -> None:
-        self._predictor.reset_image()
-        self._predictor.features = state["features"]
-        self._predictor.input_size = tuple(state["input_size"])
-        self._predictor.original_size = tuple(state["original_size"])
-        self._predictor.is_image_set = True
-    
     def extract_region(
         self,
         image: np.ndarray,

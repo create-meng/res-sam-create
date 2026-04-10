@@ -7,7 +7,8 @@ import cv2
 import os
 from .functions import *
 # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# 对齐作者开源仓库：ESN 默认在 CPU 上运行；若上层传入 device_override 则按需切换。
+device = torch.device("cpu")
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 seed = 11
@@ -18,7 +19,7 @@ torch.cuda.manual_seed_all(seed)
 
 
 class ESN_2D(torch.nn.Module):
-    def __init__(self, input_dim=1, n_reservoir=100, spectral_radius=(0.9, 0.9), alpha=5,
+    def __init__(self, input_dim=1, n_reservoir=100, spectral_radius=(0.9, 0.9), alpha=0.9,
                  connectivity=0.1, noise_level=1e-4, start_node=(1, 1), activation=torch.tanh, device_override=None):
         super(ESN_2D, self).__init__()
         self._device = device_override if device_override is not None else device
@@ -88,141 +89,120 @@ class ESN_2D(torch.nn.Module):
         state_new = self.activation(pre_activation)
         return state_new
     
-    # 自定义岭回归（论文 Eq.(3)）
-    # 论文要求特征 f = [W_out, b]，其中 b 为 bias
-    # 需要在 states 上增广一列 1 以吸收 bias 项
-    def ridge_regression(self, states, targets):
-        """
-        论文 Eq.(3): [W_out, b]^T = (H̃^T H̃ + λ²I)^{-1} H̃^T U
-        其中 H̃ 是增广的隐藏状态矩阵（增广一列 1）
-        
-        Parameters:
-        -----------
-        states : [batch, length, dim]  (dim = 2*n_reservoir)
-        targets : [batch, length]
-        
-        Returns:
-        --------
-        feature : [batch, dim+1]  (W_out 和 b 的拼接，作为动态特征)
-        """
+    def ridge_regression(self, states, targets, with_bias=True):
         batch, length, dim = states.shape
-        
-        # 增广一列 1 以吸收 bias（论文 Eq.(3) 的 H̃）
-        ones = states.new_ones((batch, length, 1))
-        states_aug = torch.cat([states, ones], dim=2)  # [batch, length, dim+1]
-        
-        targets = targets.unsqueeze(2)  # [batch, length, 1]
-        
-        # 正则化系数 λ²（论文 Eq.(3) 中为 λ²I）
-        dim_aug = dim + 1
-        # NOTE: 为避免每次重复分配 eye + repeat，这里缓存 [1, dim_aug, dim_aug] 的单位阵底座。
-        # 仅做广播扩展，不改变数值计算逻辑（仍然是 HtH + λ²I）。
-        if (not hasattr(self, "_ridge_I_base")) or (self._ridge_I_base is None) or (int(self._ridge_I_base.shape[-1]) != int(dim_aug)):
-            self._ridge_I_base = torch.eye(dim_aug, dtype=states.dtype, device=states.device).unsqueeze(0)
-        I = self._ridge_I_base.expand(batch, -1, -1) * (self.alpha ** 2)  # 论文用 λ²
-        
-        # 岭回归求解 (H̃^T H̃ + λ²I)^{-1} H̃^T U
-        HtH = torch.bmm(states_aug.transpose(1, 2), states_aug)
-        HtH_plus_lambdaI = HtH + I
-        HtU = torch.bmm(states_aug.transpose(1, 2), targets)
+
+        targets = targets.unsqueeze(2)  # Shape: [batch_size, length, 1]
+        if with_bias:
+            ones = torch.ones((batch, length, 1), dtype=states.dtype, device=states.device)
+            states = torch.cat([states, ones], dim=2)
+            dim = dim + 1
+
+        # 对齐作者开源仓库：I * alpha（不做 bias 增广；输出维度 = 2*n_reservoir）
+        # Paper-first mainline: solve the ridge system on augmented states [h_hat, 1]
+        # so the returned feature is the true [W_out, b].
+        if (not hasattr(self, "_ridge_I_base")) or (self._ridge_I_base is None) or (int(self._ridge_I_base.shape[-1]) != int(dim)):
+            self._ridge_I_base = torch.eye(dim, dtype=states.dtype, device=states.device).unsqueeze(0)
+        # Paper Eq.(3) uses lambda^2 I, not lambda I.
+        I = self._ridge_I_base.expand(batch, -1, -1) * float(self.alpha) * float(self.alpha)
+
+        XtX = torch.bmm(states.transpose(1, 2), states)
+        XtX_plus_lambdaI = XtX + I
+        Xty = torch.bmm(states.transpose(1, 2), targets)
 
         solver_env = (os.environ.get("RES_SAM_RIDGE_SOLVER", "") or "").strip().lower()
-        solver = solver_env
-        if not solver:
-            solver = "solve"
-
+        solver = solver_env or "inverse"
         if solver == "solve":
-            # A @ X = B  -> X = solve(A, B)
-            W_out_with_bias = torch.linalg.solve(HtH_plus_lambdaI, HtU)  # [batch, dim+1, 1]
+            W_out = torch.linalg.solve(XtX_plus_lambdaI, Xty)
         else:
-            HtH_plus_lambdaI_inv = torch.inverse(HtH_plus_lambdaI)
-            W_out_with_bias = torch.bmm(HtH_plus_lambdaI_inv, HtU)  # [batch, dim+1, 1]
-        
-        # 返回 [W_out, b] 作为特征（论文 Eq.(3) 后的描述）
-        # squeeze 后形状为 [batch, dim+1]
-        return W_out_with_bias.squeeze(2)
+            XtX_plus_lambdaI_inv = torch.inverse(XtX_plus_lambdaI)
+            W_out = torch.bmm(XtX_plus_lambdaI_inv, Xty)
+
+        return W_out.squeeze(2)
 
     def forward(self, input_image):
         """
-        论文 Eq.(2)-(3)：2D-ESN 拟合，返回动态特征 f = [W_out, b]
-        
-        Parameters:
-        -----------
-        input_image : [batch_size, height, width]
-            输入 patch
-        
-        Returns:
-        --------
-        feature : [batch_size, 2*n_reservoir + 1]
-            动态特征 f = [W_out, b]，其中 W_out 维度为 2*n_reservoir，b 为标量
+        input_image: [batch_size, height, width]
+
+        对齐作者开源仓库：返回特征维度为 2*n_reservoir（不含 bias 增广）。
         """
-        # 避免每次无条件 detach()/to(device) 触发额外的 tensor 包装/拷贝。
-        # 在 no_grad 推理下不需要 detach；仅在 device/dtype 不匹配时才转换。
-        if input_image.device != self._device or input_image.dtype != torch.float32:
-            input_image = input_image.to(device=self._device, dtype=torch.float32)
+        input_image = input_image.detach().to(self._device)
         batch, height, width = input_image.shape
+        state = torch.zeros((batch, height, width, self.n_reservoir), dtype=torch.float32, device=self._device)
         initial_state = torch.zeros((batch, self.n_reservoir), dtype=torch.float32, device=self._device)
-        input_terms = None
-        if self._w_in_flat is not None:
-            input_terms = input_image.unsqueeze(-1) * self._w_in_flat
 
-        prev_row = torch.zeros((batch, width, self.n_reservoir), dtype=torch.float32, device=self._device)
-        curr_row = torch.zeros((batch, width, self.n_reservoir), dtype=torch.float32, device=self._device)
-
-        if input_terms is not None:
-            curr_row[:, 0, :] = self.update_reservoir_from_input_term(input_terms[:, 0, 0, :], initial_state, initial_state)  # init
-        else:
-            curr_row[:, 0, :] = self.update_reservoir(input_image[:, 0, 0], initial_state, initial_state)  # init
+        state[:, 0, 0, :] = self.update_reservoir(input_image[:, 0, 0], initial_state, initial_state)  # init
+        # 先初始化第一行的所有state
         for t in range(1, width):
-            if input_terms is not None:
-                curr_row[:, t, :] = self.update_reservoir_from_input_term(input_terms[:, 0, t, :], curr_row[:, t - 1, :], initial_state)
-            else:
-                curr_row[:, t, :] = self.update_reservoir(input_image[:, 0, t], curr_row[:, t - 1, :], initial_state)
-
-        start_h = int(self.start_node[0])
-        start_t = int(self.start_node[1])
-        pre_states_chunks = []
-        targets_chunks = []
-
+            state[:, 0, t, :] = self.update_reservoir(input_image[:, 0, t], state[:, 0, t - 1, :], initial_state)
+        # 每一列，一列一列地算
         for h in range(1, height):
-            prev_row, curr_row = curr_row, prev_row
-            curr_row.zero_()
-            if input_terms is not None:
-                curr_row[:, 0, :] = self.update_reservoir_from_input_term(input_terms[:, h, 0, :], initial_state, prev_row[:, 0, :])
-            else:
-                curr_row[:, 0, :] = self.update_reservoir(input_image[:, h, 0], initial_state, prev_row[:, 0, :])
+            state[:, h, 0, :] = self.update_reservoir(input_image[:, h, 0], initial_state, state[:, h - 1, 0, :])
             for t in range(1, width):
-                if input_terms is not None:
-                    curr_row[:, t, :] = self.update_reservoir_from_input_term(
-                        input_terms[:, h, t, :],
-                        curr_row[:, t - 1, :],
-                        prev_row[:, t, :],
-                    )
-                else:
-                    curr_row[:, t, :] = self.update_reservoir(
-                        input_image[:, h, t],
-                        curr_row[:, t - 1, :],
-                        prev_row[:, t, :],
-                    )
+                state[:, h, t, :] = self.update_reservoir(
+                    input_image[:, h, t], state[:, h, t - 1, :], state[:, h - 1, t, :]
+                )
+        pre_states, targets = [], []
+        for h in range(self.start_node[0], height):
+            for t in range(self.start_node[1], width):
+                new_state = torch.cat([state[:, h, t - 1, :], state[:, h - 1, t, :]], dim=1).unsqueeze(1) # 2D-ESN公式
+                pre_states.append(new_state)
+                targets.append(input_image[:, h, t].unsqueeze(1))
 
-            if h >= start_h and start_t < width:
-                if start_t <= 0:
+        pre_states = torch.cat(pre_states, dim=1)
+        targets = torch.cat(targets, dim=1)
+        return self.ridge_regression(pre_states, targets, with_bias=True)
+
+    def forward_masked(self, input_image, valid_mask):
+        """
+        Fit one irregular masked region as a single 2D-ESN model.
+
+        The paper's fully automatic mode first evaluates SAM coarse regions
+        themselves before converting retained regions to rectangles. This
+        method keeps that order by only updating reservoir states on pixels
+        that belong to the region mask.
+        """
+        input_image = input_image.detach().to(self._device)
+        valid_mask = valid_mask.to(self._device).bool()
+
+        if input_image.ndim != 3 or valid_mask.ndim != 3:
+            raise ValueError("forward_masked expects [batch, height, width] tensors")
+        if input_image.shape != valid_mask.shape:
+            raise ValueError("input_image and valid_mask must have the same shape")
+
+        batch, height, width = input_image.shape
+        if batch != 1:
+            features = [self.forward_masked(input_image[i:i + 1], valid_mask[i:i + 1]) for i in range(batch)]
+            return torch.cat(features, dim=0)
+
+        state = torch.zeros((1, height, width, self.n_reservoir), dtype=torch.float32, device=self._device)
+        initial_state = torch.zeros((1, self.n_reservoir), dtype=torch.float32, device=self._device)
+
+        for h in range(height):
+            for t in range(width):
+                if not bool(valid_mask[0, h, t]):
                     continue
-                left_states = curr_row[:, (start_t - 1):(width - 1), :]
-                up_states = prev_row[:, start_t:width, :]
-                if left_states.shape[1] != up_states.shape[1] or left_states.shape[1] <= 0:
+                state1 = state[:, h, t - 1, :] if t > 0 else initial_state
+                state2 = state[:, h - 1, t, :] if h > 0 else initial_state
+                state[:, h, t, :] = self.update_reservoir(input_image[:, h, t], state1, state2)
+
+        pre_states, targets = [], []
+        for h in range(self.start_node[0], height):
+            for t in range(self.start_node[1], width):
+                if not bool(valid_mask[0, h, t]):
                     continue
-                pre_states_chunks.append(torch.cat([left_states, up_states], dim=2))
-                targets_chunks.append(input_image[:, h, start_t:width])
+                pre_states.append(
+                    torch.cat([state[:, h, t - 1, :], state[:, h - 1, t, :]], dim=1).unsqueeze(1)
+                )
+                targets.append(input_image[:, h, t].unsqueeze(1))
 
-        if not pre_states_chunks:
-            pre_states = torch.zeros((batch, 0, 2 * self.n_reservoir), dtype=torch.float32, device=self._device)
-            targets = torch.zeros((batch, 0), dtype=torch.float32, device=self._device)
-        else:
-            pre_states = torch.cat(pre_states_chunks, dim=1)
-            targets = torch.cat(targets_chunks, dim=1)
+        feature_dim = 2 * self.n_reservoir + 1
+        if not pre_states:
+            return torch.zeros((1, feature_dim), dtype=torch.float32, device=self._device)
 
-        return self.ridge_regression(pre_states, targets)
+        pre_states = torch.cat(pre_states, dim=1)
+        targets = torch.cat(targets, dim=1)
+        return self.ridge_regression(pre_states, targets, with_bias=True)
 
 
 def load_and_preprocess_image(file_path,):
