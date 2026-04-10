@@ -2,56 +2,16 @@
 
 from PySide6.QtWidgets import QMainWindow, QFileDialog, QLabel, QWidget, QVBoxLayout, QMessageBox
 from PySide6.QtGui import QFontMetrics, QPixmap, QPainter, QImage, QPen, QColor, QDragEnterEvent, QDropEvent
-from PySide6.QtCore import Qt, QObject, QEvent, QThread, Signal, Slot, QTimer
+from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot
 import numpy as np
 from io import BytesIO
 import cv2
 import torch
 from PIL import ImageQt, Image
 from ui.ui_main import Ui_MainWindow
-from sam.sam import *
+from sam.sam import predict_mask
 from PatchRes.PatchRes import PatchRes
 from ui.i18n import i18n
-
-
-class SamPoints(object):
-    def __init__(self):
-        self.points = [[], []]
-        self.labels = []
-
-    def clear(self):
-        self.points = [[], []]
-        self.labels.clear()
-
-    def add_point(self, x, y, label):
-        self.points[label].append([x, y])
-        self.labels.append(label)
-
-    def undo(self):
-        if self.labels:
-            self.points[self.labels.pop()].pop()
-
-    def get_prompt(self):
-        point_coords = self.points[0] + self.points[1]
-        point_labels = [0] * len(self.points[0]) + [1] * len(self.points[1])
-        return np.array(point_coords), np.array(point_labels)
-
-    def __bool__(self):
-        return bool(self.labels)
-
-
-class Worker(QThread):
-    finished = Signal(object)
-
-    def __init__(self, image, point_coords, point_labels):
-        super().__init__()
-        self.image = image
-        self.point_coords = point_coords
-        self.point_labels = point_labels
-
-    def run(self):
-        mask = predict(self.image, self.point_coords, self.point_labels)
-        self.finished.emit([self.image, mask])
 
 class GetMaskWithScoreWorker(QObject):
     finished = Signal(object, int, int)   # mask, x0, y0
@@ -139,4 +99,3 @@ class LoadingOverlay(QWidget):
 
         self.setGeometry(x, y, overlay_width, overlay_height)
         self.show()
-
