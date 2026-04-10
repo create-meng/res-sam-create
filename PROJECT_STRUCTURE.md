@@ -19,9 +19,7 @@
 │   │   └── utils.py                 # 工作线程
 │   ├── data/                        # Mendeley 数据集
 │   │   └── GPR_data/
-│   │       ├── intact/              # Normal 样本（75 张）
-│   │       ├── cavities/            # 空洞（80 张，无标注）
-│   │       ├── Utilities/           # 管道（139 张，无标注）
+│   │       ├── augmented_intact/    # 唯一保留的 Normal 样本源
 │   │       ├── augmented_cavities/  # 增强空洞 + 标注（553 张）
 │   │       │   ├── *.jpg
 │   │       │   └── annotations/
@@ -47,14 +45,14 @@
 
 ## 数据集说明
 
-### Mendeley Open-source 数据集
-- **来源**: https://data.mendeley.com/datasets/ww7fd9t325/1
-- **论文对应**: Table 1/2 中的 "Open-source" 数据集（285 B-scans）
+### 当前唯一评测数据集
+- **来源**: 本地保留的增强标注数据
+- **用途**: 当前仓库唯一保留的定量评测数据入口
 
 ### 类别划分
 | 类别 | 目录 | 数量 | 有标注 | 用途 |
 |------|------|------|--------|------|
-| Normal (intact) | `intact/` | 75 | 否 | Feature Bank 构建 |
+| Normal (intact) | `augmented_intact/` | 当前保留 | 否 | Feature Bank 构建 |
 | Cavity | `augmented_cavities/` | 553 | 是 (VOC/YOLO) | 测试集 |
 | Utility/Pipe | `augmented_utilities/` | 786 | 是 (VOC/YOLO) | 测试集 |
 
@@ -77,7 +75,7 @@
 ## 复现实验数据划分
 
 ### Feature Bank 初始化
-- 从 `intact/` 随机抽取 **20 张** normal 样本
+- 从 `augmented_intact/` 随机抽取 **20 张** normal 样本
 - 用 2D-ESN 拟合生成特征银行
 
 ### 测试集
@@ -98,16 +96,30 @@
 
 ## 实验脚本目录（现状）
 
-主线为 `experiments/*_v4.py`、`*_v5.py` 与 `run_all.py`（`--version v4` \| `v5`）。下文「待创建目录」为早期草稿，**以仓库内实际 `experiments/` 为准**。
+当前唯一维护主线为 `experiments/*_v6.py` 与 `run_all.py`（`--version v6`）。`v4/v5` 相关脚本仅保留作历史参考，**以仓库内实际 `experiments/` 为准**。
 
 ```
 experiments/
 ├── paper_constants.py
-├── 01_build_feature_bank_v4.py / v5.py
-├── 02_inference_auto_v4.py / v5.py
-├── … 
+├── 01_build_feature_bank_v6.py
+├── 02_inference_auto_v6.py
+├── 03_evaluate_and_visualize_v6.py
+├── 04_clustering_v6.py
+├── 05_clustering_v4.py / v5.py
+├── 06_ablation_wo_sam_v4.py / v5.py
+├── 07_cross_environment_v4.py / v5.py
 └── run_all.py
 
 # 运行生成（仓库根目录下，非 experiments 子目录）
-outputs/feature_banks_v4/、outputs/predictions_v4/ 等
+outputs/feature_banks_v6/、outputs/predictions_v6/、outputs/analysis_v6/ 等
 ```
+## 2026-04-08 主线说明
+
+- 当前可运行实验分支仅保留 `v6`。
+- 实现口径采用“论文优先；若论文未明确给出参数或工程细节，再回退到官方公开代码选择”。
+- `v6` 当前使用论文公式特征定义 `f=[W_out,b]`。
+- `v7` 已删除。
+- 当前唯一保留的数据映射使用：
+  - `data/GPR_data/augmented_intact`
+  - `data/GPR_data/augmented_cavities`
+  - `data/GPR_data/augmented_utilities`

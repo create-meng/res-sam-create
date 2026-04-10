@@ -1,5 +1,11 @@
 # Res-SAM 论文复现计划书
 
+> 说明：本文件主要保留早期规划痕迹，已经不是当前主线执行说明。
+> 当前实际主线以 `experiments/01_build_feature_bank_v6.py`、
+> `02_inference_auto_v6.py`、`03_evaluate_and_visualize_v6.py`、
+> `04_clustering_v6.py` 以及 `experiments/run_all.py --step 1-4` 为准。
+> 文中涉及 click-guided、多数据模式、旧编号 Step 5 等内容，均视为历史存档，不再代表当前实现状态。
+
 ## 一、论文概述
 
 **标题**: Res-SAM: Reservoir-enhanced Segment Anything Model for Underground Anomaly Detection in GPR B-scans

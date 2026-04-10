@@ -1,43 +1,49 @@
-# TileRes Anomaly Detection
+# TileRes 异常检测说明
 
-## Overview
+## 概览
 
-Performing anomaly detection on GPR image data by TileRes. 
+本目录提供基于 TileRes / PatchRes 的 GPR 图像异常检测最小示例。
 
-## Data Structure
+## 仓库说明
 
-The data for this project is organized as follows:
+- 当前持续维护的完整 Res-SAM 复现主线位于 `../experiments/*_v6.py`。
+- 实现口径采用“论文优先；若论文未明确给出参数或工程细节，再回退到官方公开代码选择”。
+- 本目录中的示例仍是最小化的 PatchRes / TileRes 演示，不是完整的端到端 Res-SAM 主流程。
 
-- **Images for Testing**:   `./data/images/`
-  - Place the corresponding images for the test dataset in this directory.
+## 数据结构
 
-- **Images for Training**:  `./data/normal/`
-  - Place the normal images for training the anomaly detection model in this directory.
+项目数据按如下方式组织：
 
-## Running the Demo
+- **测试图像**：`./data/images/`
+  - 将测试集对应图像放在该目录。
 
-This project works well with **python>=3.8** (recommended **python=3.9**).
+- **训练正常图像**：`./data/normal/`
+  - 将用于训练异常检测模型的正常图像放在该目录。
 
-For Res-SAM **V4/V5** experiments, see `../experiments/`（`*_v4.py` / `*_v5.py`）and `../experiments/run_all.py`. V3 snapshot lives under `../archive/experiments_v3_snapshot_20260326/`.
+## 运行演示
 
-Ensure you have the necessary dependencies installed. You can install them using the requirements.txt file:
+建议使用 **python>=3.8**，推荐 **python=3.9**。
 
-``` bash
+如果你要运行 Res-SAM 主线实验，请查看 `../experiments/` 下的 `*_v6.py` 以及 `../experiments/run_all.py`。V3 归档快照位于 `../已归档/experiments_v3_snapshot_20260326/`。
+
+请先确保已经安装依赖，可通过 `requirements.txt` 安装：
+
+```bash
 pip install -r requirements.txt
 ```
 
-To run the TileRes anomaly detection, execute the following command:
+运行 TileRes 异常检测：
 
 ```bash
 python main.py
 ```
 
-## Results
-The results of the anomaly detection will be saved in the following directories:
+## 输出结果
 
-- **Image with Anomaly Frame**:   ./output/frames/
-  - This directory contains images with frames drawn around detected anomalies.
-- **Anomaly Masks**:              ./output/masks/
-  - This directory contains the generated anomaly masks.
+异常检测结果将保存在以下目录：
 
+- **异常框图像**：`./output/frames/`
+  - 该目录保存绘制了异常框的图像。
 
+- **异常掩码**：`./output/masks/`
+  - 该目录保存生成的异常掩码。

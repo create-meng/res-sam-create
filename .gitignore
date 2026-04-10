@@ -67,8 +67,9 @@ outputs.zip
 LOG.txt
 log.txt
 
-# Archive: entire directory is local-only; do not commit
+# 归档目录：默认不作为仓库内容提交（大体积输出与历史快照）；若需提交其中部分文件可用 git add -f 或收窄忽略规则
 archive/
+已归档/
 
 # Media
 *.mp4
