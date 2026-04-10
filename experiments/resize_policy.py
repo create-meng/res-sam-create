@@ -1,14 +1,16 @@
-"""
-Shared image resize policy for V4/V5 experiment scripts.
+﻿"""
+Shared image resize policy for V6 experiment scripts.
 
-The paper mentions concrete sizes for some real-world GPR imagery (e.g. 369x369 and 615x369)
-but does not give one universal “resize everything to HxW” rule for every reproduction path.
+Current V6 mainline policy:
+- fixed: always resize to config["image_size"] (H, W).
 
-Policy:
-- fixed: always resize to config["image_size"] (H, W). Legacy / comparable to older runs.
-- voc_annotation: if VOC XML is available, resize to XML (height, width); otherwise keep native
-  file resolution (no resize). Aligns bboxes with the annotation coordinate system without
-  inventing a global square resize.
+Rationale:
+- the paper does not define a new universal resize rule for reproduction;
+- when the paper is silent, V6 falls back to the author public-code default
+  preprocessing convention, i.e. fixed-size loading (369x369).
+
+`voc_annotation` is kept only as a legacy helper and is not used by the
+current V6 mainline.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ def target_hw_for_preprocess(
     voc_size_record:
         Any dict with integer-like "width" and "height" (VOC <size> block).
     """
-    policy = config.get("resize_policy", RESIZE_POLICY_VOC_ANNOTATION)
+    policy = config.get("resize_policy", RESIZE_POLICY_FIXED)
     if policy == RESIZE_POLICY_FIXED:
         return config.get("image_size")
     if policy == RESIZE_POLICY_VOC_ANNOTATION:
@@ -37,3 +39,4 @@ def target_hw_for_preprocess(
             return (int(voc_size_record["height"]), int(voc_size_record["width"]))
         return None
     return config.get("image_size")
+

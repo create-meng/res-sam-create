@@ -1,12 +1,11 @@
 """
-Res-SAM experiment runner for active branches only.
+Res-SAM 当前主线实验运行器。
 
-Archived V3 scripts live under:
-archive/experiments_v3_snapshot_20260326/
+已归档的 V3 脚本位于：
+已归档/experiments_v3_snapshot_20260326/
 
-Active runnable branches in experiments/:
-- v4
-- v5
+当前可运行主线：
+- v6（论文优先主线）
 """
 
 import argparse
@@ -14,82 +13,36 @@ import os
 import subprocess
 import sys
 
+_RUN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _RUN_ROOT not in sys.path:
+    sys.path.insert(0, _RUN_ROOT)
 
-ACTIVE_VERSIONS = ("v4", "v5")
+from experiments.paper_constants import preflight_faiss_or_raise
+
+
+ACTIVE_VERSIONS = ("v6",)
 
 STEPS_BY_VERSION = {
-    "v4": {
+    "v6": {
         1: {
-            "name": "Feature Bank Construction",
-            "script": "01_build_feature_bank_v4.py",
-            "description": "Build feature bank for v4",
+            "name": "Feature Bank 构建",
+            "script": "01_build_feature_bank_v6.py",
+            "description": "为 v6 构建 Feature Bank",
         },
         2: {
-            "name": "Fully Automatic Inference",
-            "script": "02_inference_auto_v4.py",
-            "description": "Run automatic inference for v4",
+            "name": "全自动推理",
+            "script": "02_inference_auto_v6.py",
+            "description": "运行 v6 全自动推理",
         },
         3: {
-            "name": "Evaluation Metrics",
-            "script": "04_evaluate_and_visualize_v4.py",
-            "description": "Run evaluation and visualization for v4",
+            "name": "评估与可视化",
+            "script": "03_evaluate_and_visualize_v6.py",
+            "description": "运行 v6 评估与可视化",
         },
         4: {
-            "name": "Click-guided Inference",
-            "script": "03_inference_click_v4.py",
-            "description": "Run click-guided inference for v4",
-        },
-        5: {
-            "name": "Clustering",
-            "script": "05_clustering_v4.py",
-            "description": "Run clustering analysis for v4",
-        },
-        6: {
-            "name": "Ablation w/o SAM",
-            "script": "06_ablation_wo_sam_v4.py",
-            "description": "Run ablation without SAM for v4",
-        },
-        7: {
-            "name": "Cross-environment",
-            "script": "07_cross_environment_v4.py",
-            "description": "Run cross-environment evaluation for v4",
-        },
-    },
-    "v5": {
-        1: {
-            "name": "Feature Bank Construction",
-            "script": "01_build_feature_bank_v5.py",
-            "description": "Build feature bank for v5",
-        },
-        2: {
-            "name": "Fully Automatic Inference",
-            "script": "02_inference_auto_v5.py",
-            "description": "Run automatic inference for v5",
-        },
-        3: {
-            "name": "Evaluation Metrics",
-            "script": "04_evaluate_and_visualize_v5.py",
-            "description": "Run evaluation and visualization for v5",
-        },
-        4: {
-            "name": "Click-guided Inference",
-            "script": "03_inference_click_v5.py",
-            "description": "Run click-guided inference for v5",
-        },
-        5: {
-            "name": "Clustering",
-            "script": "05_clustering_v5.py",
-            "description": "Run clustering analysis for v5",
-        },
-        6: {
-            "name": "Ablation w/o SAM",
-            "script": "06_ablation_wo_sam_v5.py",
-            "description": "Run ablation without SAM for v5",
-        },
-        7: {
-            "name": "Cross-environment",
-            "script": "07_cross_environment_v5.py",
-            "description": "Run cross-environment evaluation for v5",
+            "name": "异常聚类",
+            "script": "04_clustering_v6.py",
+            "description": "运行 v6 异常聚类",
         },
     },
 }
@@ -114,20 +67,20 @@ def _parse_steps(step_arg: str | None, valid_steps: list[int]) -> list[int]:
 def run_step(version: str, step_num: int) -> bool:
     steps = STEPS_BY_VERSION[version]
     if step_num not in steps:
-        print(f"Error: invalid step number {step_num} for {version}")
+        print(f"错误：{version} 不存在步骤 {step_num}")
         return False
 
     step = steps[step_num]
     script_path = os.path.join(os.path.dirname(__file__), step["script"])
 
     print(f"\n{'=' * 70}")
-    print(f"{version.upper()} Step {step_num}: {step['name']}")
-    print(f"Description: {step['description']}")
-    print(f"Script: {step['script']}")
+    print(f"{version.upper()} 第 {step_num} 步：{step['name']}")
+    print(f"说明：{step['description']}")
+    print(f"脚本：{step['script']}")
     print("=" * 70)
 
     if not os.path.exists(script_path):
-        print(f"Error: script not found: {script_path}")
+        print(f"错误：未找到脚本 {script_path}")
         return False
 
     try:
@@ -137,35 +90,41 @@ def run_step(version: str, step_num: int) -> bool:
             check=False,
         )
         if result.returncode == 0:
-            print(f"\nStep {step_num} completed successfully")
+            print(f"\n步骤 {step_num} 执行成功")
             return True
-        print(f"\nStep {step_num} failed with return code {result.returncode}")
+        print(f"\n步骤 {step_num} 执行失败，返回码 {result.returncode}")
         return False
     except Exception as exc:
-        print(f"\nStep {step_num} failed with error: {exc}")
+        print(f"\n步骤 {step_num} 执行失败：{exc}")
         return False
+
+
+def _run_faiss_preflight() -> None:
+    """与 01-07 入口脚本一致的 faiss 预检查。"""
+    print("[预检查] faiss（如需跳过可设置 RES_SAM_SKIP_FAISS_PREFLIGHT=1）...")
+    preflight_faiss_or_raise()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run active Res-SAM experiment branches (v4/v5)."
+        description="运行当前 Res-SAM 论文优先主线（v6）。"
     )
     parser.add_argument(
         "--version",
         choices=ACTIVE_VERSIONS,
-        default="v4",
-        help="Which active branch to run.",
+        default="v6",
+        help="选择要运行的当前主线版本。",
     )
     parser.add_argument(
         "--step",
         type=str,
         default=None,
-        help="Steps to run, e.g. 1 or 2,4 or 1-7",
+        help="要运行的步骤，例如 1、2,4 或 1-4",
     )
     parser.add_argument(
         "--list",
         action="store_true",
-        help="List available steps for the selected version.",
+        help="列出所选版本可用步骤。",
     )
     args = parser.parse_args()
 
@@ -173,40 +132,43 @@ def main():
     valid_steps = list(steps.keys())
 
     if args.list:
-        print(f"\nAvailable steps for {args.version}:")
+        print(f"\n{args.version} 可用步骤：")
         print("-" * 70)
         for num, step in steps.items():
             print(f"  {num}. {step['name']}: {step['description']}")
-        print("\nArchived V3 scripts are not run from experiments/ anymore.")
+        print("\n已归档的 V3 脚本不再通过 experiments/ 直接运行。")
         return
 
     steps_to_run = _parse_steps(args.step, valid_steps)
     if not steps_to_run:
-        raise SystemExit("No valid steps selected.")
+        raise SystemExit("未选择有效步骤。")
+
+    _run_faiss_preflight()
 
     print("=" * 70)
-    print("Res-SAM Active Experiment Runner")
+    print("Res-SAM 当前主线实验运行器")
     print("=" * 70)
-    print(f"Version: {args.version}")
-    print(f"Steps to run: {steps_to_run}")
-    print("Archived V3 snapshot: archive/experiments_v3_snapshot_20260326/")
+    print(f"版本：{args.version}")
+    print(f"将运行步骤：{steps_to_run}")
+    print("数据集：固定为当前唯一保留的增强标注数据集")
+    print("V3 归档快照：已归档/experiments_v3_snapshot_20260326/")
 
     results = {}
     for step_num in steps_to_run:
         results[step_num] = run_step(args.version, step_num)
         if not results[step_num] and step_num < max(steps_to_run):
-            print(f"\nWarning: step {step_num} failed. Continuing...")
+            print(f"\n警告：步骤 {step_num} 失败，继续执行后续步骤。")
 
     print("\n" + "=" * 70)
-    print("Summary")
+    print("汇总")
     print("=" * 70)
     for step_num in steps_to_run:
-        status = "Success" if results[step_num] else "Failed"
-        print(f"  Step {step_num} ({steps[step_num]['name']}): {status}")
+        status = "成功" if results[step_num] else "失败"
+        print(f"  步骤 {step_num}（{steps[step_num]['name']}）：{status}")
 
     total = len(steps_to_run)
     success = sum(results.values())
-    print(f"\nTotal: {success}/{total} steps completed successfully")
+    print(f"\n总计：{success}/{total} 个步骤执行成功")
 
 
 if __name__ == "__main__":
