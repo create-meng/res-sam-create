@@ -12,6 +12,7 @@ Res-SAM V6 - 第 3 步：评估与可视化。
 """
 
 # Paper-aligned rule: a detection is correct only when IoU > 0.5.
+from __future__ import annotations
 import json
 import os
 import sys
@@ -21,7 +22,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
 from experiments.dataset_layout import DATASET_ENHANCED, apply_layout_to_config_04
-from experiments.paper_constants import EVAL_DETECTION_IOU_THRESHOLD, preflight_faiss_or_raise
+from experiments.paper_constants import EVAL_DETECTION_IOU_THRESHOLD
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -318,7 +319,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    preflight_faiss_or_raise()
     CONFIG = apply_layout_to_config_04(dict(CONFIG), BASE_DIR, "v6")
     CONFIG["predictions_path"] = _to_abs(BASE_DIR, CONFIG.get("predictions_path", ""))
     CONFIG["vis_output_dir"] = _to_abs(BASE_DIR, CONFIG.get("vis_output_dir", ""))

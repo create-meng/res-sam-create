@@ -453,9 +453,10 @@ normal_auc_dir = "data/GPR_data/augmented_intact"  # 当前主线将该目录作
 
 KNN 后端（用于 Feature Bank 1-NN 检索）默认策略：
 
-- 默认策略：主线脚本先执行 strict-faiss 预检；只有显式设置 `RES_SAM_ALLOW_SKLEARN_KNN=1` 时才允许 `sklearn` 回退。
+- 默认策略：涉及 Feature Bank 1-NN 检索的主线脚本先执行 strict-faiss 预检；只有显式设置 `RES_SAM_ALLOW_SKLEARN_KNN=1` 时才允许 `sklearn` 回退。
 - 未显式指定 `RES_SAM_KNN_BACKEND` 时，运行期默认优先尝试 `faiss_gpu`（CUDA 可用）或 `faiss_cpu`；strict-faiss 默认下不会自动回退到 `sklearn`。
 - 可用环境变量强制指定：`RES_SAM_KNN_BACKEND=sklearn|faiss_cpu|faiss_gpu`；若指定 `sklearn`，建议同时设置 `RES_SAM_ALLOW_SKLEARN_KNN=1`。
+- `experiments/03_evaluate_and_visualize_v6.py` 属于纯评估/可视化脚本：若输入是已生成的预测结果 JSON，则不执行 faiss 预检，也不需要 Feature Bank 1-NN 检索。
 
 ## V6 输出文件格式（当前主线）
 
