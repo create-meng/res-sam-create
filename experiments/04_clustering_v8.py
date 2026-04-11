@@ -1,9 +1,9 @@
-﻿"""
-Res-SAM V6 - Step 4: anomaly categorization / clustering.
+"""
+Res-SAM V8 - Step 4: anomaly categorization / clustering.
 
-V6 clustering reuses the final anomaly regions from automatic inference,
+V8 clustering reuses the final anomaly regions from automatic inference,
 re-fits each final region with 2D-ESN, and clusters the resulting
-region-level dynamic features. As with the other V6 steps, preprocessing
+region-level dynamic features. As with the other V8 steps, preprocessing
 uses a fixed 369x369 resize and the runtime seed is unified to 11.
 """
 
@@ -34,8 +34,8 @@ from experiments.resize_policy import RESIZE_POLICY_FIXED, target_hw_for_preproc
 
 CONFIG = {
     "dataset_mode": DATASET_ENHANCED,
-    "predictions_path": os.path.join(BASE_DIR, "outputs", "predictions_v6", "auto_predictions_v6.json"),
-    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v6", "feature_bank_v6.pth"),
+    "predictions_path": os.path.join(BASE_DIR, "outputs", "predictions_v8", "auto_predictions_v8.json"),
+    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v8", "feature_bank_v8.pth"),
     "test_data_dirs": {
         "cavities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_cavities"),
         "utilities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities"),
@@ -52,15 +52,15 @@ CONFIG = {
     "resize_policy": RESIZE_POLICY_FIXED,
     "image_size": (369, 369),
     "n_clusters": None,
-    "output_dir": os.path.join(BASE_DIR, "outputs", "metrics_v6"),
-    "output_file": "04_clustering_v6.json",
-    "checkpoint_dir": os.path.join(BASE_DIR, "outputs", "checkpoints_v6"),
-    "checkpoint_file": "checkpoint_04_clustering_v6.json",
+    "output_dir": os.path.join(BASE_DIR, "outputs", "metrics_v8"),
+    "output_file": "04_clustering_v8.json",
+    "checkpoint_dir": os.path.join(BASE_DIR, "outputs", "checkpoints_v8"),
+    "checkpoint_file": "checkpoint_04_clustering_v8.json",
     "checkpoint_every": 50,
     "random_seed": 11,
-    "version": "V6",
+    "version": "V8",
     "alignment_notes": (
-        "Paper-first mainline (V6): clustering re-fits each final anomaly region "
+        "Paper-first mainline (V8): clustering re-fits each final anomaly region "
         "with the same 2D-ESN reservoir weights used by feature-bank/inference, "
         "then clusters the solved dynamic feature f=[W_out,b]."
     ),
@@ -240,7 +240,7 @@ def compute_clustering_metrics(true_labels: np.ndarray, pred_labels: np.ndarray)
 
 
 def main() -> None:
-    config = apply_layout_to_config_05(dict(CONFIG), BASE_DIR, "v6")
+    config = apply_layout_to_config_05(dict(CONFIG), BASE_DIR, "v8")
     config["predictions_path"] = _to_abs(BASE_DIR, config.get("predictions_path", ""))
     config["feature_bank_path"] = _to_abs(BASE_DIR, config.get("feature_bank_path", ""))
     config["output_dir"] = _to_abs(BASE_DIR, config.get("output_dir", ""))
@@ -255,12 +255,12 @@ def main() -> None:
     if not os.path.exists(config["predictions_path"]):
         raise FileNotFoundError(
             f"Predictions not found: {config['predictions_path']}\n"
-            "Please run 02_inference_auto_v6.py first."
+            "Please run 02_inference_auto_v8.py first."
         )
     if not os.path.exists(config["feature_bank_path"]):
         raise FileNotFoundError(
             f"Feature bank not found: {config['feature_bank_path']}\n"
-            "Please run 01_build_feature_bank_v6.py first."
+            "Please run 01_build_feature_bank_v8.py first."
         )
 
     os.makedirs(config["output_dir"], exist_ok=True)

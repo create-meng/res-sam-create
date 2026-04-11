@@ -98,6 +98,8 @@ class ResSAM:
         anomaly_threshold: Optional[float] = None,
         region_coarse_threshold: Optional[float] = None,
         feature_with_bias: bool = True,
+        automatic_fine_use_mask: bool = False,
+        automatic_coarse_use_patch_aggregation: bool = False,
     ):
         self.hidden_size = hidden_size
         self.window_size = window_size
@@ -105,6 +107,8 @@ class ResSAM:
         self.spectral_radius = spectral_radius
         self.connectivity = connectivity
         self.feature_with_bias = bool(feature_with_bias)
+        self.automatic_fine_use_mask = bool(automatic_fine_use_mask)
+        self.automatic_coarse_use_patch_aggregation = bool(automatic_coarse_use_patch_aggregation)
         # Eq.(9) β：单一阈值。推荐只传 beta_threshold；anomaly_threshold / region_coarse_threshold 仅为旧调用兼容。
         if anomaly_threshold is not None and region_coarse_threshold is not None:
             if float(anomaly_threshold) != float(region_coarse_threshold):
@@ -803,11 +807,35 @@ class ResSAM:
                 num_discarded += 1
                 continue
             
-            # Paper-first automatic mode: discriminate the SAM region itself
-            # before converting it to a candidate rectangle.
-            region_feature = self._extract_region_feature(image, bbox, mask)
-            region_feature_np = region_feature.detach().cpu().numpy()
-            region_scores = self._score_features_against_bank(region_feature_np)
+            if self.automatic_coarse_use_patch_aggregation:
+                patches_np, patch_positions = self._collect_candidate_patches(image, bbox, mask)
+                if patches_np.size == 0 or len(patch_positions) == 0:
+                    if debug_coarse:
+                        print(
+                            f"  [coarse][discard][{region_idx}] reason=no_valid_region_patches "
+                            f"bbox={bbox}")
+                    num_discarded += 1
+                    continue
+                patches_tensor = self._patch_list_to_tensor(patches_np)
+                features = self._fit_patches(patches_tensor)
+                features_np = features.detach().cpu().numpy()
+                region_scores = self._score_features_against_bank(features_np)
+                region_num_features = int(region_scores.shape[0])
+            else:
+                # Paper-first automatic mode: discriminate the SAM region itself
+                # before converting it to a candidate rectangle.
+                region_feature = self._extract_region_feature(image, bbox, mask)
+                region_feature_np = region_feature.detach().cpu().numpy()
+                region_scores = self._score_features_against_bank(region_feature_np)
+                if region_scores.size == 0:
+                    if debug_coarse:
+                        print(
+                            f"  [coarse][discard][{region_idx}] reason=no_region_score "
+                            f"bbox={bbox}")
+                    num_discarded += 1
+                    continue
+                region_num_features = int(region_scores.shape[0])
+
             if region_scores.size == 0:
                 if debug_coarse:
                     print(
@@ -824,13 +852,13 @@ class ResSAM:
                     print(
                         f"  [coarse][retain][{region_idx}] bbox={bbox} area={region_area} "
                         f"max_score={region_max_score:.6f} mean_score={region_mean_score:.6f} "
-                        f"num_region_features={int(region_scores.shape[0])} beta={self.beta_threshold:.6f}")
+                        f"num_region_features={region_num_features} beta={self.beta_threshold:.6f}")
                 retained_regions.append({
                     'bbox': bbox,
                     'mask': mask,
                     'coarse_max_score': region_max_score,
                     'coarse_mean_score': region_mean_score,
-                    'num_region_features': int(region_scores.shape[0]),
+                    'num_region_features': region_num_features,
                     'stability_score': region.get('stability_score', 0),
                 })
             else:
@@ -838,7 +866,7 @@ class ResSAM:
                     print(
                         f"  [coarse][discard][{region_idx}] reason=score_le_beta bbox={bbox} area={region_area} "
                         f"max_score={region_max_score:.6f} mean_score={region_mean_score:.6f} "
-                        f"num_region_features={int(region_scores.shape[0])} beta={self.beta_threshold:.6f}")
+                        f"num_region_features={region_num_features} beta={self.beta_threshold:.6f}")
                 num_discarded += 1
         print(f"  Retained {len(retained_regions)} regions after coarse filtering (discarded {num_discarded})")
         
@@ -862,8 +890,9 @@ class ResSAM:
             bbox = region['bbox']
             mask = region['mask']
 
+            fine_mask = mask if self.automatic_fine_use_mask else None
             patches_np, patch_positions = self._collect_candidate_patches(
-                image, bbox, None
+                image, bbox, fine_mask
             )
             if patches_np.size == 0 or len(patch_positions) == 0:
                 continue

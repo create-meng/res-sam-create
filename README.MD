@@ -12,11 +12,11 @@
 1. 安装环境
 2. 获取 SAM 权重
 3. 先做快速自检（可选，但推荐）
-4. 运行 **V6** 主流程（`experiments/run_all.py`，或逐个运行 `*_v6.py`）
+4. 运行 **V7** 主流程（逐个运行 `*_v7.py`）
 5. 查看输出结果
 6. 再根据需要运行聚类 / 消融 / 跨环境实验
 
-对应命令的最短路径如下（当前主线为 **V6**；V3 已归档至 `已归档/experiments_v3_snapshot_20260326/`）：
+对应命令的最短路径如下（当前主线为 **V7**；V8 为并行对照分支；V6 已归档至 `已归档/v6_snapshot_20260411_clean/`；V3 已归档至 `已归档/experiments_v3_snapshot_20260326/`）：
 
 ```bash
 # 若尚未克隆（OpenI 示例；浅克隆 + 跳过 LFS 自动检出）
@@ -31,11 +31,10 @@ git lfs install
 git lfs pull
 # 若 OpenI 等无法拉取 sam/sam_vit_l_0b3195.pth，见下文「SAM 权重」用手动下载。
 
-python experiments/01_build_feature_bank_v6.py
-python experiments/02_inference_auto_v6.py
-python experiments/03_evaluate_and_visualize_v6.py
-python experiments/04_clustering_v6.py
-# 或：python experiments/run_all.py --version v6 --step 1-4
+python experiments/01_build_feature_bank_v7.py
+python experiments/02_inference_auto_v7.py
+python experiments/03_evaluate_and_visualize_v7.py
+python experiments/04_clustering_v7.py
 ```
 
 ---
@@ -48,18 +47,26 @@ python experiments/04_clustering_v6.py
 - [x] Feature Bank / 自动推理 / 评估 / click / 聚类 / 消融 / 跨环境：对应历史脚本位于 `experiments/*_v4.py`、`experiments/*_v5.py`，仅供追溯参考
 - [x] Eq.(9) β 默认值与作者仓库 `PatchRes/main.py` 对齐：`experiments/paper_constants.py` 中 `DEFAULT_BETA_THRESHOLD`（当前 **0.1**）
 
-### V6（当前推荐主线：论文优先 + 独立输出目录）✅
-- **定位**：V6 是当前唯一维护主线，遵循“论文优先；论文未写明时再采用官方公开代码默认值”的口径，并使用独立输出目录 `outputs/*_v6/`。
-- **运行入口**：`python experiments/run_all.py --version v6 --step 1-4`
+### V7（当前推荐主线：论文优先 + 独立输出目录）✅
+- **定位**：V7 是当前唯一维护主线，遵循“论文优先；论文未写明时再采用官方公开代码默认值”的口径，并使用独立输出目录 `outputs/*_v7/`。
+- **运行入口**：依次运行 `python experiments/01_build_feature_bank_v7.py` → `02_inference_auto_v7.py` → `03_evaluate_and_visualize_v7.py` → `04_clustering_v7.py`
 - **实现对齐点（作者开源代码口径）**
   - 点击 SAM：`PatchRes/sam_integration.py` 使用 `multimask_output=True` 并取 `scores.argmax()`
   - 2D-ESN：`ESN_2D` 构造器默认 `alpha=0.9`，但当前 V6 主流程在论文未给定该值时沿用作者公开实现，显式传入 `alpha=5`；特征定义按论文公式真实求解 `f=[W_out,b]`，特征维 `2*hidden_size+1`（默认 61）
   - 近邻默认严格 Faiss：未显式放宽时禁止 sklearn 回退；如需应急回退，设置 `RES_SAM_ALLOW_SKLEARN_KNN=1`
-- **重要**：由于 V6 当前按论文使用 `f=[W_out,b]`，特征维为 61，因此请使用 V6 的 Step 1 重新构建 `outputs/feature_banks_v6/feature_bank_v6.pth`，不要混用旧产物。
+- **重要**：由于 V7 当前按论文使用 `f=[W_out,b]`，特征维为 61，因此请使用 V7 的 Step 1 重新构建 `outputs/feature_banks_v7/feature_bank_v7.pth`，不要混用旧产物。
 - **唯一保留的数据映射**
   - feature bank normal 源：`data/GPR_data/augmented_intact`（随机抽 20 张建库）
   - 评估集：`data/GPR_data/augmented_cavities`、`augmented_utilities`、`augmented_intact`
   - 不再保留其他数据模式和未标注原始目录
+
+### V8（并行对照分支）
+- **定位**：V8 用于和 V7 并行做小样本/机制对照，不作为默认推荐入口。
+- **运行入口**：依次运行 `python experiments/01_build_feature_bank_v8.py` → `02_inference_auto_v8.py` → `03_evaluate_and_visualize_v8.py` → `04_clustering_v8.py`
+
+### V6（已归档快照，勿再当活动修改基线）
+- 归档位置：`已归档/v6_snapshot_20260411_clean/`
+- 包含内容：`experiments/*_v6.py`、`outputs/*_v6/`、V6 日志，以及一份共享运行上下文快照
 
 ### V3（已归档快照，勿再当修改基线）
 - 见 `已归档/experiments_v3_snapshot_20260326/`
@@ -312,24 +319,24 @@ ls -lh sam/sam_vit_l_0b3195.pth
 
 ### 第 3 步：快速自检（可选但推荐）
 
-`00_quick_test_v3.py` 已随 V3 归档至 `已归档/experiments_v3_snapshot_20260326/`。快速验证建议用 **少量图片** 跑当前 `v6` 主线：
+`00_quick_test_v3.py` 已随 V3 归档至 `已归档/experiments_v3_snapshot_20260326/`。快速验证建议用 **少量图片** 跑当前 `v7` 主线：
 
 ```bash
 set MAX_IMAGES_PER_CATEGORY=10
-conda run -n res-sam python experiments/02_inference_auto_v6.py
-conda run -n res-sam python experiments/03_evaluate_and_visualize_v6.py
-conda run -n res-sam python experiments/04_clustering_v6.py
+conda run -n res-sam python experiments/02_inference_auto_v7.py
+conda run -n res-sam python experiments/03_evaluate_and_visualize_v7.py
+conda run -n res-sam python experiments/04_clustering_v7.py
 ```
 
-### 第 4 步：运行 V6 主流程
+### 第 4 步：运行 V7 主流程
 
-当前主线流程建议按下面顺序执行（`v6` 为唯一维护主线）：
+当前主线流程建议按下面顺序执行（`v7` 为默认维护主线，`v8` 为并行对照分支）：
 
 ```bash
-python experiments/01_build_feature_bank_v6.py
-python experiments/02_inference_auto_v6.py
-python experiments/03_evaluate_and_visualize_v6.py
-python experiments/04_clustering_v6.py
+python experiments/01_build_feature_bank_v7.py
+python experiments/02_inference_auto_v7.py
+python experiments/03_evaluate_and_visualize_v7.py
+python experiments/04_clustering_v7.py
 ```
 
 也可以进入 `experiments` 目录运行；脚本统一按仓库根目录解析路径。
@@ -337,10 +344,10 @@ python experiments/04_clustering_v6.py
 Windows（或不手动 activate 环境）可用：
 
 ```bash
-conda run -n res-sam python experiments/01_build_feature_bank_v6.py
-conda run -n res-sam python experiments/02_inference_auto_v6.py
-conda run -n res-sam python experiments/03_evaluate_and_visualize_v6.py
-conda run -n res-sam python experiments/04_clustering_v6.py
+conda run -n res-sam python experiments/01_build_feature_bank_v7.py
+conda run -n res-sam python experiments/02_inference_auto_v7.py
+conda run -n res-sam python experiments/03_evaluate_and_visualize_v7.py
+conda run -n res-sam python experiments/04_clustering_v7.py
 ```
 
 ### 第 5 步：按需运行扩展实验
@@ -348,7 +355,7 @@ conda run -n res-sam python experiments/04_clustering_v6.py
 #### 异常聚类
 
 ```bash
-python experiments/04_clustering_v6.py
+python experiments/04_clustering_v7.py
 ```
 
 #### 消融实验：w/o SAM
@@ -360,26 +367,20 @@ python experiments/04_clustering_v6.py
 #### Cross-environment 实验
 
 ```bash
-# 当前维护重点为 v6 的建库、全自动与评估
-```
-
-#### 一键串联运行
-
-```bash
-python experiments/run_all.py --version v6
+# 当前维护重点为 v7/v8 的建库、全自动与评估
 ```
 
 ### 第 6 步：查看输出
 
-V6 关键输出主要在：
+V7 关键输出主要在：
 
-- `outputs/feature_banks_v6/`
-- `outputs/predictions_v6/`
-- `outputs/checkpoints_v6/`
+- `outputs/feature_banks_v7/`
+- `outputs/predictions_v7/`
+- `outputs/checkpoints_v7/`
 
 其中最常用的是：
 
-- **Fully automatic**：`outputs/predictions_v6/auto_predictions_v6.json`
+- **Fully automatic**：`outputs/predictions_v7/auto_predictions_v7.json`
 ### 第 7 步：如需上传或下载结果文件
 
 在本地终端运行，例如：
@@ -398,15 +399,23 @@ scp -P 42034 root@xj-member.bitahub.com:/root/res-sam-create/outputs.zip .
 
 ## 实验脚本
 
-### V6 版本（当前推荐）
+### V7 版本（当前推荐）
 
 | 脚本 | 功能 |
 |------|------|
-| `01_build_feature_bank_v6.py` | 构建 Feature Bank |
-| `02_inference_auto_v6.py` | Fully Automatic 模式推理 |
-| `03_evaluate_and_visualize_v6.py` | 评估指标 + 可视化 |
-| `04_clustering_v6.py` | 异常聚类 |
-| `run_all.py` | 一键串联：`--version v6` |
+| `01_build_feature_bank_v7.py` | 构建 Feature Bank |
+| `02_inference_auto_v7.py` | Fully Automatic 模式推理 |
+| `03_evaluate_and_visualize_v7.py` | 评估指标 + 可视化 |
+| `04_clustering_v7.py` | 异常聚类 |
+
+### V8 版本（并行对照）
+
+| 脚本 | 功能 |
+|------|------|
+| `01_build_feature_bank_v8.py` | 构建 Feature Bank |
+| `02_inference_auto_v8.py` | Fully Automatic 模式推理 |
+| `03_evaluate_and_visualize_v8.py` | 评估指标 + 可视化 |
+| `04_clustering_v8.py` | 异常聚类 |
 
 
 ### V3 版本（已归档快照）
@@ -439,10 +448,10 @@ normal_auc_dir = "data/GPR_data/augmented_intact"  # 当前主线将该目录作
 
 说明（β / beta_threshold 口径锁定）：
 
-- 论文 Eq.(7)-(9) 定义 anomaly likelihood 为特征到 Feature Bank 的最近邻 L2 距离，并使用单一阈值 β 判别异常；当前 V6 中该距离基于真实求解的 `f=[W_out,b]` 计算；论文未给出 β 的具体数值。
-- 当前主线（V6）中 β 为预先设定的固定阈值（predefined threshold），由于论文未给出具体数值，默认值沿用作者公开仓库 `PatchRes/main.py`，集中在 `experiments/paper_constants.py` 的 **`DEFAULT_BETA_THRESHOLD`（当前 0.1）**；`CONFIG["beta_threshold"]` 可覆盖。
+- 论文 Eq.(7)-(9) 定义 anomaly likelihood 为特征到 Feature Bank 的最近邻 L2 距离，并使用单一阈值 β 判别异常；当前 V7/V8 中该距离基于真实求解的 `f=[W_out,b]` 计算；论文未给出 β 的具体数值。
+- 当前主线（V7/V8）中 β 为预先设定的固定阈值（predefined threshold），由于论文未给出具体数值，默认值沿用作者公开仓库 `PatchRes/main.py`，集中在 `experiments/paper_constants.py` 的 **`DEFAULT_BETA_THRESHOLD`（当前 0.1）**；`CONFIG["beta_threshold"]` 可覆盖。
 - 评测脚本里 **预测框与 GT 的 IoU 是否算匹配** 使用 **`EVAL_DETECTION_IOU_THRESHOLD`（0.5，正文约 p.4）**，与 β 不是同一参数。
-  - `experiments/02_inference_auto_v6.py` 等：`CONFIG["beta_threshold"]` 即为 β。
+  - `experiments/02_inference_auto_v7.py` / `02_inference_auto_v8.py` 等：`CONFIG["beta_threshold"]` 即为 β。
   - 推理输出 `meta.beta_threshold` 记录本次运行实际使用的 β。
 
 设备说明：
@@ -456,16 +465,16 @@ KNN 后端（用于 Feature Bank 1-NN 检索）默认策略：
 - 默认策略：涉及 Feature Bank 1-NN 检索的主线脚本先执行 strict-faiss 预检；只有显式设置 `RES_SAM_ALLOW_SKLEARN_KNN=1` 时才允许 `sklearn` 回退。
 - 未显式指定 `RES_SAM_KNN_BACKEND` 时，运行期默认优先尝试 `faiss_gpu`（CUDA 可用）或 `faiss_cpu`；strict-faiss 默认下不会自动回退到 `sklearn`。
 - 可用环境变量强制指定：`RES_SAM_KNN_BACKEND=sklearn|faiss_cpu|faiss_gpu`；若指定 `sklearn`，建议同时设置 `RES_SAM_ALLOW_SKLEARN_KNN=1`。
-- `experiments/03_evaluate_and_visualize_v6.py` 属于纯评估/可视化脚本：若输入是已生成的预测结果 JSON，则不执行 faiss 预检，也不需要 Feature Bank 1-NN 检索。
+- `experiments/03_evaluate_and_visualize_v7.py` / `03_evaluate_and_visualize_v8.py` 属于纯评估/可视化脚本：若输入是已生成的预测结果 JSON，则不执行 faiss 预检，也不需要 Feature Bank 1-NN 检索。
 
-## V6 输出文件格式（当前主线）
+## V7/V8 输出文件格式（当前主线）
 
-为避免不同实验之间的预处理口径（灰度/resize/normalize）发生漂移，主线输出的 json 已统一支持以下结构（示例为 V6）：
+为避免不同实验之间的预处理口径（灰度/resize/normalize）发生漂移，主线输出的 json 已统一支持以下结构（示例为 V7）：
 
 ```json
 {
   "meta": {
-    "version": "V6",
+    "version": "V7",
     "timestamp": "...",
     "feature_bank_path": "...",
     "feature_bank_metadata_path": "...",
@@ -484,10 +493,10 @@ KNN 后端（用于 Feature Bank 1-NN 检索）默认策略：
 }
 ```
 
-- **Fully automatic**：`outputs/predictions_v6/auto_predictions_v6.json`
+- **Fully automatic**：`outputs/predictions_v7/auto_predictions_v7.json`
 说明：
 
-- `meta.preprocess_signature` 来自 `outputs/feature_banks_v6/metadata.json`（由 `01_build_feature_bank_v6.py` 写入）。
+- `meta.preprocess_signature` 来自 `outputs/feature_banks_v7/metadata.json`（由 `01_build_feature_bank_v7.py` 写入）；V8 同理写入 `outputs/feature_banks_v8/metadata.json`。
 - 评估/聚类脚本读取上述输出时已兼容旧格式（直接 dict）与新格式（`{meta, results}`）。
 
 ## 常见失败原因（必须先排查）
@@ -519,15 +528,16 @@ Res-SAM/
 │   ├── sam_integration.py   # SAM 集成 ⭐
 │   └── functions.py         # 工具函数
 ├── experiments/
-│   ├── 01_build_feature_bank_v6.py           # Feature Bank ⭐
-│   ├── 02_inference_auto_v6.py              # 自动推理 ⭐
-│   ├── 03_evaluate_and_visualize_v6.py      # 评估与可视化 ⭐
-│   ├── 04_clustering_v6.py                  # 异常聚类 ⭐
-│   ├── 05_clustering_v4.py / v5.py
-│   ├── 06_ablation_wo_sam_v4.py / v5.py
-│   ├── 07_cross_environment_v4.py / v5.py
+│   ├── 01_build_feature_bank_v7.py           # Feature Bank ⭐
+│   ├── 02_inference_auto_v7.py              # 自动推理 ⭐
+│   ├── 03_evaluate_and_visualize_v7.py      # 评估与可视化 ⭐
+│   ├── 04_clustering_v7.py                  # 异常聚类 ⭐
+│   ├── 01_build_feature_bank_v8.py
+│   ├── 02_inference_auto_v8.py
+│   ├── 03_evaluate_and_visualize_v8.py
+│   ├── 04_clustering_v8.py
 │   ├── paper_constants.py                    # DEFAULT_BETA_THRESHOLD 等
-│   └── run_all.py                           # --version v6
+│   └── dataset_layout.py / resize_policy.py
 ├── sam/
 │   └── sam_vit_l_0b3195.pth            # SAM ViT-L（GitHub 可用 LFS 托管完整文件；OpenI 常需手动下载）
 ├── data/GPR_data/
@@ -574,12 +584,15 @@ Res-SAM/
   - `data/GPR_data/augmented_cavities`
   - `data/GPR_data/augmented_utilities`
 - `beta_threshold` 默认值保留为 `0.1`，原因是论文 Eq.(9) 只给出了符号 `β`，未给出固定数值，因此此处沿用官方公开代码默认值。
-- 当前 V6 的候选区细化遵循论文描述：先取 SAM 候选区域的最小外接矩形，再在该矩形内逐点提取 centered patch；自动模式粗筛先按 coarse region 的 region feature 与 Feature Bank 比较，再进入逐点细化。
+- 当前 V7/V8 的候选区细化遵循论文描述：先取 SAM 候选区域的最小外接矩形，再在该矩形内逐点提取 centered patch；自动模式粗筛先按 coarse region 的 region feature 与 Feature Bank 比较，再进入逐点细化。
 
 ### 推荐运行方式
 
 ```bash
-python experiments/run_all.py --version v6 --step 1-4
+python experiments/01_build_feature_bank_v7.py
+python experiments/02_inference_auto_v7.py
+python experiments/03_evaluate_and_visualize_v7.py
+python experiments/04_clustering_v7.py
 ```
 
 
