@@ -327,24 +327,24 @@ ls -lh sam/sam_vit_l_0b3195.pth
 
 ### 第 3 步：快速自检（可选但推荐）
 
-`00_quick_test_v3.py` 已随 V3 归档至 `已归档/experiments_v3_snapshot_20260326/`。快速验证建议用 **少量图片** 跑当前 `v7` 主线：
+`00_quick_test_v3.py` 已随 V3 归档至 `已归档/experiments_v3_snapshot_20260326/`。快速验证建议用 **少量图片** 跑当前 `v9` 主线：
 
 ```bash
 set MAX_IMAGES_PER_CATEGORY=10
-conda run -n res-sam python experiments/02_inference_auto_v7.py
-conda run -n res-sam python experiments/03_evaluate_and_visualize_v7.py
-conda run -n res-sam python experiments/04_clustering_v7.py
+conda run -n res-sam python experiments/02_inference_auto_v9.py
+conda run -n res-sam python experiments/03_evaluate_and_visualize_v9.py
+conda run -n res-sam python experiments/04_clustering_v9.py
 ```
 
-### 第 4 步：运行 V7 主流程
+### 第 4 步：运行 V9 主流程
 
-当前主线流程建议按下面顺序执行（`v7` 为默认维护主线，`v8` 为并行对照分支）：
+当前主线流程建议按下面顺序执行（`v9` 为当前唯一活动实验主线）：
 
 ```bash
-python experiments/01_build_feature_bank_v7.py
-python experiments/02_inference_auto_v7.py
-python experiments/03_evaluate_and_visualize_v7.py
-python experiments/04_clustering_v7.py
+python experiments/01_build_feature_bank_v9.py
+python experiments/02_inference_auto_v9.py
+python experiments/03_evaluate_and_visualize_v9.py
+python experiments/04_clustering_v9.py
 ```
 
 也可以进入 `experiments` 目录运行；脚本统一按仓库根目录解析路径。
@@ -352,10 +352,10 @@ python experiments/04_clustering_v7.py
 Windows（或不手动 activate 环境）可用：
 
 ```bash
-conda run -n res-sam python experiments/01_build_feature_bank_v7.py
-conda run -n res-sam python experiments/02_inference_auto_v7.py
-conda run -n res-sam python experiments/03_evaluate_and_visualize_v7.py
-conda run -n res-sam python experiments/04_clustering_v7.py
+conda run -n res-sam python experiments/01_build_feature_bank_v9.py
+conda run -n res-sam python experiments/02_inference_auto_v9.py
+conda run -n res-sam python experiments/03_evaluate_and_visualize_v9.py
+conda run -n res-sam python experiments/04_clustering_v9.py
 ```
 
 ### 第 5 步：按需运行扩展实验
@@ -363,7 +363,7 @@ conda run -n res-sam python experiments/04_clustering_v7.py
 #### 异常聚类
 
 ```bash
-python experiments/04_clustering_v7.py
+python experiments/04_clustering_v9.py
 ```
 
 #### 消融实验：w/o SAM
@@ -549,14 +549,6 @@ Res-SAM/
 │   ├── 02_inference_auto_v9.py               # 自动推理（A+B 组合）
 │   ├── 03_evaluate_and_visualize_v9.py       # 评估与可视化（A+B 组合）
 │   ├── 04_clustering_v9.py                   # 异常聚类（A+B 组合）
-│   ├── 01_build_feature_bank_v7.py           # Feature Bank ⭐
-│   ├── 02_inference_auto_v7.py              # 自动推理 ⭐
-│   ├── 03_evaluate_and_visualize_v7.py      # 评估与可视化 ⭐
-│   ├── 04_clustering_v7.py                  # 异常聚类 ⭐
-│   ├── 01_build_feature_bank_v8.py
-│   ├── 02_inference_auto_v8.py
-│   ├── 03_evaluate_and_visualize_v8.py
-│   ├── 04_clustering_v8.py
 │   ├── paper_constants.py                    # DEFAULT_BETA_THRESHOLD 等
 │   └── dataset_layout.py / resize_policy.py
 ├── sam/
@@ -596,18 +588,18 @@ Res-SAM/
 详细分析见 `experiments/ANALYSIS.md`
 ## 2026-04-11 主线说明
 
-- 当前可运行实验分支为 `v7`、`v8`、`v9`，其中当前推荐下一步运行 `v9`。
+- 当前可运行实验分支仅保留 `v9`。
 - 实现口径采用“论文优先；若论文未明确给出参数或工程细节，再回退到官方公开代码选择”。
 - `v6` 已归档，不再作为活动修改基线。
-- `v7` 为实验 A：只改细筛采样范围（`bbox,None -> bbox,mask`）。
-- `v8` 为实验 B：只改粗筛方式（`region feature 直判 -> patch 聚合粗筛`）。
-- `v9` 为实验 C：同时启用 A+B。
+- `v7` 为已退役实验 A：只改细筛采样范围（`bbox,None -> bbox,mask`）。
+- `v8` 为已退役实验 B：只改粗筛方式（`region feature 直判 -> patch 聚合粗筛`）。
+- `v9` 为当前活动实验 C：同时启用 A+B。
 - 当前唯一保留的数据映射使用带标注的数据集：
   - `data/GPR_data/augmented_intact`
   - `data/GPR_data/augmented_cavities`
   - `data/GPR_data/augmented_utilities`
 - `beta_threshold` 默认值保留为 `0.1`，原因是论文 Eq.(9) 只给出了符号 `β`，未给出固定数值，因此此处沿用官方公开代码默认值。
-- 当前 V7/V8/V9 的分歧由实例化开关控制，不需要人工来回改同一段核心逻辑。
+- 当前仅保留 V9 活动脚本；V7/V8 的历史分歧与结果已转入归档说明。
 
 ### 推荐运行方式
 
