@@ -12,11 +12,11 @@
 1. 安装环境
 2. 获取 SAM 权重
 3. 先做快速自检（可选，但推荐）
-4. 运行 **V7** 主流程（逐个运行 `*_v7.py`）
+4. 运行 **V9** 组合实验主流程（逐个运行 `*_v9.py`）
 5. 查看输出结果
 6. 再根据需要运行聚类 / 消融 / 跨环境实验
 
-对应命令的最短路径如下（当前主线为 **V7**；V8 为并行对照分支；V6 已归档至 `已归档/v6_snapshot_20260411_clean/`；V3 已归档至 `已归档/experiments_v3_snapshot_20260326/`）：
+对应命令的最短路径如下（当前推荐下一步为 **V9** 组合实验；V7/V8 为已完成的小样本机制对照；V6 已归档至 `已归档/v6_snapshot_20260411_clean/`；V7/V8 跑完后的本地快照位于 `已归档/v7_v8_snapshot_20260411_postrun/`；V3 已归档至 `已归档/experiments_v3_snapshot_20260326/`）：
 
 ```bash
 # 若尚未克隆（OpenI 示例；浅克隆 + 跳过 LFS 自动检出）
@@ -31,10 +31,10 @@ git lfs install
 git lfs pull
 # 若 OpenI 等无法拉取 sam/sam_vit_l_0b3195.pth，见下文「SAM 权重」用手动下载。
 
-python experiments/01_build_feature_bank_v7.py
-python experiments/02_inference_auto_v7.py
-python experiments/03_evaluate_and_visualize_v7.py
-python experiments/04_clustering_v7.py
+python experiments/01_build_feature_bank_v9.py
+python experiments/02_inference_auto_v9.py
+python experiments/03_evaluate_and_visualize_v9.py
+python experiments/04_clustering_v9.py
 ```
 
 ---
@@ -63,6 +63,14 @@ python experiments/04_clustering_v7.py
 ### V8（并行对照分支）
 - **定位**：V8 用于和 V7 并行做小样本/机制对照，不作为默认推荐入口。
 - **运行入口**：依次运行 `python experiments/01_build_feature_bank_v8.py` → `02_inference_auto_v8.py` → `03_evaluate_and_visualize_v8.py` → `04_clustering_v8.py`
+
+### V9（组合实验：A+B 同时启用）
+- **定位**：V9 是当前用于验证“粗筛 patch 聚合 + 细筛 mask 约束采样”联合作用的组合实验。
+- **运行入口**：依次运行 `python experiments/01_build_feature_bank_v9.py` → `02_inference_auto_v9.py` → `03_evaluate_and_visualize_v9.py` → `04_clustering_v9.py`
+- **开关口径**：
+  - `automatic_fine_use_mask = True`
+  - `automatic_coarse_use_patch_aggregation = True`
+- **说明**：V9 当前用于解释 V6→V7/V8 性能差异的机制验证，属于论文对齐前提下的组合对照实验。
 
 ### V6（已归档快照，勿再当活动修改基线）
 - 归档位置：`已归档/v6_snapshot_20260411_clean/`
@@ -399,7 +407,16 @@ scp -P 42034 root@xj-member.bitahub.com:/root/res-sam-create/outputs.zip .
 
 ## 实验脚本
 
-### V7 版本（当前推荐）
+### V9 版本（当前推荐下一步）
+
+| 脚本 | 功能 |
+|------|------|
+| `01_build_feature_bank_v9.py` | 构建 Feature Bank |
+| `02_inference_auto_v9.py` | Fully Automatic 模式推理（A+B 同时启用） |
+| `03_evaluate_and_visualize_v9.py` | 评估指标 + 可视化 |
+| `04_clustering_v9.py` | 异常聚类 |
+
+### V7 版本（实验 A）
 
 | 脚本 | 功能 |
 |------|------|
@@ -528,6 +545,10 @@ Res-SAM/
 │   ├── sam_integration.py   # SAM 集成 ⭐
 │   └── functions.py         # 工具函数
 ├── experiments/
+│   ├── 01_build_feature_bank_v9.py           # Feature Bank（A+B 组合）
+│   ├── 02_inference_auto_v9.py               # 自动推理（A+B 组合）
+│   ├── 03_evaluate_and_visualize_v9.py       # 评估与可视化（A+B 组合）
+│   ├── 04_clustering_v9.py                   # 异常聚类（A+B 组合）
 │   ├── 01_build_feature_bank_v7.py           # Feature Bank ⭐
 │   ├── 02_inference_auto_v7.py              # 自动推理 ⭐
 │   ├── 03_evaluate_and_visualize_v7.py      # 评估与可视化 ⭐
@@ -573,26 +594,28 @@ Res-SAM/
 ---
 
 详细分析见 `experiments/ANALYSIS.md`
-## 2026-04-08 主线说明
+## 2026-04-11 主线说明
 
-- 当前可运行实验分支仅保留 `v6`。
+- 当前可运行实验分支为 `v7`、`v8`、`v9`，其中当前推荐下一步运行 `v9`。
 - 实现口径采用“论文优先；若论文未明确给出参数或工程细节，再回退到官方公开代码选择”。
-- `v6` 当前使用论文公式特征定义 `f=[W_out,b]`。
-- `v7` 已删除，不再作为可运行分支保留。
+- `v6` 已归档，不再作为活动修改基线。
+- `v7` 为实验 A：只改细筛采样范围（`bbox,None -> bbox,mask`）。
+- `v8` 为实验 B：只改粗筛方式（`region feature 直判 -> patch 聚合粗筛`）。
+- `v9` 为实验 C：同时启用 A+B。
 - 当前唯一保留的数据映射使用带标注的数据集：
   - `data/GPR_data/augmented_intact`
   - `data/GPR_data/augmented_cavities`
   - `data/GPR_data/augmented_utilities`
 - `beta_threshold` 默认值保留为 `0.1`，原因是论文 Eq.(9) 只给出了符号 `β`，未给出固定数值，因此此处沿用官方公开代码默认值。
-- 当前 V7/V8 的候选区细化遵循论文描述：先取 SAM 候选区域的最小外接矩形，再在该矩形内逐点提取 centered patch；自动模式粗筛先按 coarse region 的 region feature 与 Feature Bank 比较，再进入逐点细化。
+- 当前 V7/V8/V9 的分歧由实例化开关控制，不需要人工来回改同一段核心逻辑。
 
 ### 推荐运行方式
 
 ```bash
-python experiments/01_build_feature_bank_v7.py
-python experiments/02_inference_auto_v7.py
-python experiments/03_evaluate_and_visualize_v7.py
-python experiments/04_clustering_v7.py
+python experiments/01_build_feature_bank_v9.py
+python experiments/02_inference_auto_v9.py
+python experiments/03_evaluate_and_visualize_v9.py
+python experiments/04_clustering_v9.py
 ```
 
 
