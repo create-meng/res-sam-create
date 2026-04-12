@@ -30,6 +30,14 @@ DEFAULT_BETA_THRESHOLD = 0.1
 # This is a valid "predefined threshold" in the paper's sense (Eq.(9): β is predefined).
 DEFAULT_BETA_THRESHOLD_V10 = 0.183
 
+# V11: split coarse/fine beta.
+# coarse_beta: low threshold → keep more candidate regions (don't miss true anomalies)
+# fine_beta:   high threshold → strict patch-level filtering (reduce FP)
+# Diagnosis: V10 raised beta to 0.183 uniformly → coarse stage discarded 136 regions (vs 87 in V9)
+# including true anomaly regions → TP dropped from 12 to 7.
+DEFAULT_COARSE_BETA_V11 = 0.05   # 宽松粗筛：几乎不丢region，让真异常region进入细筛
+DEFAULT_FINE_BETA_V11   = 0.183  # 严格细筛：p99校准值，减少FP
+
 # ~page 4: "IoU with the ground truth exceeds a threshold of 0.5" for accuracy / Table-style eval.
 EVAL_DETECTION_IOU_THRESHOLD = 0.5
 

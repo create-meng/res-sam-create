@@ -101,6 +101,7 @@ class ResSAM:
         automatic_fine_use_mask: bool = False,
         automatic_coarse_use_patch_aggregation: bool = False,
         merge_all_anomaly_patches: bool = False,
+        coarse_beta_threshold: Optional[float] = None,
     ):
         self.hidden_size = hidden_size
         self.window_size = window_size
@@ -114,6 +115,9 @@ class ResSAM:
         # 论文原文："overlapping anomaly patches are consolidated into the smallest possible rectangular box"
         # 论文未明确要求按连通分量分割，合并成一个框同样符合论文描述
         self.merge_all_anomaly_patches = bool(merge_all_anomaly_patches)
+        # V11: 粗筛和细筛可以用不同的beta
+        # coarse_beta_threshold=None 时退化为与细筛相同的beta（向后兼容）
+        self.coarse_beta_threshold = float(coarse_beta_threshold) if coarse_beta_threshold is not None else None
         # Eq.(9) β：单一阈值。推荐只传 beta_threshold；anomaly_threshold / region_coarse_threshold 仅为旧调用兼容。
         if anomaly_threshold is not None and region_coarse_threshold is not None:
             if float(anomaly_threshold) != float(region_coarse_threshold):
@@ -852,12 +856,14 @@ class ResSAM:
             region_mean_score = float(np.mean(region_scores))
 
             # Retain coarse region when its region-level feature exceeds beta.
-            if region_max_score > self.beta_threshold:
+            # V11: 粗筛用独立的 coarse_beta_threshold（若设置），否则退化为 beta_threshold
+            _coarse_beta = self.coarse_beta_threshold if self.coarse_beta_threshold is not None else self.beta_threshold
+            if region_max_score > _coarse_beta:
                 if debug_coarse:
                     print(
                         f"  [coarse][retain][{region_idx}] bbox={bbox} area={region_area} "
                         f"max_score={region_max_score:.6f} mean_score={region_mean_score:.6f} "
-                        f"num_region_features={region_num_features} beta={self.beta_threshold:.6f}")
+                        f"num_region_features={region_num_features} coarse_beta={_coarse_beta:.6f}")
                 retained_regions.append({
                     'bbox': bbox,
                     'mask': mask,
@@ -871,7 +877,7 @@ class ResSAM:
                     print(
                         f"  [coarse][discard][{region_idx}] reason=score_le_beta bbox={bbox} area={region_area} "
                         f"max_score={region_max_score:.6f} mean_score={region_mean_score:.6f} "
-                        f"num_region_features={region_num_features} beta={self.beta_threshold:.6f}")
+                        f"num_region_features={region_num_features} coarse_beta={_coarse_beta:.6f}")
                 num_discarded += 1
         print(f"  Retained {len(retained_regions)} regions after coarse filtering (discarded {num_discarded})")
         
