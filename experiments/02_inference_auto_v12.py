@@ -1,9 +1,9 @@
 ﻿"""
-Res-SAM v10 - Step 2: fully automatic inference.
+Res-SAM v12 - Step 2: fully automatic inference.
 
-This script implements the v10 automatic mainline corresponding to the
+This script implements the v12 automatic mainline corresponding to the
 paper's fully automatic mode. Feature definition follows f=[W_out, b].
-Image preprocessing is unified to a fixed 369x369 resize, and the v10
+Image preprocessing is unified to a fixed 369x369 resize, and the v12
 runtime seed is unified to 11.
 """
 
@@ -28,7 +28,7 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from experiments.dataset_layout import DATASET_ENHANCED, apply_layout_to_config_02_03
-from experiments.paper_constants import DEFAULT_BETA_THRESHOLD, DEFAULT_BETA_THRESHOLD_V10, preflight_faiss_or_raise
+from experiments.paper_constants import DEFAULT_BETA_THRESHOLD, preflight_faiss_or_raise
 from experiments.resize_policy import RESIZE_POLICY_FIXED, target_hw_for_preprocess
 
 
@@ -68,9 +68,8 @@ class _RunIdFilter(logging.Filter):
 
 CONFIG = {
     "dataset_mode": DATASET_ENHANCED,
-    # V10 复用 V9 的 Feature Bank（建库参数完全相同，无需重新构建）
-    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v9", "feature_bank_v9.pth"),
-    "metadata_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v9", "metadata.json"),
+    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v12", "feature_bank_v12.pth"),
+    "metadata_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v12", "metadata.json"),
     "test_data_dirs": {
         "cavities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_cavities"),
         "utilities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities"),
@@ -84,12 +83,12 @@ CONFIG = {
             BASE_DIR, "data", "GPR_data", "augmented_utilities", "annotations", "VOC_XML_format"
         ),
     },
-    "output_dir": os.path.join(BASE_DIR, "outputs", "predictions_v10"),
-    "checkpoint_dir": os.path.join(BASE_DIR, "outputs", "checkpoints_v10"),
+    "output_dir": os.path.join(BASE_DIR, "outputs", "predictions_v12"),
+    "checkpoint_dir": os.path.join(BASE_DIR, "outputs", "checkpoints_v12"),
     "window_size": 50,
     "stride": 5,
     "hidden_size": 30,
-    "beta_threshold": DEFAULT_BETA_THRESHOLD_V10,  # V10: p99校准值≈0.183，替代官方归一化空间的0.1
+    "beta_threshold": DEFAULT_BETA_THRESHOLD,
     "sam_model_type": "vit_l",
     "sam_checkpoint": os.path.join(BASE_DIR, "sam", "sam_vit_l_0b3195.pth"),
     "device": "auto",
@@ -100,15 +99,12 @@ CONFIG = {
     "max_images_per_category": None,
     "checkpoint_interval": 50,
     "random_seed": 11,
-    "version": "v10",
+    "version": "v12",
     "feature_with_bias": True,
     "automatic_fine_use_mask": True,
-    "automatic_coarse_use_patch_aggregation": True,
-    "merge_all_anomaly_patches": True,   # V10: 所有异常patch合并为一个框，不按连通分量分割
     "alignment_notes": (
-        "V10: beta=p99(FB_dist)≈0.183 + merge_all_anomaly_patches=True; "
-        "fixes: (A) beta calibrated to raw L2 space, (B) all anomaly patches merged into one bbox per region; "
-        "fb_source=augmented_intact, eval=augmented_intact + annotated anomaly sets"
+        "v12 experiment A: solve true f=[W_out,b]; keep region-feature coarse filtering, but use mask-constrained fine-stage sampling; "
+        "fb_source=augmented_intact, eval=augmented_intact + current annotated anomaly sets"
     ),
 }
 
@@ -164,7 +160,7 @@ def run_inference(config: dict) -> dict:
 
     log_dir = os.path.join(base_dir, "outputs", "logs")
     os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, f"auto_inference_v10_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    log_file = os.path.join(log_dir, f"auto_inference_v12_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 
     file_handler = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
     stream_handler = logging.StreamHandler(sys.stdout)
@@ -190,7 +186,7 @@ def run_inference(config: dict) -> dict:
     config["annotation_dirs"] = {k: _to_abs(base_dir, v) for k, v in config.get("annotation_dirs", {}).items()}
 
     print("=" * 60)
-    print("Res-SAM v10：全自动推理")
+    print("Res-SAM v12：全自动推理")
     print("=" * 60)
     print(f"日志文件：{log_file}")
     print(f"run_id: {run_id}")
@@ -204,7 +200,7 @@ def run_inference(config: dict) -> dict:
     if not os.path.exists(config["feature_bank_path"]):
         raise FileNotFoundError(
             f"Feature bank not found: {config['feature_bank_path']}\n"
-            "Please run 01_build_feature_bank_v10.py first."
+            "Please run 01_build_feature_bank_v12.py first."
         )
 
     os.makedirs(config["output_dir"], exist_ok=True)
@@ -215,7 +211,7 @@ def run_inference(config: dict) -> dict:
 
     from PatchRes.ResSAM import ResSAM
 
-    print("\n初始化 ResSAM（v10）...")
+    print("\n初始化 ResSAM（v12）...")
     model = ResSAM(
         hidden_size=config["hidden_size"],
         window_size=config["window_size"],
@@ -226,8 +222,6 @@ def run_inference(config: dict) -> dict:
         device=config.get("device", "auto"),
         feature_with_bias=bool(config.get("feature_with_bias", False)),
         automatic_fine_use_mask=bool(config.get("automatic_fine_use_mask", False)),
-        automatic_coarse_use_patch_aggregation=bool(config.get("automatic_coarse_use_patch_aggregation", False)),
-        merge_all_anomaly_patches=bool(config.get("merge_all_anomaly_patches", False)),
     )
 
     print(f"加载 Feature Bank：{config['feature_bank_path']}")
@@ -462,7 +456,7 @@ def run_inference(config: dict) -> dict:
                 ensure_ascii=False,
             )
 
-    version_tag = str(config.get("version", "v10")).strip().lower()
+    version_tag = str(config.get("version", "v12")).strip().lower()
     output_file = os.path.join(config["output_dir"], f"auto_predictions_{version_tag}.json")
     output_data = {
         "meta": {
@@ -474,15 +468,13 @@ def run_inference(config: dict) -> dict:
             "preprocess_signature": metadata.get("preprocess_signature", None),
             "resize_policy": config.get("resize_policy"),
             "fixed_image_size_hw": list(config.get("image_size", (369, 369))),
-            "image_preprocess_note": ("v10 mainline uses fixed resize; all images are resized to fixed_image_size_hw before SAM, 2D-ESN, and evaluation coordinate mapping."),
+            "image_preprocess_note": ("v12 mainline uses fixed resize; all images are resized to fixed_image_size_hw before SAM, 2D-ESN, and evaluation coordinate mapping."),
             "window_size": int(config.get("window_size", 50)),
             "stride": int(config.get("stride", 5)),
             "hidden_size": int(config.get("hidden_size", 30)),
             "beta_threshold": float(config.get("beta_threshold", DEFAULT_BETA_THRESHOLD)),
             "feature_with_bias": bool(config.get("feature_with_bias", False)),
             "automatic_fine_use_mask": bool(config.get("automatic_fine_use_mask", False)),
-            "automatic_coarse_use_patch_aggregation": bool(config.get("automatic_coarse_use_patch_aggregation", False)),
-            "merge_all_anomaly_patches": bool(config.get("merge_all_anomaly_patches", False)),
         },
         "results": all_results,
     }
@@ -499,7 +491,7 @@ def run_inference(config: dict) -> dict:
     print(f"  处理图像数：{total_images}")
     print(f"  检出异常框数：{total_detections}")
     print(f"  Region 级粗筛剔除数：{total_coarse_discarded}")
-    print("v10 全自动推理完成！")
+    print("v12 全自动推理完成！")
     print("=" * 60)
 
     logger.info("结果已保存：%s", output_file)
@@ -509,10 +501,7 @@ def run_inference(config: dict) -> dict:
 if __name__ == "__main__":
     preflight_faiss_or_raise()
     _require_segment_anything()
-    CONFIG = apply_layout_to_config_02_03(dict(CONFIG), BASE_DIR, "v10")
-    # V10 复用 V9 Feature Bank，覆盖 apply_layout 自动生成的 v10 路径
-    CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v9", "feature_bank_v9.pth")
-    CONFIG["metadata_path"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v9", "metadata.json")
+    CONFIG = apply_layout_to_config_02_03(dict(CONFIG), BASE_DIR, "v12")
     with torch.no_grad():
         run_inference(CONFIG)
 

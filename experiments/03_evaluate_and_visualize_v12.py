@@ -1,5 +1,5 @@
 ﻿"""
-Res-SAM v10 - 第 3 步：评估与可视化。
+Res-SAM v12 - 第 3 步：评估与可视化。
 
 论文优先口径：
 - 特征定义遵循 Eq.(3)/(8)：f=[W_out,b]
@@ -31,9 +31,9 @@ from sklearn.metrics import auc, roc_curve
 
 CONFIG = {
     "dataset_mode": DATASET_ENHANCED,
-    "predictions_path": os.path.join(BASE_DIR, "outputs", "predictions_v10", "auto_predictions_v10.json"),
-    "vis_output_dir": os.path.join(BASE_DIR, "outputs", "visualizations_v10"),
-    "analysis_output": os.path.join(BASE_DIR, "outputs", "visualizations_v10", "03_evaluate_and_visualize_v10_report.md"),
+    "predictions_path": os.path.join(BASE_DIR, "outputs", "predictions_v12", "auto_predictions_v12.json"),
+    "vis_output_dir": os.path.join(BASE_DIR, "outputs", "visualizations_v12"),
+    "analysis_output": os.path.join(BASE_DIR, "outputs", "visualizations_v12", "03_evaluate_and_visualize_v12_report.md"),
     "paper_reference": {
         "dataset_name": "论文 Table 2 参考结果（仅作论文外部对照）",
         "dataset_note": (
@@ -42,10 +42,9 @@ CONFIG = {
         ),
         "auto": {"Precision": 0.842, "Recall": 0.877, "F1": 0.859, "AUC": 0.832},
     },
-    "version": "v10",
+    "version": "v12",
     "alignment_notes": (
-        "Paper-first mainline (V10): Eq.(3)/(8) uses f=[W_out,b]; "
-        "beta=p99(FB_dist)≈0.183; merge_all_anomaly_patches=True; "
+        "Paper-first mainline (v12): Eq.(3)/(8) uses f=[W_out,b]; "
         "fb_source=augmented_intact, eval=augmented_intact + current annotated anomaly sets"
     ),
 }
@@ -184,6 +183,25 @@ def compute_metrics(results: dict) -> dict:
         fpr, tpr, _ = roc_curve(np.asarray(auc_labels, dtype=int), np.asarray(auc_scores, dtype=float))
         region_auc = float(auc(fpr, tpr))
 
+    # 图像级AUC（论文Table 2口径）：每张图一个分数=max(anomaly_scores)
+    # 正类=cavities/utilities，负类=normal_auc
+    img_auc_labels: list[int] = []
+    img_auc_scores: list[float] = []
+    for category, cat_results in results.items():
+        for record in cat_results:
+            scores = record.get("anomaly_scores", [])
+            img_score = float(max(scores)) if scores else 0.0
+            if category == "normal_auc":
+                img_auc_labels.append(0)
+                img_auc_scores.append(img_score)
+            elif not record.get("exclude_from_det_metrics", False):
+                img_auc_labels.append(1)
+                img_auc_scores.append(img_score)
+    image_auc = None
+    if len(img_auc_labels) > 0 and len(set(img_auc_labels)) > 1:
+        fpr_i, tpr_i, _ = roc_curve(np.asarray(img_auc_labels, dtype=int), np.asarray(img_auc_scores, dtype=float))
+        image_auc = float(auc(fpr_i, tpr_i))
+
     return {
         "tp": total_tp,
         "fp": total_fp,
@@ -193,6 +211,10 @@ def compute_metrics(results: dict) -> dict:
         "f1": f1,
         "region_auc": region_auc,
         "region_auc_num_samples": int(len(auc_labels)),
+        "image_auc": image_auc,
+        "image_auc_num_samples": int(len(img_auc_labels)),
+        "image_auc_pos": int(sum(img_auc_labels)),
+        "image_auc_neg": int(len(img_auc_labels) - sum(img_auc_labels)),
         "coarse_discarded": total_coarse_discarded,
         "per_category": per_category,
     }
@@ -222,7 +244,7 @@ def plot_region_auc_curve(results: dict, output_path: str) -> float | None:
     plt.plot([0, 1], [0, 1], "--", lw=1)
     plt.xlabel("False Positive Rate")
     plt.ylabel("True Positive Rate")
-    plt.title("Res-SAM v10 Region-level ROC")
+    plt.title("Res-SAM v12 Region-level ROC")
     plt.legend(loc="lower right")
     plt.grid(True, alpha=0.3)
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -235,7 +257,7 @@ def generate_comparison_table(metrics: dict, paper_reference: dict) -> str:
     dataset_name = paper_reference.get("dataset_name", "Paper reference")
     dataset_note = paper_reference.get("dataset_note", "")
     lines = [
-        "# Res-SAM v10 评估报告",
+        "# Res-SAM v12 评估报告",
         "",
         "## 数据映射说明",
         f"- 论文参考结果：{dataset_name}",
@@ -251,7 +273,7 @@ def generate_comparison_table(metrics: dict, paper_reference: dict) -> str:
     ]
     for metric in ["Precision", "Recall", "F1", "AUC"]:
         paper_val = auto_baseline.get(metric, 0.0)
-        local_val = metrics.get("region_auc", 0.0) if metric == "AUC" else metrics.get(metric.lower(), 0.0)
+        local_val = metrics.get("image_auc") or metrics.get("region_auc") or 0.0 if metric == "AUC" else metrics.get(metric.lower(), 0.0)
         lines.append(f"| {metric} | {paper_val:.3f} | {local_val:.3f} | {local_val - paper_val:+.3f} |")
     lines.extend(
         [
@@ -265,6 +287,8 @@ def generate_comparison_table(metrics: dict, paper_reference: dict) -> str:
             f"- F1：{metrics.get('f1', 0.0):.3f}",
             f"- Region-level AUC：{metrics.get('region_auc', 0.0) if metrics.get('region_auc', None) is not None else 'N/A'}",
             f"- Region-level AUC 样本数：{metrics.get('region_auc_num_samples', 0)}",
+            f"- **图像级AUC（论文Table 2口径）：{metrics.get('image_auc', 0.0) if metrics.get('image_auc') is not None else 'N/A'}**",
+            f"- 图像级AUC 样本数：{metrics.get('image_auc_num_samples', 0)}（正类={metrics.get('image_auc_pos',0)} 负类={metrics.get('image_auc_neg',0)}）",
             f"- Region 级粗筛剔除数：{metrics.get('coarse_discarded', 0)}",
             "",
             "## 分类别汇总",
@@ -289,7 +313,7 @@ def generate_comparison_table(metrics: dict, paper_reference: dict) -> str:
 
 def main() -> None:
     print("=" * 60)
-    print("Res-SAM v10：评估与可视化")
+    print("Res-SAM v12：评估与可视化")
     print("dataset=single_annotated_dataset")
     print("=" * 60)
     os.makedirs(CONFIG["vis_output_dir"], exist_ok=True)
@@ -304,9 +328,12 @@ def main() -> None:
             f"Detection: Precision={metrics['precision']:.4f} Recall={metrics['recall']:.4f} "
             f"F1={metrics['f1']:.4f}"
         )
-        region_auc = plot_region_auc_curve(results, os.path.join(CONFIG["vis_output_dir"], "region_roc_curve_v10.png"))
+        region_auc = plot_region_auc_curve(results, os.path.join(CONFIG["vis_output_dir"], "region_roc_curve_v12.png"))
         if region_auc is not None:
             print(f"Region-level AUC={region_auc:.4f}")
+        if metrics.get("image_auc") is not None:
+            print(f"Image-level AUC（论文口径）={metrics['image_auc']:.4f}  "
+                  f"(正类={metrics.get('image_auc_pos',0)}张, 负类={metrics.get('image_auc_neg',0)}张)")
         report_parts.append(generate_comparison_table(metrics, CONFIG["paper_reference"]))
     else:
         print(f"警告：未找到预测结果文件：{CONFIG['predictions_path']}")
@@ -320,7 +347,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    CONFIG = apply_layout_to_config_04(dict(CONFIG), BASE_DIR, "v10")
+    CONFIG = apply_layout_to_config_04(dict(CONFIG), BASE_DIR, "v12")
     CONFIG["predictions_path"] = _to_abs(BASE_DIR, CONFIG.get("predictions_path", ""))
     CONFIG["vis_output_dir"] = _to_abs(BASE_DIR, CONFIG.get("vis_output_dir", ""))
     CONFIG["analysis_output"] = _to_abs(BASE_DIR, CONFIG.get("analysis_output", ""))

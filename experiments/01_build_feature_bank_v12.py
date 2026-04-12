@@ -1,13 +1,13 @@
 ﻿"""
-Res-SAM v11 - Step 1: build the feature bank.
+Res-SAM v12 - Step 1: build the feature bank.
 
-Current v11 mainline policy:
+Current v12 mainline policy:
 - follow the paper where formulas and procedure are explicit;
 - when the paper is silent, fall back to the author public-code defaults.
 
-For preprocessing, v11 uses a fixed resize to 369x369 for all images,
+For preprocessing, v12 uses a fixed resize to 369x369 for all images,
 matching the default loading convention in the official repository.
-The v11 runtime seed is unified to 11.
+The v12 runtime seed is unified to 11.
 """
 
 import sys
@@ -34,22 +34,22 @@ CONFIG = {
     "normal_data_sources": {
         "augmented_intact": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_intact"),
     },
-    "output_dir": os.path.join(BASE_DIR, "outputs", "feature_banks_v11"),
-    "output_file": "feature_bank_v11.pth",
+    "output_dir": os.path.join(BASE_DIR, "outputs", "feature_banks_v12"),
+    "output_file": "feature_bank_v12.pth",
     "metadata_file": "metadata.json",
     # 论文优先参数
     "window_size": 50,
     "stride": 5,
     "hidden_size": 30,
-    "num_normal_samples": 100,  # V11方案C：增加样本数（论文20，V11用100提升Feature Bank质量）
+    "num_normal_samples": 20,
     "resize_policy": RESIZE_POLICY_FIXED,
     "image_size": (369, 369),
     "device": "auto",
     "random_seed": 11,
     "checkpoint_file": "checkpoint.json",
-    "version": "v11",
+    "version": "v12",
     "feature_with_bias": True,
-    "alignment_notes": "V11: num_normal_samples=100(方案C); solve true f=[W_out,b]; fb_source=augmented_intact, eval=augmented_*",
+    "alignment_notes": "Paper-first mainline (v12): solve true f=[W_out,b]; fb_source=augmented_intact, eval=augmented_*",
 }
 
 
@@ -111,7 +111,7 @@ def build_feature_bank(config: dict, resume: bool = True):
     torch.manual_seed(config["random_seed"])
 
     print("=" * 60)
-    print("Res-SAM v11：Feature Bank 构建")
+    print("Res-SAM v12：Feature Bank 构建")
     print("=" * 60)
     print(f"  window_size = {config['window_size']}")
     print(f"  stride = {config['stride']}")
@@ -138,7 +138,7 @@ def build_feature_bank(config: dict, resume: bool = True):
 
     from PatchRes.ResSAM import ResSAM
 
-    print("\n初始化 ResSAM (v11)...")
+    print("\n初始化 ResSAM (v12)...")
     model = ResSAM(
         hidden_size=config["hidden_size"],
         window_size=config["window_size"],
@@ -156,13 +156,13 @@ def build_feature_bank(config: dict, resume: bool = True):
             "resize": {
                 "policy": config.get("resize_policy"),
                 "fixed_hw": list(config["image_size"]) if config.get("image_size") else None,
-                "note": "v11 mainline uses fixed resize; all images are resized to image_size to match the official 369x369 default.",
+                "note": "v12 mainline uses fixed resize; all images are resized to image_size to match the official 369x369 default.",
             },
             "normalize": {"enabled": True, "method": "(x-mean)/(std+1e-8)", "per_image": True},
         },
         "sources": {},
         "creation_time": datetime.now().isoformat(),
-        "version": "v11",
+        "version": "v12",
         "alignment_notes": config.get("alignment_notes", ""),
     }
 
@@ -205,7 +205,7 @@ def build_feature_bank(config: dict, resume: bool = True):
 
     model.save_feature_bank(output_path)
     feature_bank_to_save = feature_bank.detach().cpu()
-    print(f"\nFeature Bank v11 保存至: {output_path}")
+    print(f"\nFeature Bank v12 保存至: {output_path}")
     print(f"形状: {feature_bank_to_save.shape}")
 
     all_metadata["feature_bank_bundle_format"] = "res_sam_fb_v2"
@@ -230,11 +230,11 @@ def build_feature_bank(config: dict, resume: bool = True):
 
 if __name__ == "__main__":
     preflight_faiss_or_raise()
-    # 复用当前唯一数据布局，并固定输出到 v11 Feature Bank 目录。
-    CONFIG = apply_layout_to_config_01(dict(CONFIG), BASE_DIR, "v11")
-    CONFIG["version"] = "v11"
-    CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v11")
-    CONFIG["output_file"] = "feature_bank_v11.pth"
+    # 复用当前唯一数据布局，并固定输出到 v12 Feature Bank 目录。
+    CONFIG = apply_layout_to_config_01(dict(CONFIG), BASE_DIR, "v12")
+    CONFIG["version"] = "v12"
+    CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v12")
+    CONFIG["output_file"] = "feature_bank_v12.pth"
     CONFIG["metadata_file"] = "metadata.json"
     CONFIG["normal_data_sources"] = {"augmented_intact": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_intact")}
     CONFIG["output_dir"] = _to_abs(BASE_DIR, CONFIG.get("output_dir", ""))
