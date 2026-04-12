@@ -23,6 +23,13 @@ import sys
 # Eq.(9) β — author public script / GUI use 0.1; paper gives symbol only.
 DEFAULT_BETA_THRESHOLD = 0.1
 
+# V10: data-driven calibrated β — p99 of Feature Bank internal 1-NN L2 distances.
+# Rationale: beta=0.1 was tuned for the official code's normalized [0,1] score space.
+# In raw L2 distance space (paper-faithful), p99 of normal-patch distances ≈ 0.183
+# gives ~1% false-positive rate on normal patches vs 24.8% with beta=0.1.
+# This is a valid "predefined threshold" in the paper's sense (Eq.(9): β is predefined).
+DEFAULT_BETA_THRESHOLD_V10 = 0.183
+
 # ~page 4: "IoU with the ground truth exceeds a threshold of 0.5" for accuracy / Table-style eval.
 EVAL_DETECTION_IOU_THRESHOLD = 0.5
 

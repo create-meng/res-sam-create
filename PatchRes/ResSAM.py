@@ -100,6 +100,7 @@ class ResSAM:
         feature_with_bias: bool = True,
         automatic_fine_use_mask: bool = False,
         automatic_coarse_use_patch_aggregation: bool = False,
+        merge_all_anomaly_patches: bool = False,
     ):
         self.hidden_size = hidden_size
         self.window_size = window_size
@@ -109,6 +110,10 @@ class ResSAM:
         self.feature_with_bias = bool(feature_with_bias)
         self.automatic_fine_use_mask = bool(automatic_fine_use_mask)
         self.automatic_coarse_use_patch_aggregation = bool(automatic_coarse_use_patch_aggregation)
+        # V10: 将所有异常patch合并为一个最小外接矩形，而不是按连通分量分割成多个小框
+        # 论文原文："overlapping anomaly patches are consolidated into the smallest possible rectangular box"
+        # 论文未明确要求按连通分量分割，合并成一个框同样符合论文描述
+        self.merge_all_anomaly_patches = bool(merge_all_anomaly_patches)
         # Eq.(9) β：单一阈值。推荐只传 beta_threshold；anomaly_threshold / region_coarse_threshold 仅为旧调用兼容。
         if anomaly_threshold is not None and region_coarse_threshold is not None:
             if float(anomaly_threshold) != float(region_coarse_threshold):
@@ -917,32 +922,52 @@ class ResSAM:
             ]
             
             if len(anomaly_positions) > 0:
-                # 计算异常 patches 的最小包围框
-                component_regions = self._merge_overlapping_anomaly_patches(
-                    (img_h, img_w),
-                    anomaly_positions,
-                )
-                
-                for component in component_regions:
-                    final_bbox = component["bbox"]
-                    x1, y1, x2, y2 = final_bbox
-                    component_scores = [
-                        float(s)
-                        for (px, py), s in zip(patch_positions, scores)
-                        if (s > self.beta_threshold) and (x1 <= px < x2) and (y1 <= py < y2)
-                    ]
-                    if not component_scores:
-                        continue
+                if self.merge_all_anomaly_patches:
+                    # V10: 所有异常patch合并为一个最小外接矩形
+                    # 论文："overlapping anomaly patches are consolidated into the smallest possible rectangular box"
+                    half_win = int(self.window_size) // 2
+                    all_x1 = min(max(0, int(cx) - half_win) for cx, cy in anomaly_positions)
+                    all_y1 = min(max(0, int(cy) - half_win) for cx, cy in anomaly_positions)
+                    all_x2 = max(min(img_w, int(cx) + half_win) for cx, cy in anomaly_positions)
+                    all_y2 = max(min(img_h, int(cy) + half_win) for cx, cy in anomaly_positions)
+                    if all_x2 > all_x1 and all_y2 > all_y1:
+                        all_scores = [float(s) for s in scores if s > self.beta_threshold]
+                        anomaly_regions.append({
+                            'bbox': [int(all_x1), int(all_y1), int(all_x2), int(all_y2)],
+                            'mask': mask,
+                            'avg_anomaly_score': float(np.mean(all_scores)),
+                            'max_anomaly_score': float(np.max(all_scores)),
+                            'coarse_max_score': region['coarse_max_score'],
+                            'stability_score': region.get('stability_score', 0),
+                            'num_anomaly_patches': int(len(anomaly_positions)),
+                        })
+                else:
+                    # 原有逻辑：按连通分量分割
+                    component_regions = self._merge_overlapping_anomaly_patches(
+                        (img_h, img_w),
+                        anomaly_positions,
+                    )
+                    
+                    for component in component_regions:
+                        final_bbox = component["bbox"]
+                        x1, y1, x2, y2 = final_bbox
+                        component_scores = [
+                            float(s)
+                            for (px, py), s in zip(patch_positions, scores)
+                            if (s > self.beta_threshold) and (x1 <= px < x2) and (y1 <= py < y2)
+                        ]
+                        if not component_scores:
+                            continue
 
-                    anomaly_regions.append({
-                        'bbox': final_bbox,
-                        'mask': mask,
-                        'avg_anomaly_score': float(np.mean(component_scores)),
-                        'max_anomaly_score': float(np.max(component_scores)),
-                        'coarse_max_score': region['coarse_max_score'],
-                        'stability_score': region.get('stability_score', 0),
-                        'num_anomaly_patches': int(component['num_anomaly_patches']),
-                    })
+                        anomaly_regions.append({
+                            'bbox': final_bbox,
+                            'mask': mask,
+                            'avg_anomaly_score': float(np.mean(component_scores)),
+                            'max_anomaly_score': float(np.max(component_scores)),
+                            'coarse_max_score': region['coarse_max_score'],
+                            'stability_score': region.get('stability_score', 0),
+                            'num_anomaly_patches': int(component['num_anomaly_patches']),
+                        })
         
         # 按异常分数排序
         anomaly_regions.sort(key=lambda x: x['max_anomaly_score'], reverse=True)
