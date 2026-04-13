@@ -89,6 +89,10 @@ CONFIG = {
     "stride": 5,
     "hidden_size": 30,
     "beta_threshold": DEFAULT_BETA_THRESHOLD,
+    # merge_all_anomaly_patches=True：把一个 region 内所有异常 patch 合并为一个最小外接矩形
+    # 模拟验证（基于V9推理结果）：F1 从 0.060 → 0.137，Precision 从 0.041 → 0.148，FP 从 284 → 75
+    # 注意：V10/V11 同时调高了 beta，抵消了 merge_all 的收益；这里 beta 保持 0.1 不变
+    "merge_all_anomaly_patches": True,
     "sam_model_type": "vit_l",
     "sam_checkpoint": os.path.join(BASE_DIR, "sam", "sam_vit_l_0b3195.pth"),
     "device": "auto",
@@ -103,8 +107,9 @@ CONFIG = {
     "feature_with_bias": True,
     "automatic_fine_use_mask": True,
     "alignment_notes": (
-        "v12 experiment A: solve true f=[W_out,b]; keep region-feature coarse filtering, but use mask-constrained fine-stage sampling; "
-        "fb_source=augmented_intact, eval=augmented_intact + current annotated anomaly sets"
+        "v12 mainline: merge_all_anomaly_patches=True（beta=0.1不变）; "
+        "模拟验证F1 0.060→0.137, Precision 0.041→0.148; "
+        "fb_source=augmented_intact 75张分组采样, eval=augmented_intact + annotated anomaly sets"
     ),
 }
 
@@ -222,6 +227,7 @@ def run_inference(config: dict) -> dict:
         device=config.get("device", "auto"),
         feature_with_bias=bool(config.get("feature_with_bias", False)),
         automatic_fine_use_mask=bool(config.get("automatic_fine_use_mask", False)),
+        merge_all_anomaly_patches=bool(config.get("merge_all_anomaly_patches", False)),
     )
 
     print(f"加载 Feature Bank：{config['feature_bank_path']}")
@@ -475,6 +481,7 @@ def run_inference(config: dict) -> dict:
             "beta_threshold": float(config.get("beta_threshold", DEFAULT_BETA_THRESHOLD)),
             "feature_with_bias": bool(config.get("feature_with_bias", False)),
             "automatic_fine_use_mask": bool(config.get("automatic_fine_use_mask", False)),
+            "merge_all_anomaly_patches": bool(config.get("merge_all_anomaly_patches", False)),
         },
         "results": all_results,
     }
