@@ -89,6 +89,14 @@ CONFIG = {
     "stride": 5,
     "hidden_size": 30,
     "beta_threshold": DEFAULT_BETA_THRESHOLD,
+    # 方案4：提高粗筛门槛，减少 FP region
+    # 诊断结论：V7 粗筛几乎不过滤（平均保留 3.6 个/图，丢弃 0.1 个），导致大量 FP
+    # coarse_beta_threshold > beta_threshold，让粗筛更严格
+    # 工程优化但语义不变：论文 Eq.(9) 的 β 是"predefined threshold"，未规定粗筛与细筛必须相同
+    "coarse_beta_threshold": 0.25,
+    # 方案1：merge_all_anomaly_patches=True，把所有异常 patch 合并为一个最小外接矩形
+    # 工程优化但语义不变：论文说"overlapping anomaly patches are consolidated into the smallest possible rectangular box"
+    "merge_all_anomaly_patches": True,
     "sam_model_type": "vit_l",
     "sam_checkpoint": os.path.join(BASE_DIR, "sam", "sam_vit_l_0b3195.pth"),
     "device": "auto",
@@ -103,7 +111,7 @@ CONFIG = {
     "feature_with_bias": True,
     "automatic_fine_use_mask": True,
     "alignment_notes": (
-        "v12 experiment A: solve true f=[W_out,b]; keep region-feature coarse filtering, but use mask-constrained fine-stage sampling; "
+        "v12 方案1+4: merge_all_anomaly_patches=True（扩大TP框覆盖）+ coarse_beta=0.25（严格粗筛减少FP）; "
         "fb_source=augmented_intact, eval=augmented_intact + current annotated anomaly sets"
     ),
 }
@@ -222,6 +230,8 @@ def run_inference(config: dict) -> dict:
         device=config.get("device", "auto"),
         feature_with_bias=bool(config.get("feature_with_bias", False)),
         automatic_fine_use_mask=bool(config.get("automatic_fine_use_mask", False)),
+        merge_all_anomaly_patches=bool(config.get("merge_all_anomaly_patches", False)),
+        coarse_beta_threshold=float(config["coarse_beta_threshold"]) if config.get("coarse_beta_threshold") is not None else None,
     )
 
     print(f"加载 Feature Bank：{config['feature_bank_path']}")
@@ -475,6 +485,8 @@ def run_inference(config: dict) -> dict:
             "beta_threshold": float(config.get("beta_threshold", DEFAULT_BETA_THRESHOLD)),
             "feature_with_bias": bool(config.get("feature_with_bias", False)),
             "automatic_fine_use_mask": bool(config.get("automatic_fine_use_mask", False)),
+            "merge_all_anomaly_patches": bool(config.get("merge_all_anomaly_patches", False)),
+            "coarse_beta_threshold": float(config["coarse_beta_threshold"]) if config.get("coarse_beta_threshold") is not None else None,
         },
         "results": all_results,
     }
