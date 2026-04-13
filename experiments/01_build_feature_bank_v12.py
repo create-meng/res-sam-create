@@ -41,7 +41,9 @@ CONFIG = {
     "window_size": 50,
     "stride": 5,
     "hidden_size": 30,
-    "num_normal_samples": 20,
+    # V12改进：从20增加到75，覆盖augmented_intact的所有原始图组（约75个原始图）
+    # 诊断发现：随机选20张导致部分原始图纹理未被覆盖，正常图被误判为高分异常
+    "num_normal_samples": 75,
     "resize_policy": RESIZE_POLICY_FIXED,
     "image_size": (369, 369),
     "device": "auto",
@@ -49,7 +51,7 @@ CONFIG = {
     "checkpoint_file": "checkpoint.json",
     "version": "v12",
     "feature_with_bias": True,
-    "alignment_notes": "Paper-first mainline (v12): solve true f=[W_out,b]; fb_source=augmented_intact, eval=augmented_*",
+    "alignment_notes": "Paper-first mainline (v12): solve true f=[W_out,b]; fb_source=augmented_intact 75张按原始图分组采样, eval=augmented_*",
 }
 
 
@@ -72,6 +74,22 @@ def get_image_hash(path: str) -> str:
         return hashlib.md5(f.read()).hexdigest()[:8]
 
 
+def _group_by_original_id(image_files: list) -> dict:
+    """
+    按原始图ID分组。
+    augmented_intact 文件名格式：{orig_id}_aug_{n}.jpg 或 {orig_id} (2)_aug_{n}.jpg
+    提取 orig_id 作为分组键，确保采样时覆盖更多不同原始图。
+    """
+    import re
+    groups: dict = {}
+    for f in image_files:
+        # 匹配 "数字_aug_" 或 "数字 (数字)_aug_" 前缀
+        m = re.match(r'^(.+?)_aug_\d+', f)
+        key = m.group(1) if m else f
+        groups.setdefault(key, []).append(f)
+    return groups
+
+
 def load_normal_images(
     data_dir: str,
     num_samples: int,
@@ -81,9 +99,38 @@ def load_normal_images(
     image_files = [f for f in os.listdir(data_dir) if f.lower().endswith((".jpg", ".png", ".jpeg"))]
     if len(image_files) == 0:
         raise ValueError(f"No images found in {data_dir}")
+
+    # V12 改进：按原始图ID分组采样，确保覆盖更多不同原始图的纹理
+    # 诊断发现：随机选20张可能集中在少数原始图的增强版本，导致Feature Bank覆盖不足
+    # 高分误判的正常图（如 "10 (2)_aug_*"）正是因为其原始图未被建库覆盖
+    groups = _group_by_original_id(image_files)
+    group_keys = sorted(groups.keys())
     if random_select:
-        np.random.shuffle(image_files)
-    selected_files = image_files[: min(num_samples, len(image_files))]
+        np.random.shuffle(group_keys)
+
+    selected_files = []
+    if num_samples >= len(group_keys):
+        # 样本数 >= 原始图数：每组取1张，再随机补足
+        for key in group_keys:
+            candidates = groups[key][:]
+            np.random.shuffle(candidates)
+            selected_files.append(candidates[0])
+        # 补足剩余配额
+        remaining = num_samples - len(selected_files)
+        if remaining > 0:
+            all_remaining = [f for key in group_keys for f in groups[key]
+                             if f not in selected_files]
+            np.random.shuffle(all_remaining)
+            selected_files.extend(all_remaining[:remaining])
+    else:
+        # 样本数 < 原始图数：从不同组各取1张
+        for key in group_keys[:num_samples]:
+            candidates = groups[key][:]
+            np.random.shuffle(candidates)
+            selected_files.append(candidates[0])
+
+    print(f"  [建库采样] 原始图组数={len(group_keys)}, 请求样本数={num_samples}, "
+          f"实际选取={len(selected_files)}（按原始图分组覆盖）")
 
     target_hw = target_hw_for_preprocess(config, None)
     images, paths, hashes = [], [], []

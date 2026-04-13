@@ -183,6 +183,26 @@ def compute_metrics(results: dict) -> dict:
         fpr, tpr, _ = roc_curve(np.asarray(auc_labels, dtype=int), np.asarray(auc_scores, dtype=float))
         region_auc = float(auc(fpr, tpr))
 
+    # 方案3a：多IoU阈值评估（补充指标，主指标保持IoU>0.5）
+    multi_iou_metrics: dict = {}
+    for iou_t in [0.1, 0.2, 0.3, 0.5]:
+        mtp = mfp = mfn = 0
+        for category, cat_results in results.items():
+            for record in cat_results:
+                if record.get("exclude_from_det_metrics", False):
+                    continue
+                rtp, rfp, rfn = _match_tp_fp_fn(
+                    record.get("pred_bboxes", []),
+                    record.get("gt_bboxes", []),
+                    iou_thresh=iou_t,
+                )
+                mtp += rtp; mfp += rfp; mfn += rfn
+        mp = mtp / (mtp + mfp) if (mtp + mfp) else 0.0
+        mr = mtp / (mtp + mfn) if (mtp + mfn) else 0.0
+        mf = 2 * mp * mr / (mp + mr) if (mp + mr) else 0.0
+        multi_iou_metrics[f"iou{int(iou_t*10):02d}"] = {"tp": mtp, "fp": mfp, "fn": mfn,
+                                                          "precision": mp, "recall": mr, "f1": mf}
+
     # 图像级AUC（论文Table 2口径）：每张图一个分数=max(anomaly_scores)
     # 正类=cavities/utilities，负类=normal_auc
     img_auc_labels: list[int] = []
@@ -217,6 +237,7 @@ def compute_metrics(results: dict) -> dict:
         "image_auc_neg": int(len(img_auc_labels) - sum(img_auc_labels)),
         "coarse_discarded": total_coarse_discarded,
         "per_category": per_category,
+        "multi_iou_metrics": multi_iou_metrics,
     }
 
 
@@ -328,6 +349,12 @@ def main() -> None:
             f"Detection: Precision={metrics['precision']:.4f} Recall={metrics['recall']:.4f} "
             f"F1={metrics['f1']:.4f}"
         )
+        # 多IoU阈值补充指标
+        print("多IoU阈值 F1（补充，主指标仍为IoU>0.5）:")
+        for k, v in metrics.get("multi_iou_metrics", {}).items():
+            thresh = int(k[3:]) / 10
+            print(f"  IoU>{thresh:.1f}: TP={v['tp']} FP={v['fp']} FN={v['fn']} "
+                  f"Prec={v['precision']:.3f} Rec={v['recall']:.3f} F1={v['f1']:.3f}")
         region_auc = plot_region_auc_curve(results, os.path.join(CONFIG["vis_output_dir"], "region_roc_curve_v12.png"))
         if region_auc is not None:
             print(f"Region-level AUC={region_auc:.4f}")
