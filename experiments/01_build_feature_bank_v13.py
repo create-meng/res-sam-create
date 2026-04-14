@@ -2,12 +2,15 @@
 Res-SAM v13 - Step 1: build the feature bank.
 
 V13 相对 V12 的改进：
-1. PatchCore coreset 采样：从所有正常图的 patch 特征中贪心选出最具代表性的子集
-   - 解决 Feature Bank 覆盖不足导致正常图被误判的问题
-   - 比随机采样/分组采样更系统，保证特征多样性
-2. GPR 背景去除预处理（可选）：在建库前对图像做水平背景滤波
+1. 小样本分组采样（保留 Res-SAM 小样本特性）：
+   - 仍然只用少量正常图（num_normal_samples=20）建库，保持论文小样本设计
+   - 改进采样方式：按原始图 ID 分组，每组选 1 张，保证覆盖所有原始图纹理
+   - 解决随机采样可能集中在少数原始图增强版本的问题
+2. PatchCore coreset 采样（在已选 20 张的 patch 内部做）：
+   - 从 20 张图的所有 patch 特征中贪心选出最具代表性的子集
+   - 保证 Feature Bank 内部多样性，不重复覆盖相同区域
+3. GPR 背景去除预处理（可选）：在建库前对图像做水平背景滤波
    - GPR B-scan 的水平条带是背景噪声，去掉后特征更纯净
-3. 保留 V12 的按原始图分组采样作为 coreset 的输入来源
 """
 
 import sys
@@ -42,12 +45,14 @@ CONFIG = {
     "window_size": 50,
     "stride": 5,
     "hidden_size": 30,
-    # V13：用全量正常图做 coreset 采样，不再限制 num_normal_samples
-    # coreset 会从所有图的 patch 特征中选出最具代表性的子集
-    "num_normal_samples": None,   # None = 使用全量
-    "coreset_ratio": 0.01,        # 保留 1% 的 patch 作为 coreset（约 9000 个 patch）
-    "coreset_min_size": 5000,     # coreset 最小 patch 数
-    "coreset_max_size": 50000,    # coreset 最大 patch 数（防止内存溢出）
+    # V13：保留 Res-SAM 小样本特性，只用少量正常图建库
+    # 改进：按原始图 ID 分组采样，保证覆盖所有原始图纹理
+    "num_normal_samples": 20,     # 保持论文小样本设计（20 张）
+    "grouped_sampling": True,     # 按原始图 ID 分组，每组选 1 张（保证覆盖多样性）
+    # PatchCore coreset：在已选 20 张的 patch 内部做，保证 Feature Bank 内部多样性
+    "coreset_ratio": 0.5,         # 从 20 张图的 patch 中保留 50%（约 2000 个 patch）
+    "coreset_min_size": 500,      # coreset 最小 patch 数
+    "coreset_max_size": 5000,     # coreset 最大 patch 数
     # GPR 背景去除（可选）
     "gpr_background_removal": True,   # 水平背景滤波，去除 B-scan 水平条带噪声
     "background_removal_method": "row_mean",  # row_mean: 减去每行均值
@@ -60,8 +65,8 @@ CONFIG = {
     "version": "v13",
     "feature_with_bias": True,
     "alignment_notes": (
-        "v13: PatchCore coreset采样建库 + GPR背景去除预处理 + merge_all推理; "
-        "fb_source=augmented_intact全量, coreset_ratio=0.01"
+        "v13: 小样本分组采样(20张,按原始图ID分组) + PatchCore coreset(patch内部去重) + GPR背景去除 + merge_all推理; "
+        "保留Res-SAM小样本特性，改进采样多样性"
     ),
 }
 
@@ -109,23 +114,61 @@ def remove_gpr_background(img_array: np.ndarray, method: str = "row_mean") -> np
     return result.astype(np.float32)
 
 
-def load_all_normal_images(data_dir: str, config: dict) -> tuple:
-    """加载全量正常图像"""
-    image_files = sorted([f for f in os.listdir(data_dir)
-                          if f.lower().endswith((".jpg", ".png", ".jpeg"))])
+def _get_original_id(filename: str) -> str:
+    """
+    从增强图文件名中提取原始图 ID，用于分组采样。
+    例：'10_aug_7.jpg' → '10'，'1 (2)_aug_3.jpg' → '1 (2)'
+    """
+    name = os.path.splitext(filename)[0]
+    m = re.match(r'^(.+?)_aug_\d+$', name)
+    return m.group(1) if m else name
+
+
+def load_normal_images(data_dir: str, config: dict) -> tuple:
+    """
+    加载正常图像，支持分组采样（保留 Res-SAM 小样本特性）。
+
+    grouped_sampling=True 时：按原始图 ID 分组，每组选 1 张，
+    保证 num_normal_samples 张图覆盖尽可能多的原始图纹理。
+    """
+    all_files = sorted([f for f in os.listdir(data_dir)
+                        if f.lower().endswith((".jpg", ".png", ".jpeg"))])
+    num_samples = config.get("num_normal_samples", 20) or len(all_files)
+    rng = np.random.RandomState(config.get("random_seed", 11))
+
+    if config.get("grouped_sampling", False):
+        # 按原始图 ID 分组
+        groups: dict = {}
+        for f in all_files:
+            gid = _get_original_id(f)
+            groups.setdefault(gid, []).append(f)
+        group_ids = sorted(groups.keys())
+        # 每组选 1 张，循环直到凑够 num_samples
+        selected = []
+        for gid in group_ids:
+            selected.append(rng.choice(groups[gid]))
+        # 如果组数不够，从剩余文件里补
+        if len(selected) < num_samples:
+            remaining = [f for f in all_files if f not in selected]
+            rng.shuffle(remaining)
+            selected += remaining[:num_samples - len(selected)]
+        selected = selected[:num_samples]
+        print(f"  分组采样: {len(group_ids)} 个原始图组 → 选 {len(selected)} 张（覆盖 {min(len(group_ids), num_samples)} 个组）")
+    else:
+        indices = rng.choice(len(all_files), size=min(num_samples, len(all_files)), replace=False)
+        selected = [all_files[i] for i in sorted(indices)]
+        print(f"  随机采样: {len(selected)} 张")
+
     target_hw = target_hw_for_preprocess(config, None)
     images, paths, hashes = [], [], []
-    print(f"  加载 {len(image_files)} 张正常图像...")
-    for img_file in tqdm(image_files, desc="  加载图像"):
+    for img_file in tqdm(selected, desc="  加载图像"):
         img_path = os.path.join(data_dir, img_file)
         try:
             img = Image.open(img_path).convert("L")
             if target_hw:
                 img = img.resize((target_hw[1], target_hw[0]), Image.BILINEAR)
             arr = np.array(img, dtype=np.float32)
-            # 全局归一化
             arr = (arr - arr.mean()) / (arr.std() + 1e-8)
-            # GPR 背景去除
             if config.get("gpr_background_removal", False):
                 arr = remove_gpr_background(arr, config.get("background_removal_method", "row_mean"))
             images.append(arr)
@@ -217,7 +260,7 @@ def build_feature_bank(config: dict):
             print(f"警告: 目录不存在: {source_dir}")
             continue
 
-        images, paths, hashes = load_all_normal_images(source_dir, config)
+        images, paths, hashes = load_normal_images(source_dir, config)
         all_metadata["sources"][source_name] = {
             "directory": source_dir,
             "num_images": len(images),
