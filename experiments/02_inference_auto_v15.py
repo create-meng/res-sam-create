@@ -434,5 +434,34 @@ if __name__ == "__main__":
     CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", "feature_banks_v15", "metadata.json")
     CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", "predictions_v15")
     CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", "checkpoints_v15")
+
+    # ── 环境变量覆盖（消融实验，与 01_build 保持一致）──────────────────
+    # RES_SAM_HIDDEN_SIZE : ESN 隐层大小，例如 30 / 100
+    # RES_SAM_BG_METHOD   : 背景去除方式，例如 row_mean / both / none
+    # MAX_IMAGES_PER_CATEGORY : 每类最多处理图像数（已有）
+    _hs = os.environ.get("RES_SAM_HIDDEN_SIZE", "").strip()
+    if _hs:
+        CONFIG["hidden_size"] = int(_hs)
+        print(f"[ENV] hidden_size = {CONFIG['hidden_size']}")
+
+    _bg = os.environ.get("RES_SAM_BG_METHOD", "").strip()
+    if _bg:
+        CONFIG["background_removal_method"] = _bg
+        CONFIG["gpr_background_removal"] = (_bg.lower() != "none")
+        print(f"[ENV] background_removal_method = {CONFIG['background_removal_method']}")
+
+    # 与建库脚本保持一致的路径后缀
+    hs  = CONFIG["hidden_size"]
+    bgm = CONFIG["background_removal_method"] if CONFIG.get("gpr_background_removal") else "nobg"
+    suffix = f"_hs{hs}_{bgm}"
+    CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", f"feature_banks_v15{suffix}",
+                                                f"feature_bank_v15{suffix}.pth")
+    CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", f"feature_banks_v15{suffix}", "metadata.json")
+    CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", f"predictions_v15{suffix}")
+    CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", f"checkpoints_v15{suffix}")
+    print(f"[ENV] feature_bank = {CONFIG['feature_bank_path']}")
+    print(f"[ENV] output_dir   = {CONFIG['output_dir']}")
+    # ────────────────────────────────────────────────────────────────────
+
     with torch.no_grad():
         run_inference(CONFIG)

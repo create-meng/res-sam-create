@@ -330,5 +330,31 @@ if __name__ == "__main__":
     CONFIG["output_dir"] = _to_abs(BASE_DIR, CONFIG["output_dir"])
     CONFIG["normal_data_sources"] = {k: _to_abs(BASE_DIR, v)
                                       for k, v in CONFIG["normal_data_sources"].items()}
+
+    # ── 环境变量覆盖（用于消融实验，不改代码直接切换配置）──────────────
+    # RES_SAM_HIDDEN_SIZE : ESN 隐层大小，例如 30 / 100
+    # RES_SAM_BG_METHOD   : 背景去除方式，例如 row_mean / both / none
+    # MAX_IMAGES_PER_CATEGORY : 每类最多处理图像数（已有）
+    _hs = os.environ.get("RES_SAM_HIDDEN_SIZE", "").strip()
+    if _hs:
+        CONFIG["hidden_size"] = int(_hs)
+        print(f"[ENV] hidden_size = {CONFIG['hidden_size']}")
+
+    _bg = os.environ.get("RES_SAM_BG_METHOD", "").strip()
+    if _bg:
+        CONFIG["background_removal_method"] = _bg
+        CONFIG["gpr_background_removal"] = (_bg.lower() != "none")
+        print(f"[ENV] background_removal_method = {CONFIG['background_removal_method']}")
+
+    # 根据配置动态调整输出路径，避免不同消融实验互相覆盖
+    hs  = CONFIG["hidden_size"]
+    bgm = CONFIG["background_removal_method"] if CONFIG.get("gpr_background_removal") else "nobg"
+    suffix = f"_hs{hs}_{bgm}"
+    CONFIG["output_dir"]  = os.path.join(BASE_DIR, "outputs", f"feature_banks_v15{suffix}")
+    CONFIG["output_file"] = f"feature_bank_v15{suffix}.pth"
+    CONFIG["output_dir"]  = _to_abs(BASE_DIR, CONFIG["output_dir"])
+    print(f"[ENV] output_dir = {CONFIG['output_dir']}")
+    # ────────────────────────────────────────────────────────────────────
+
     with torch.no_grad():
         build_feature_bank(CONFIG)
