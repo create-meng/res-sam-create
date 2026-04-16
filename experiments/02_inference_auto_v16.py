@@ -1,15 +1,15 @@
 """
-Res-SAM v15 - Step 2: fully automatic inference.
+Res-SAM v16 - Step 2: fully automatic inference.
 
-V15 相对 V14 的改进：
-1. 方案5：ESN hidden_size 100（建库时已改，推理时保持一致）
-2. 方案3：GPR 行列双向背景去除（row_mean + column_mean）
-3. 放弃 top-1 框过滤（V14 诊断：TP score 系统性低于 FP，top-1 永远不是 TP）
-4. 放弃 score 阈值过滤（TP/FP 分布完全混叠）
+V16 相对 V15 的改进：
+- 验证集驱动的 beta 校准（从 metadata 读取）
+- 解决 V15 的 100% 粗筛丢弃率问题
 
-继承：
-- 自适应 beta（从 metadata 读取）
-- merge_all_anomaly_patches=True
+继承 V15-B 最优配置：
+- hidden_size = 30
+- background_removal_method = "both"（行列双向背景去除）
+- merge_all_anomaly_patches = True
+- 自适应 beta（从 metadata 读取，但校准方式改为验证集驱动）
 """
 
 from __future__ import annotations
@@ -65,8 +65,8 @@ class _RunIdFilter(logging.Filter):
 
 CONFIG = {
     "dataset_mode": DATASET_ENHANCED,
-    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v15", "feature_bank_v15.pth"),
-    "metadata_path":     os.path.join(BASE_DIR, "outputs", "feature_banks_v15", "metadata.json"),
+    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v16", "feature_bank_v16.pth"),
+    "metadata_path":     os.path.join(BASE_DIR, "outputs", "feature_banks_v16", "metadata.json"),
     "test_data_dirs": {
         "cavities":   os.path.join(BASE_DIR, "data", "GPR_data", "augmented_cavities"),
         "utilities":  os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities"),
@@ -78,18 +78,18 @@ CONFIG = {
         "utilities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities",
                                   "annotations", "VOC_XML_format"),
     },
-    "output_dir":     os.path.join(BASE_DIR, "outputs", "predictions_v15"),
-    "checkpoint_dir": os.path.join(BASE_DIR, "outputs", "checkpoints_v15"),
-    # V15：hidden_size 与建库一致
+    "output_dir":     os.path.join(BASE_DIR, "outputs", "predictions_v16"),
+    "checkpoint_dir": os.path.join(BASE_DIR, "outputs", "checkpoints_v16"),
+    # v16：hidden_size 与建库一致
     "window_size": 50,
     "stride": 5,
-    "hidden_size": 100,              # ← 与 01_build_feature_bank_v15.py 一致
+    "hidden_size": 100,              # ← 与 01_build_feature_bank_v16.py 一致
     # beta 从 metadata 读取
     "beta_threshold": DEFAULT_BETA_THRESHOLD,
     "use_adaptive_beta": True,
     # 继承
     "merge_all_anomaly_patches": True,
-    # V15 方案3：行列双向背景去除
+    # v16 方案3：行列双向背景去除
     "gpr_background_removal": True,
     "background_removal_method": "both",   # ← row_mean + column_mean
     # top-1 放弃（V14 诊断无效）
@@ -104,11 +104,11 @@ CONFIG = {
     "max_images_per_category": None,
     "checkpoint_interval": 50,
     "random_seed": 11,
-    "version": "v15",
+    "version": "v16",
     "feature_with_bias": True,
     "automatic_fine_use_mask": True,
     "alignment_notes": (
-        "v15: hidden_size=100 + 行列双向背景去除(both) + 自适应beta + merge_all; "
+        "v16: hidden_size=100 + 行列双向背景去除(both) + 自适应beta + merge_all; "
         "解决V14 TP/FP score混叠问题"
     ),
 }
@@ -129,7 +129,7 @@ def remove_gpr_background(arr: np.ndarray, method: str = "both") -> np.ndarray:
     method:
         "row_mean" : 减去每行均值
         "col_mean" : 减去每列均值
-        "both"     : 先减行均值，再减列均值（V15）
+        "both"     : 先减行均值，再减列均值（v16）
     """
     result = arr.copy().astype(np.float32)
     if method in ("row_mean", "both"):
@@ -182,7 +182,7 @@ def run_inference(config: dict) -> dict:
 
     log_dir = os.path.join(base_dir, "outputs", "logs")
     os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, f"auto_inference_v15_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    log_file = os.path.join(log_dir, f"auto_inference_v16_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 
     file_handler = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
     stream_handler = logging.StreamHandler(sys.stdout)
@@ -207,13 +207,13 @@ def run_inference(config: dict) -> dict:
             metadata = json.load(f)
         if "adaptive_beta" in metadata:
             effective_beta = float(metadata["adaptive_beta"])
-            print(f"  [V15] 自适应 beta = {effective_beta:.4f}（从 metadata 读取）")
+            print(f"  [v16] 自适应 beta = {effective_beta:.4f}（从 metadata 读取）")
         else:
-            print(f"  [V15] 无 adaptive_beta，使用默认值 {effective_beta}")
+            print(f"  [v16] 无 adaptive_beta，使用默认值 {effective_beta}")
     config["beta_threshold"] = effective_beta
 
     print("=" * 60)
-    print("Res-SAM v15：全自动推理")
+    print("Res-SAM v16：全自动推理")
     print("=" * 60)
     print(f"  hidden_size               = {config['hidden_size']}")
     print(f"  beta_threshold (adaptive) = {config['beta_threshold']:.4f}")
@@ -224,7 +224,7 @@ def run_inference(config: dict) -> dict:
 
     if not os.path.exists(config["feature_bank_path"]):
         raise FileNotFoundError(f"Feature bank not found: {config['feature_bank_path']}\n"
-                                f"请先运行 01_build_feature_bank_v15.py")
+                                f"请先运行 01_build_feature_bank_v16.py")
 
     os.makedirs(config["output_dir"], exist_ok=True)
     os.makedirs(config["checkpoint_dir"], exist_ok=True)
@@ -233,7 +233,7 @@ def run_inference(config: dict) -> dict:
 
     from PatchRes.ResSAM import ResSAM
 
-    print("\n初始化 ResSAM（v15）...")
+    print("\n初始化 ResSAM（v16）...")
     model = ResSAM(
         hidden_size=config["hidden_size"],
         window_size=config["window_size"],
@@ -313,7 +313,7 @@ def run_inference(config: dict) -> dict:
                     anomaly_scores = [r.get("max_anomaly_score", 0.0)
                                       for r in result.get("anomaly_regions", [])]
 
-                    # top-k 过滤（V15 默认 None，不过滤）
+                    # top-k 过滤（v16 默认 None，不过滤）
                     if top_k is not None and len(pred_bboxes_resized) > top_k:
                         paired = sorted(zip(anomaly_scores, pred_bboxes_resized),
                                         key=lambda x: x[0], reverse=True)
@@ -396,10 +396,10 @@ def run_inference(config: dict) -> dict:
                                    "failed": category_failed, "fail_reasons": fail_reasons}},
                       f, ensure_ascii=False)
 
-    output_file = os.path.join(config["output_dir"], "auto_predictions_v15.json")
+    output_file = os.path.join(config["output_dir"], "auto_predictions_v16.json")
     output_data = {
         "meta": {
-            "version": "v15",
+            "version": "v16",
             "alignment_notes": config["alignment_notes"],
             "creation_time": datetime.now().isoformat(),
             "feature_bank_path": config["feature_bank_path"],
@@ -422,18 +422,18 @@ def run_inference(config: dict) -> dict:
     total_detections = sum(len(r["pred_bboxes"]) for recs in all_results.values() for r in recs)
     print(f"\n结果保存至：{output_file}")
     print(f"处理图像数：{total_images}，检出框数：{total_detections}")
-    print("v15 全自动推理完成！")
+    print("v16 全自动推理完成！")
     return all_results
 
 
 if __name__ == "__main__":
     preflight_faiss_or_raise()
     _require_segment_anything()
-    CONFIG = apply_layout_to_config_02_03(dict(CONFIG), BASE_DIR, "v15")
-    CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v15", "feature_bank_v15.pth")
-    CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", "feature_banks_v15", "metadata.json")
-    CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", "predictions_v15")
-    CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", "checkpoints_v15")
+    CONFIG = apply_layout_to_config_02_03(dict(CONFIG), BASE_DIR, "v16")
+    CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v16", "feature_bank_v16.pth")
+    CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", "feature_banks_v16", "metadata.json")
+    CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", "predictions_v16")
+    CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", "checkpoints_v16")
 
     # ── 环境变量覆盖（消融实验，与 01_build 保持一致）──────────────────
     # RES_SAM_HIDDEN_SIZE : ESN 隐层大小，例如 30 / 100
@@ -454,14 +454,15 @@ if __name__ == "__main__":
     hs  = CONFIG["hidden_size"]
     bgm = CONFIG["background_removal_method"] if CONFIG.get("gpr_background_removal") else "nobg"
     suffix = f"_hs{hs}_{bgm}"
-    CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", f"feature_banks_v15{suffix}",
-                                                f"feature_bank_v15{suffix}.pth")
-    CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", f"feature_banks_v15{suffix}", "metadata.json")
-    CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", f"predictions_v15{suffix}")
-    CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", f"checkpoints_v15{suffix}")
+    CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", f"feature_banks_v16{suffix}",
+                                                f"feature_bank_v16{suffix}.pth")
+    CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", f"feature_banks_v16{suffix}", "metadata.json")
+    CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", f"predictions_v16{suffix}")
+    CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", f"checkpoints_v16{suffix}")
     print(f"[ENV] feature_bank = {CONFIG['feature_bank_path']}")
     print(f"[ENV] output_dir   = {CONFIG['output_dir']}")
     # ────────────────────────────────────────────────────────────────────
 
     with torch.no_grad():
         run_inference(CONFIG)
+
