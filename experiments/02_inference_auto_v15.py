@@ -1,15 +1,14 @@
 """
-Res-SAM v14 - Step 2: fully automatic inference.
+Res-SAM v15 - Step 2: fully automatic inference.
 
-V14 相对 V13 的改进：
-1. 自适应 beta（方案1）：从 metadata 读取建库时计算的 adaptive_beta，替换固定 beta=0.1
-   - 解决 V13 粗筛丢弃率=0% 的问题
-2. top-1 pred 框（方案2）：每张图只保留 anomaly_score 最高的 1 个框
-   - 每张图 GT 只有 1 个，多余的框全是 FP，直接过滤
-   - 预期大幅提升 Precision
+V15 相对 V14 的改进：
+1. 方案5：ESN hidden_size 100（建库时已改，推理时保持一致）
+2. 方案3：GPR 行列双向背景去除（row_mean + column_mean）
+3. 放弃 top-1 框过滤（V14 诊断：TP score 系统性低于 FP，top-1 永远不是 TP）
+4. 放弃 score 阈值过滤（TP/FP 分布完全混叠）
 
-继承 V13：
-- GPR row_mean 背景去除
+继承：
+- 自适应 beta（从 metadata 读取）
 - merge_all_anomaly_patches=True
 """
 
@@ -66,8 +65,8 @@ class _RunIdFilter(logging.Filter):
 
 CONFIG = {
     "dataset_mode": DATASET_ENHANCED,
-    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v14", "feature_bank_v14.pth"),
-    "metadata_path":     os.path.join(BASE_DIR, "outputs", "feature_banks_v14", "metadata.json"),
+    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v15", "feature_bank_v15.pth"),
+    "metadata_path":     os.path.join(BASE_DIR, "outputs", "feature_banks_v15", "metadata.json"),
     "test_data_dirs": {
         "cavities":   os.path.join(BASE_DIR, "data", "GPR_data", "augmented_cavities"),
         "utilities":  os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities"),
@@ -79,20 +78,22 @@ CONFIG = {
         "utilities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities",
                                   "annotations", "VOC_XML_format"),
     },
-    "output_dir":     os.path.join(BASE_DIR, "outputs", "predictions_v14"),
-    "checkpoint_dir": os.path.join(BASE_DIR, "outputs", "checkpoints_v14"),
+    "output_dir":     os.path.join(BASE_DIR, "outputs", "predictions_v15"),
+    "checkpoint_dir": os.path.join(BASE_DIR, "outputs", "checkpoints_v15"),
+    # V15：hidden_size 与建库一致
     "window_size": 50,
     "stride": 5,
-    "hidden_size": 30,
-    # V14：beta 从 metadata 读取（adaptive_beta），此处为 fallback
+    "hidden_size": 100,              # ← 与 01_build_feature_bank_v15.py 一致
+    # beta 从 metadata 读取
     "beta_threshold": DEFAULT_BETA_THRESHOLD,
-    "use_adaptive_beta": True,          # True = 从 metadata 读取 adaptive_beta
-    # 继承 V13
+    "use_adaptive_beta": True,
+    # 继承
     "merge_all_anomaly_patches": True,
+    # V15 方案3：行列双向背景去除
     "gpr_background_removal": True,
-    "background_removal_method": "row_mean",
-    # V14 新增：top-1 框过滤
-    "top_k_preds": 1,                   # 每张图只保留 score 最高的 k 个框，None = 不过滤
+    "background_removal_method": "both",   # ← row_mean + column_mean
+    # top-1 放弃（V14 诊断无效）
+    "top_k_preds": None,
     "sam_model_type": "vit_l",
     "sam_checkpoint": os.path.join(BASE_DIR, "sam", "sam_vit_l_0b3195.pth"),
     "device": "auto",
@@ -103,12 +104,12 @@ CONFIG = {
     "max_images_per_category": None,
     "checkpoint_interval": 50,
     "random_seed": 11,
-    "version": "v14",
+    "version": "v15",
     "feature_with_bias": True,
     "automatic_fine_use_mask": True,
     "alignment_notes": (
-        "v14: 自适应beta(p95 1-NN) + top-1框 + GPR背景去除 + merge_all; "
-        "解决V13粗筛丢弃率=0%和FP过多问题"
+        "v15: hidden_size=100 + 行列双向背景去除(both) + 自适应beta + merge_all; "
+        "解决V14 TP/FP score混叠问题"
     ),
 }
 
@@ -122,14 +123,21 @@ if _max_images_env:
         pass
 
 
-def remove_gpr_background(arr: np.ndarray, method: str = "row_mean") -> np.ndarray:
-    if method == "row_mean":
-        bg = arr.mean(axis=1, keepdims=True)
-    elif method == "row_median":
-        bg = np.median(arr, axis=1, keepdims=True)
-    else:
-        return arr
-    result = arr - bg
+def remove_gpr_background(arr: np.ndarray, method: str = "both") -> np.ndarray:
+    """
+    GPR B-scan 背景去除，与建库预处理保持一致。
+    method:
+        "row_mean" : 减去每行均值
+        "col_mean" : 减去每列均值
+        "both"     : 先减行均值，再减列均值（V15）
+    """
+    result = arr.copy().astype(np.float32)
+    if method in ("row_mean", "both"):
+        result = result - result.mean(axis=1, keepdims=True)
+    if method in ("col_mean", "both"):
+        result = result - result.mean(axis=0, keepdims=True)
+    if method == "row_median":
+        result = arr - np.median(arr, axis=1, keepdims=True)
     std = result.std()
     if std > 1e-8:
         result = result / std
@@ -164,22 +172,8 @@ def load_image_with_orig_size(path: str, size_hw: tuple[int, int] | None,
         arr = np.array(img, dtype=np.float32)
         arr = (arr - arr.mean()) / (arr.std() + 1e-8)
         if config.get("gpr_background_removal", False):
-            arr = remove_gpr_background(arr, config.get("background_removal_method", "row_mean"))
+            arr = remove_gpr_background(arr, config.get("background_removal_method", "both"))
     return orig_w, orig_h, arr
-
-
-def apply_top_k_filter(pred_bboxes: list, anomaly_scores: list, k: int | None):
-    """
-    V14 方案2：只保留 score 最高的 k 个 pred 框。
-    每张图 GT 只有 1 个，多余的框全是 FP。
-    """
-    if k is None or len(pred_bboxes) <= k:
-        return pred_bboxes, anomaly_scores
-    # 按 score 降序排列，取前 k 个
-    paired = sorted(zip(anomaly_scores, pred_bboxes), key=lambda x: x[0], reverse=True)
-    top_scores = [s for s, _ in paired[:k]]
-    top_bboxes = [b for _, b in paired[:k]]
-    return top_bboxes, top_scores
 
 
 def run_inference(config: dict) -> dict:
@@ -188,7 +182,7 @@ def run_inference(config: dict) -> dict:
 
     log_dir = os.path.join(base_dir, "outputs", "logs")
     os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, f"auto_inference_v14_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    log_file = os.path.join(log_dir, f"auto_inference_v15_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 
     file_handler = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
     stream_handler = logging.StreamHandler(sys.stdout)
@@ -206,31 +200,31 @@ def run_inference(config: dict) -> dict:
     config["test_data_dirs"] = {k: _to_abs(base_dir, v) for k, v in config.get("test_data_dirs", {}).items()}
     config["annotation_dirs"] = {k: _to_abs(base_dir, v) for k, v in config.get("annotation_dirs", {}).items()}
 
-    # V14：从 metadata 读取自适应 beta
+    # 从 metadata 读取自适应 beta
     effective_beta = config["beta_threshold"]
     if config.get("use_adaptive_beta", True) and os.path.exists(config["metadata_path"]):
         with open(config["metadata_path"], "r", encoding="utf-8") as f:
             metadata = json.load(f)
         if "adaptive_beta" in metadata:
             effective_beta = float(metadata["adaptive_beta"])
-            print(f"  [V14] 自适应 beta = {effective_beta:.4f}（从 metadata 读取，"
-                  f"V13 固定值 = {metadata.get('fixed_beta_v13', DEFAULT_BETA_THRESHOLD)}）")
+            print(f"  [V15] 自适应 beta = {effective_beta:.4f}（从 metadata 读取）")
         else:
-            print(f"  [V14] metadata 中无 adaptive_beta，使用默认值 {effective_beta}")
+            print(f"  [V15] 无 adaptive_beta，使用默认值 {effective_beta}")
     config["beta_threshold"] = effective_beta
 
     print("=" * 60)
-    print("Res-SAM v14：全自动推理")
+    print("Res-SAM v15：全自动推理")
     print("=" * 60)
+    print(f"  hidden_size               = {config['hidden_size']}")
     print(f"  beta_threshold (adaptive) = {config['beta_threshold']:.4f}")
+    print(f"  background_removal        = {config.get('background_removal_method')}")
     print(f"  merge_all                 = {config.get('merge_all_anomaly_patches')}")
-    print(f"  top_k_preds               = {config.get('top_k_preds')}")
-    print(f"  gpr_background_removal    = {config.get('gpr_background_removal')}")
+    print(f"  top_k_preds               = {config.get('top_k_preds')}  (None=不过滤)")
     print("=" * 60)
 
     if not os.path.exists(config["feature_bank_path"]):
         raise FileNotFoundError(f"Feature bank not found: {config['feature_bank_path']}\n"
-                                f"请先运行 01_build_feature_bank_v14.py")
+                                f"请先运行 01_build_feature_bank_v15.py")
 
     os.makedirs(config["output_dir"], exist_ok=True)
     os.makedirs(config["checkpoint_dir"], exist_ok=True)
@@ -239,7 +233,7 @@ def run_inference(config: dict) -> dict:
 
     from PatchRes.ResSAM import ResSAM
 
-    print("\n初始化 ResSAM（v14）...")
+    print("\n初始化 ResSAM（v15）...")
     model = ResSAM(
         hidden_size=config["hidden_size"],
         window_size=config["window_size"],
@@ -319,10 +313,12 @@ def run_inference(config: dict) -> dict:
                     anomaly_scores = [r.get("max_anomaly_score", 0.0)
                                       for r in result.get("anomaly_regions", [])]
 
-                    # V14 方案2：top-k 过滤
-                    pred_bboxes_resized, anomaly_scores = apply_top_k_filter(
-                        pred_bboxes_resized, anomaly_scores, top_k
-                    )
+                    # top-k 过滤（V15 默认 None，不过滤）
+                    if top_k is not None and len(pred_bboxes_resized) > top_k:
+                        paired = sorted(zip(anomaly_scores, pred_bboxes_resized),
+                                        key=lambda x: x[0], reverse=True)
+                        anomaly_scores = [s for s, _ in paired[:top_k]]
+                        pred_bboxes_resized = [b for _, b in paired[:top_k]]
 
                     target_w = int(gt["width"]) if gt and gt.get("width") else int(orig_w)
                     target_h = int(gt["height"]) if gt and gt.get("height") else int(orig_h)
@@ -340,7 +336,6 @@ def run_inference(config: dict) -> dict:
                         "num_candidates": result.get("num_candidates", 0),
                         "num_coarse_discarded": result.get("num_coarse_discarded", 0),
                         "num_esn_fits": result.get("num_esn_fits", 0),
-                        "num_preds_before_topk": len([r for r in result.get("anomaly_regions", [])]),
                     }
 
                     if gt:
@@ -401,10 +396,10 @@ def run_inference(config: dict) -> dict:
                                    "failed": category_failed, "fail_reasons": fail_reasons}},
                       f, ensure_ascii=False)
 
-    output_file = os.path.join(config["output_dir"], "auto_predictions_v14.json")
+    output_file = os.path.join(config["output_dir"], "auto_predictions_v15.json")
     output_data = {
         "meta": {
-            "version": "v14",
+            "version": "v15",
             "alignment_notes": config["alignment_notes"],
             "creation_time": datetime.now().isoformat(),
             "feature_bank_path": config["feature_bank_path"],
@@ -412,10 +407,10 @@ def run_inference(config: dict) -> dict:
             "stride": int(config["stride"]),
             "hidden_size": int(config["hidden_size"]),
             "beta_threshold": float(config["beta_threshold"]),
-            "beta_source": "adaptive_p95" if config.get("use_adaptive_beta") else "fixed",
+            "beta_source": "adaptive_p95",
             "merge_all_anomaly_patches": bool(config.get("merge_all_anomaly_patches", False)),
             "gpr_background_removal": bool(config.get("gpr_background_removal", False)),
-            "background_removal_method": config.get("background_removal_method", "row_mean"),
+            "background_removal_method": config.get("background_removal_method", "both"),
             "top_k_preds": config.get("top_k_preds"),
         },
         "results": all_results,
@@ -427,17 +422,17 @@ def run_inference(config: dict) -> dict:
     total_detections = sum(len(r["pred_bboxes"]) for recs in all_results.values() for r in recs)
     print(f"\n结果保存至：{output_file}")
     print(f"处理图像数：{total_images}，检出框数：{total_detections}")
-    print("v14 全自动推理完成！")
+    print("v15 全自动推理完成！")
     return all_results
 
 
 if __name__ == "__main__":
     preflight_faiss_or_raise()
     _require_segment_anything()
-    CONFIG = apply_layout_to_config_02_03(dict(CONFIG), BASE_DIR, "v14")
-    CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v14", "feature_bank_v14.pth")
-    CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", "feature_banks_v14", "metadata.json")
-    CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", "predictions_v14")
-    CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", "checkpoints_v14")
+    CONFIG = apply_layout_to_config_02_03(dict(CONFIG), BASE_DIR, "v15")
+    CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v15", "feature_bank_v15.pth")
+    CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", "feature_banks_v15", "metadata.json")
+    CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", "predictions_v15")
+    CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", "checkpoints_v15")
     with torch.no_grad():
         run_inference(CONFIG)

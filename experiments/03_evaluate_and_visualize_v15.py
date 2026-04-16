@@ -1,5 +1,5 @@
 """
-Res-SAM v14 - 第 3 步：评估与可视化。
+Res-SAM v15 - 第 3 步：评估与可视化。
 
 论文优先口径：
 - 特征定义遵循 Eq.(3)/(8)：f=[W_out,b]
@@ -31,9 +31,9 @@ from sklearn.metrics import auc, roc_curve
 
 CONFIG = {
     "dataset_mode": DATASET_ENHANCED,
-    "predictions_path": os.path.join(BASE_DIR, "outputs", "predictions_v14", "auto_predictions_v14.json"),
-    "vis_output_dir": os.path.join(BASE_DIR, "outputs", "visualizations_v14"),
-    "analysis_output": os.path.join(BASE_DIR, "outputs", "visualizations_v14", "03_evaluate_and_visualize_v14_report.md"),
+    "predictions_path": os.path.join(BASE_DIR, "outputs", "predictions_v15", "auto_predictions_v15.json"),
+    "vis_output_dir": os.path.join(BASE_DIR, "outputs", "visualizations_v15"),
+    "analysis_output": os.path.join(BASE_DIR, "outputs", "visualizations_v15", "03_evaluate_and_visualize_v15_report.md"),
     "paper_reference": {
         "dataset_name": "论文 Table 2 参考结果（仅作论文外部对照）",
         "dataset_note": (
@@ -42,9 +42,9 @@ CONFIG = {
         ),
         "auto": {"Precision": 0.842, "Recall": 0.877, "F1": 0.859, "AUC": 0.832},
     },
-    "version": "v14",
+    "version": "v15",
     "alignment_notes": (
-        "Paper-first mainline (v14): Eq.(3)/(8) uses f=[W_out,b]; "
+        "Paper-first mainline (v15): Eq.(3)/(8) uses f=[W_out,b]; "
         "fb_source=augmented_intact, eval=augmented_intact + current annotated anomaly sets"
     ),
 }
@@ -265,7 +265,7 @@ def plot_region_auc_curve(results: dict, output_path: str) -> float | None:
     plt.plot([0, 1], [0, 1], "--", lw=1)
     plt.xlabel("False Positive Rate")
     plt.ylabel("True Positive Rate")
-    plt.title("Res-SAM v14 Region-level ROC")
+    plt.title("Res-SAM v15 Region-level ROC")
     plt.legend(loc="lower right")
     plt.grid(True, alpha=0.3)
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -278,7 +278,7 @@ def generate_comparison_table(metrics: dict, paper_reference: dict) -> str:
     dataset_name = paper_reference.get("dataset_name", "Paper reference")
     dataset_note = paper_reference.get("dataset_note", "")
     lines = [
-        "# Res-SAM v14 评估报告",
+        "# Res-SAM v15 评估报告",
         "",
         "## 数据映射说明",
         f"- 论文参考结果：{dataset_name}",
@@ -334,7 +334,7 @@ def generate_comparison_table(metrics: dict, paper_reference: dict) -> str:
 
 def main() -> None:
     print("=" * 60)
-    print("Res-SAM v14：评估与可视化")
+    print("Res-SAM v15：评估与可视化")
     print("dataset=single_annotated_dataset")
     print("=" * 60)
     os.makedirs(CONFIG["vis_output_dir"], exist_ok=True)
@@ -355,7 +355,7 @@ def main() -> None:
             thresh = int(k[3:]) / 10
             print(f"  IoU>{thresh:.1f}: TP={v['tp']} FP={v['fp']} FN={v['fn']} "
                   f"Prec={v['precision']:.3f} Rec={v['recall']:.3f} F1={v['f1']:.3f}")
-        region_auc = plot_region_auc_curve(results, os.path.join(CONFIG["vis_output_dir"], "region_roc_curve_v14.png"))
+        region_auc = plot_region_auc_curve(results, os.path.join(CONFIG["vis_output_dir"], "region_roc_curve_v15.png"))
         if region_auc is not None:
             print(f"Region-level AUC={region_auc:.4f}")
         if metrics.get("image_auc") is not None:
@@ -374,10 +374,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    CONFIG = apply_layout_to_config_04(dict(CONFIG), BASE_DIR, "v14")
+    CONFIG = apply_layout_to_config_04(dict(CONFIG), BASE_DIR, "v15")
     CONFIG["predictions_path"] = _to_abs(BASE_DIR, CONFIG.get("predictions_path", ""))
     CONFIG["vis_output_dir"] = _to_abs(BASE_DIR, CONFIG.get("vis_output_dir", ""))
     CONFIG["analysis_output"] = _to_abs(BASE_DIR, CONFIG.get("analysis_output", ""))
     main()
+
 
 

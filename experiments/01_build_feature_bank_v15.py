@@ -1,17 +1,25 @@
 """
-Res-SAM v14 - Step 1: build the feature bank.
+Res-SAM v15 - Step 1: build the feature bank.
 
-V14 相对 V13 的改进：
-1. 自适应 beta 校准（方案1）：
-   - 建库完成后，对 Feature Bank 所有 patch 计算 1-NN 距离分布
-   - 取 p95 作为自适应 beta，写入 metadata
-   - 解决 V13 粗筛丢弃率=0% 的问题（背景去除后固定 beta=0.1 变成全通）
-   - 推理脚本从 metadata 读取 adaptive_beta，不再使用固定值
+V15 相对 V14 的改进：
+1. 方案5：ESN hidden_size 30 → 100
+   - 特征维度从 61 增加到 201（含 bias）
+   - V14 诊断：TP 框 score 系统性低于 FP 框，ESN 判别能力不足
+   - 更高维度的 reservoir 有更强的特征表达能力，有望分离 TP/FP 分布
 
-继承 V13：
+2. 方案3：GPR 行列双向背景去除（row_mean + column_mean）
+   - V13/V14 只做行均值去除（水平条带）
+   - GPR B-scan 还有垂直方向的直达波（列方向强信号）
+   - 行列双向去除后特征更纯净
+
+继承 V13/V14：
 - 小样本分组采样（20张，按原始图ID分组）
-- PatchCore coreset（patch内部贪心去重，ratio=0.5）
-- GPR row_mean 背景去除
+- PatchCore coreset（patch内部贪心去重）
+- 自适应 beta 校准（p95 of 1-NN dists）
+
+放弃（V14 诊断证明无效）：
+- top-1 框过滤（TP score 低于 FP，top-1 永远不是 TP）
+- score 阈值过滤（TP/FP 分布完全混叠）
 """
 
 import sys
@@ -39,50 +47,46 @@ CONFIG = {
     "normal_data_sources": {
         "augmented_intact": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_intact"),
     },
-    "output_dir": os.path.join(BASE_DIR, "outputs", "feature_banks_v14"),
-    "output_file": "feature_bank_v14.pth",
+    "output_dir": os.path.join(BASE_DIR, "outputs", "feature_banks_v15"),
+    "output_file": "feature_bank_v15.pth",
     "metadata_file": "metadata.json",
-    # ESN 参数
+    # V15 方案5：hidden_size 30 → 100
     "window_size": 50,
     "stride": 5,
-    "hidden_size": 30,
-    # 小样本分组采样（继承 V13）
+    "hidden_size": 100,          # ← 核心改动，V13/V14 = 30
+    # 小样本分组采样（继承）
     "num_normal_samples": 20,
     "grouped_sampling": True,
-    # PatchCore coreset（继承 V13）
+    # PatchCore coreset（继承，max_size 随 hidden_size 增大而增大）
     "coreset_ratio": 0.5,
     "coreset_min_size": 500,
     "coreset_max_size": 5000,
-    # GPR 背景去除（继承 V13）
+    # V15 方案3：行列双向背景去除
     "gpr_background_removal": True,
-    "background_removal_method": "row_mean",
-    # V14 新增：自适应 beta 校准
-    "adaptive_beta_percentile": 95,   # 取 1-NN 距离分布的 p95 作为 beta
-    "adaptive_beta_scale": 1.0,       # 可选缩放因子，1.0 = 直接用 p95
-    # 其他参数
+    "background_removal_method": "both",  # ← 核心改动，V13/V14 = "row_mean"
+    # 自适应 beta（继承 V14）
+    "adaptive_beta_percentile": 95,
+    "adaptive_beta_scale": 1.0,
+    # 其他
     "resize_policy": RESIZE_POLICY_FIXED,
     "image_size": (369, 369),
     "device": "auto",
     "random_seed": 11,
-    "checkpoint_file": "checkpoint.json",
-    "version": "v14",
+    "version": "v15",
     "feature_with_bias": True,
     "alignment_notes": (
-        "v14: 分组采样(20张) + coreset + GPR背景去除 + 自适应beta(p95 of 1-NN dists) + top-1框; "
-        "解决V13粗筛丢弃率=0%问题"
+        "v15: hidden_size=100(↑from 30) + 行列双向背景去除 + 自适应beta + merge_all; "
+        "解决V14 TP/FP score混叠问题"
     ),
 }
 
 
 def _to_abs(base_dir: str, p: str) -> str:
-    if not p:
-        return p
-    if os.path.isabs(p):
-        return p
+    if not p: return p
+    if os.path.isabs(p): return p
     base_name = os.path.basename(base_dir)
     p_norm = os.path.normpath(p.replace("/", os.sep))
-    if p_norm.startswith("." + os.sep):
-        p_norm = p_norm[2:]
+    if p_norm.startswith("." + os.sep): p_norm = p_norm[2:]
     if p_norm == base_name or p_norm.startswith(base_name + os.sep):
         p_norm = p_norm[len(base_name) + 1:]
     return os.path.abspath(os.path.join(base_dir, p_norm))
@@ -93,15 +97,23 @@ def get_image_hash(path: str) -> str:
         return hashlib.md5(f.read()).hexdigest()[:8]
 
 
-def remove_gpr_background(img_array: np.ndarray, method: str = "row_mean") -> np.ndarray:
-    """GPR B-scan 背景去除"""
-    if method == "row_mean":
-        bg = img_array.mean(axis=1, keepdims=True)
-    elif method == "row_median":
-        bg = np.median(img_array, axis=1, keepdims=True)
-    else:
-        return img_array
-    result = img_array - bg
+def remove_gpr_background(img_array: np.ndarray, method: str = "both") -> np.ndarray:
+    """
+    GPR B-scan 背景去除。
+
+    method:
+        "row_mean"  : 减去每行均值（去水平条带）
+        "col_mean"  : 减去每列均值（去垂直直达波）
+        "both"      : 先减行均值，再减列均值（V15 新增）
+        "row_median": 减去每行中位数
+    """
+    result = img_array.copy().astype(np.float32)
+    if method in ("row_mean", "both"):
+        result = result - result.mean(axis=1, keepdims=True)
+    if method in ("col_mean", "both"):
+        result = result - result.mean(axis=0, keepdims=True)
+    if method == "row_median":
+        result = img_array - np.median(img_array, axis=1, keepdims=True)
     std = result.std()
     if std > 1e-8:
         result = result / std
@@ -136,7 +148,6 @@ def load_normal_images(data_dir: str, config: dict) -> tuple:
     else:
         indices = rng.choice(len(all_files), size=min(num_samples, len(all_files)), replace=False)
         selected = [all_files[i] for i in sorted(indices)]
-        print(f"  随机采样: {len(selected)} 张")
 
     target_hw = target_hw_for_preprocess(config, None)
     images, paths, hashes = [], [], []
@@ -149,7 +160,7 @@ def load_normal_images(data_dir: str, config: dict) -> tuple:
             arr = np.array(img, dtype=np.float32)
             arr = (arr - arr.mean()) / (arr.std() + 1e-8)
             if config.get("gpr_background_removal", False):
-                arr = remove_gpr_background(arr, config.get("background_removal_method", "row_mean"))
+                arr = remove_gpr_background(arr, config.get("background_removal_method", "both"))
             images.append(arr)
             paths.append(img_path)
             hashes.append(get_image_hash(img_path))
@@ -177,45 +188,26 @@ def greedy_coreset_sampling(features: np.ndarray, target_size: int, seed: int = 
 
 
 def compute_adaptive_beta(features: np.ndarray, percentile: int = 95, scale: float = 1.0) -> float:
-    """
-    V14 核心：自适应 beta 校准。
-
-    对 Feature Bank 中每个 patch，计算它到其余所有 patch 的最小 L2 距离（1-NN 距离）。
-    取这些距离的 p{percentile} 作为 beta 阈值。
-
-    原理：
-    - Feature Bank 内部的 1-NN 距离反映了"正常 patch 之间的典型距离"
-    - 推理时，异常 patch 到 Feature Bank 的距离应该显著大于这个值
-    - 用 p95 作为阈值，意味着只有距离超过 95% 的正常 patch 间距的 patch 才被判为异常
-    - 这个阈值会随 Feature Bank 的实际分布自动调整，不受背景去除等预处理影响
-    """
+    """计算 Feature Bank 1-NN 距离的 p{percentile} 作为自适应 beta"""
     n = features.shape[0]
-    print(f"  计算 Feature Bank 1-NN 距离分布（n={n}）...")
-
-    # 分批计算避免内存溢出
+    print(f"  计算 1-NN 距离分布（n={n}）...")
     batch_size = 256
     nn_dists = np.zeros(n, dtype=np.float32)
     for i in tqdm(range(0, n, batch_size), desc="  1-NN 距离"):
-        batch = features[i:i + batch_size]  # (B, D)
-        # 计算 batch 中每个点到所有点的距离
-        diffs = batch[:, None, :] - features[None, :, :]  # (B, N, D)
-        dists = np.sum(diffs ** 2, axis=2)  # (B, N)
-        # 排除自身（距离=0）
+        batch = features[i:i + batch_size]
+        diffs = batch[:, None, :] - features[None, :, :]
+        dists = np.sum(diffs ** 2, axis=2)
         for j in range(len(batch)):
-            global_idx = i + j
-            dists[j, global_idx] = np.inf
+            dists[j, i + j] = np.inf
         nn_dists[i:i + batch_size] = dists.min(axis=1)
-
-    nn_dists_sqrt = np.sqrt(nn_dists)  # 转为 L2 距离
+    nn_dists_sqrt = np.sqrt(nn_dists)
     beta = float(np.percentile(nn_dists_sqrt, percentile)) * scale
-
-    print(f"  1-NN 距离统计: mean={nn_dists_sqrt.mean():.4f} "
-          f"p50={np.percentile(nn_dists_sqrt, 50):.4f} "
-          f"p90={np.percentile(nn_dists_sqrt, 90):.4f} "
-          f"p95={np.percentile(nn_dists_sqrt, 95):.4f} "
-          f"p99={np.percentile(nn_dists_sqrt, 99):.4f}")
-    print(f"  自适应 beta (p{percentile} × {scale}) = {beta:.4f}  "
-          f"（V13 固定值 = {DEFAULT_BETA_THRESHOLD}）")
+    print(f"  1-NN 距离: mean={nn_dists_sqrt.mean():.4f} "
+          f"p50={np.percentile(nn_dists_sqrt,50):.4f} "
+          f"p90={np.percentile(nn_dists_sqrt,90):.4f} "
+          f"p95={np.percentile(nn_dists_sqrt,95):.4f} "
+          f"p99={np.percentile(nn_dists_sqrt,99):.4f}")
+    print(f"  自适应 beta = {beta:.4f}  (V13/V14 固定值 = {DEFAULT_BETA_THRESHOLD})")
     return beta
 
 
@@ -224,13 +216,12 @@ def build_feature_bank(config: dict):
     torch.manual_seed(config["random_seed"])
 
     print("=" * 60)
-    print("Res-SAM v14：Feature Bank 构建")
+    print("Res-SAM v15：Feature Bank 构建")
     print("=" * 60)
-    print(f"  window_size = {config['window_size']}")
-    print(f"  stride      = {config['stride']}")
-    print(f"  hidden_size = {config['hidden_size']}")
-    print(f"  coreset_ratio = {config['coreset_ratio']}")
-    print(f"  gpr_background_removal = {config.get('gpr_background_removal')}")
+    print(f"  hidden_size              = {config['hidden_size']}  (V14=30)")
+    print(f"  window_size              = {config['window_size']}")
+    print(f"  stride                   = {config['stride']}")
+    print(f"  background_removal       = {config.get('background_removal_method')}  (V14=row_mean)")
     print(f"  adaptive_beta_percentile = {config.get('adaptive_beta_percentile')}")
     print("=" * 60)
 
@@ -239,7 +230,7 @@ def build_feature_bank(config: dict):
 
     from PatchRes.ResSAM import ResSAM
 
-    print("\n初始化 ResSAM (v14)...")
+    print("\n初始化 ResSAM (v15)...")
     model = ResSAM(
         hidden_size=config["hidden_size"],
         window_size=config["window_size"],
@@ -248,11 +239,13 @@ def build_feature_bank(config: dict):
         feature_with_bias=bool(config.get("feature_with_bias", True)),
         device=config.get("device", "auto"),
     )
+    feat_dim = config["hidden_size"] + (1 if config.get("feature_with_bias") else 0)
+    print(f"  ESN 特征维度: {feat_dim}  (V14={30 + 1})")
 
     all_metadata = {
         "config": {k: v for k, v in config.items() if not callable(v)},
         "creation_time": datetime.now().isoformat(),
-        "version": "v14",
+        "version": "v15",
         "alignment_notes": config.get("alignment_notes", ""),
         "sources": {},
     }
@@ -263,14 +256,12 @@ def build_feature_bank(config: dict):
         if not os.path.exists(source_dir):
             print(f"警告: 目录不存在: {source_dir}")
             continue
-
         images, paths, hashes = load_normal_images(source_dir, config)
         all_metadata["sources"][source_name] = {
             "directory": source_dir,
             "num_images": len(images),
             "image_hashes": hashes[:20],
         }
-
         print(f"\n提取 {len(images)} 张图像的 patch 特征...")
         for img in tqdm(images, desc="  提取特征"):
             patches = model._extract_patches(img)
@@ -285,7 +276,6 @@ def build_feature_bank(config: dict):
     all_features = np.concatenate(all_features_list, axis=0).astype(np.float32)
     print(f"\n全量特征: {all_features.shape}")
 
-    # PatchCore coreset 采样
     target_size = max(
         config["coreset_min_size"],
         min(config["coreset_max_size"],
@@ -295,7 +285,6 @@ def build_feature_bank(config: dict):
     coreset_features = all_features[coreset_indices]
     print(f"Coreset 特征: {coreset_features.shape}")
 
-    # V14 核心：自适应 beta 校准
     print("\n--- 自适应 beta 校准 ---")
     adaptive_beta = compute_adaptive_beta(
         coreset_features,
@@ -303,38 +292,38 @@ def build_feature_bank(config: dict):
         scale=config.get("adaptive_beta_scale", 1.0),
     )
 
-    # 写入 Feature Bank
     model.feature_bank = torch.from_numpy(coreset_features).to(model.device)
     model.anomaly_scorer.fit([coreset_features])
     model._init_nn_searcher(coreset_features)
     model.save_feature_bank(output_path)
-    print(f"\nFeature Bank v14 保存至: {output_path}")
+    print(f"\nFeature Bank v15 保存至: {output_path}")
 
-    all_metadata["feature_bank_shape"] = list(coreset_features.shape)
-    all_metadata["feature_bank_path"] = output_path
-    all_metadata["total_patches_before_coreset"] = int(all_features.shape[0])
-    all_metadata["coreset_size"] = int(coreset_features.shape[0])
-    all_metadata["coreset_ratio_actual"] = float(coreset_features.shape[0] / all_features.shape[0])
-    # V14 新增：写入自适应 beta
-    all_metadata["adaptive_beta"] = float(adaptive_beta)
-    all_metadata["adaptive_beta_percentile"] = int(config.get("adaptive_beta_percentile", 95))
-    all_metadata["fixed_beta_v13"] = float(DEFAULT_BETA_THRESHOLD)
+    all_metadata.update({
+        "feature_bank_shape": list(coreset_features.shape),
+        "feature_bank_path": output_path,
+        "total_patches_before_coreset": int(all_features.shape[0]),
+        "coreset_size": int(coreset_features.shape[0]),
+        "coreset_ratio_actual": float(coreset_features.shape[0] / all_features.shape[0]),
+        "adaptive_beta": float(adaptive_beta),
+        "adaptive_beta_percentile": int(config.get("adaptive_beta_percentile", 95)),
+        "fixed_beta_legacy": float(DEFAULT_BETA_THRESHOLD),
+    })
 
     metadata_path = os.path.join(config["output_dir"], config["metadata_file"])
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(all_metadata, f, indent=2, ensure_ascii=False)
     print(f"元数据保存至: {metadata_path}")
-    print(f"\n自适应 beta = {adaptive_beta:.4f}（推理脚本将自动读取）")
+    print(f"自适应 beta = {adaptive_beta:.4f}")
 
     return torch.from_numpy(coreset_features)
 
 
 if __name__ == "__main__":
     preflight_faiss_or_raise()
-    CONFIG = apply_layout_to_config_01(dict(CONFIG), BASE_DIR, "v14")
-    CONFIG["version"] = "v14"
-    CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v14")
-    CONFIG["output_file"] = "feature_bank_v14.pth"
+    CONFIG = apply_layout_to_config_01(dict(CONFIG), BASE_DIR, "v15")
+    CONFIG["version"] = "v15"
+    CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v15")
+    CONFIG["output_file"] = "feature_bank_v15.pth"
     CONFIG["normal_data_sources"] = {
         "augmented_intact": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_intact")
     }
