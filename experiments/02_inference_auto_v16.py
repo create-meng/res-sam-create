@@ -83,7 +83,7 @@ CONFIG = {
     # v16：hidden_size 与建库一致
     "window_size": 50,
     "stride": 5,
-    "hidden_size": 100,              # ← 与 01_build_feature_bank_v16.py 一致
+    "hidden_size": 30,              # ← 与 01_build_feature_bank_v16.py 一致（V15-B 最优）
     # beta 从 metadata 读取
     "beta_threshold": DEFAULT_BETA_THRESHOLD,
     "use_adaptive_beta": True,
@@ -108,8 +108,8 @@ CONFIG = {
     "feature_with_bias": True,
     "automatic_fine_use_mask": True,
     "alignment_notes": (
-        "v16: hidden_size=100 + 行列双向背景去除(both) + 自适应beta + merge_all; "
-        "解决V14 TP/FP score混叠问题"
+        "v16: hidden_size=30 + 行列双向背景去除(both) + 验证集驱动beta校准 + merge_all; "
+        "解决V15 100%粗筛丢弃率问题"
     ),
 }
 
