@@ -65,6 +65,9 @@ CONFIG = {
     "coreset_ratio": 0.5,
     "coreset_min_size": 500,
     "coreset_max_size": 5000,
+    # V17 方案 4：多尺度 Memory Bank
+    "use_multiscale_memory": True,  # 启用多尺度 Memory Bank
+    "local_memory_per_group": 50,   # 每个原始图组的局部 Memory Bank 大小
     # GPR 行列双向背景去除
     "gpr_background_removal": True,
     "background_removal_method": "both",  # V16 最优
@@ -238,6 +241,67 @@ def greedy_coreset_sampling(features: np.ndarray, target_size: int, seed: int = 
     return np.array(selected, dtype=np.int64)
 
 
+def build_multiscale_memory_bank(
+    all_features: np.ndarray,
+    image_ids: list,
+    config: dict
+) -> dict:
+    """
+    V17 方案 4：构建多尺度 Memory Bank
+    
+    理论依据：论文 "Multimodal Task Representation Memory Bank vs. Catastrophic Forgetting in Anomaly Detection"
+    
+    Returns:
+        {
+            'global_memory': np.ndarray,  # 全局 Memory Bank
+            'local_memories': dict,       # 局部 Memory Bank {group_id: features}
+        }
+    """
+    print("\n=== 构建多尺度 Memory Bank ===")
+    
+    # 1. 全局 Memory Bank：从所有特征中 coreset 采样
+    global_target_size = max(
+        config["coreset_min_size"],
+        min(config["coreset_max_size"],
+            int(all_features.shape[0] * config["coreset_ratio"]))
+    )
+    global_indices = greedy_coreset_sampling(all_features, global_target_size, seed=config["random_seed"])
+    global_memory = all_features[global_indices]
+    print(f"  全局 Memory Bank: {global_memory.shape}")
+    
+    # 2. 局部 Memory Bank：针对每个原始图 ID 分组采样
+    local_memories = {}
+    groups = {}
+    
+    # 按 image_id 分组
+    for i, img_id in enumerate(image_ids):
+        groups.setdefault(img_id, []).append(i)
+    
+    print(f"  构建局部 Memory Bank: {len(groups)} 个组")
+    local_per_group = config.get("local_memory_per_group", 50)
+    
+    for group_id, indices in tqdm(groups.items(), desc="  局部 Memory"):
+        group_features = all_features[indices]
+        
+        # 如果该组特征数量少于目标，全部保留
+        if len(group_features) <= local_per_group:
+            local_memories[group_id] = group_features
+        else:
+            # 否则进行 coreset 采样
+            local_indices = greedy_coreset_sampling(
+                group_features, local_per_group, seed=config["random_seed"]
+            )
+            local_memories[group_id] = group_features[local_indices]
+    
+    total_local = sum(len(m) for m in local_memories.values())
+    print(f"  局部 Memory Bank 总计: {total_local} patches")
+    
+    return {
+        'global_memory': global_memory,
+        'local_memories': local_memories,
+    }
+
+
 def calibrate_beta_with_validation(model, feature_bank_np, val_split, config: dict) -> dict:
     """
     V17 核心：用验证集（正常+异常）校准 beta（继承 V16）
@@ -281,7 +345,7 @@ def calibrate_beta_with_validation(model, feature_bank_np, val_split, config: di
         if patches.shape[0] == 0:
             continue
         features = model._fit_patches(patches).detach().cpu().numpy()
-        scores = model._score_features_against_bank(features)
+        scores = model._score_features_multiscale(features, image_id=None)
         normal_scores.extend(scores.tolist())
     
     print("  计算异常验证集 scores...")
@@ -291,7 +355,7 @@ def calibrate_beta_with_validation(model, feature_bank_np, val_split, config: di
         if patches.shape[0] == 0:
             continue
         features = model._fit_patches(patches).detach().cpu().numpy()
-        scores = model._score_features_against_bank(features)
+        scores = model._score_features_multiscale(features, image_id=None)
         anomaly_scores.extend(scores.tolist())
     
     normal_scores = np.array(normal_scores)
@@ -424,13 +488,20 @@ def build_feature_bank(config: dict):
     )
     
     all_features_list = []
+    image_ids_list = []  # V17: 记录每个 patch 对应的 image_id
     print(f"\n提取 {len(images)} 张图像的 patch 特征...")
-    for img in tqdm(images, desc="  提取特征"):
+    for i, img in enumerate(tqdm(images, desc="  提取特征")):
+        img_file = os.path.basename(paths[i])
+        img_id = _get_original_id(img_file)
+        
         patches = model._extract_patches(img)
         if patches.shape[0] == 0:
             continue
         feats = model._fit_patches(patches)
         all_features_list.append(feats.detach().cpu().numpy())
+        
+        # V17: 记录每个 patch 对应的 image_id
+        image_ids_list.extend([img_id] * patches.shape[0])
 
     if not all_features_list:
         raise RuntimeError("没有提取到任何特征")
@@ -448,6 +519,13 @@ def build_feature_bank(config: dict):
     coreset_features = all_features[coreset_indices]
     print(f"Coreset 特征: {coreset_features.shape}")
 
+    # 4.5. V17 方案 4：构建多尺度 Memory Bank
+    multiscale_memory = None
+    if config.get("use_multiscale_memory", False):
+        # image_ids_list 已经在特征提取时构建好了
+        multiscale_memory = build_multiscale_memory_bank(all_features, image_ids_list, config)
+        print(f"多尺度 Memory Bank 构建完成")
+
     # 5. 初始化 Feature Bank（用于验证集校准）
     model.feature_bank = torch.from_numpy(coreset_features).to(model.device)
     model.anomaly_scorer.fit([coreset_features])
@@ -456,7 +534,15 @@ def build_feature_bank(config: dict):
     # 6. V17 核心：验证集驱动的 beta 校准（继承 V16，扩展候选值）
     beta_result = calibrate_beta_with_validation(model, coreset_features, val_split, config)
     
-    # 7. 保存 Feature Bank
+    # 7. 保存 Feature Bank（包含多尺度 Memory Bank）
+    if multiscale_memory is not None:
+        # 将多尺度 Memory Bank 保存到模型中
+        model.global_memory_bank = torch.from_numpy(multiscale_memory['global_memory']).to(model.device)
+        model.local_memory_banks = {
+            k: torch.from_numpy(v).to(model.device)
+            for k, v in multiscale_memory['local_memories'].items()
+        }
+    
     model.save_feature_bank(output_path)
     print(f"\nFeature Bank v17 保存至: {output_path}")
 
@@ -483,6 +569,13 @@ def build_feature_bank(config: dict):
             "stats": beta_result['val_stats'],
         },
         "fixed_beta_legacy": float(DEFAULT_BETA_THRESHOLD),
+        # V17 方案 4：多尺度 Memory Bank 信息
+        "multiscale_memory": {
+            "enabled": config.get("use_multiscale_memory", False),
+            "global_memory_shape": list(multiscale_memory['global_memory'].shape) if multiscale_memory else None,
+            "num_local_groups": len(multiscale_memory['local_memories']) if multiscale_memory else 0,
+            "local_memory_per_group": config.get("local_memory_per_group", 50),
+        } if multiscale_memory else {"enabled": False},
         "sources": {
             "augmented_intact": {
                 "directory": normal_dir,

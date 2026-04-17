@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 V17 评估脚本
-评估后处理过滤（置信度+NMS+top-1）的效果
+评估所有改进的综合效果（Pixel-level Heatmap + 后处理过滤）
 """
 from __future__ import print_function
 import json
@@ -153,7 +153,7 @@ if __name__ == '__main__':
         sys.exit(1)
     
     print("=" * 80)
-    print("V17 评估结果（后处理过滤）")
+    print("V17 评估结果（所有改进一次性实现）")
     print("=" * 80)
     
     res = evaluate_v17(pred_path, meta_path)
@@ -170,7 +170,11 @@ if __name__ == '__main__':
     print("  特征维度 = {}".format(res['meta']['feature_bank_shape'][1]))
     
     # V17 后处理参数
-    print("\nV17 后处理参数:")
+    print("\nV17 核心改进参数:")
+    print("  use_pixel_heatmap = {}".format(res['pred_meta'].get('use_pixel_heatmap')))
+    if res['pred_meta'].get('use_pixel_heatmap'):
+        print("  heatmap_beta_normalized = {}".format(res['pred_meta'].get('heatmap_beta_normalized')))
+        print("  heatmap_min_area = {}".format(res['pred_meta'].get('heatmap_min_area')))
     print("  confidence_percentile = {}".format(res['pred_meta'].get('confidence_percentile')))
     print("  nms_iou_threshold = {}".format(res['pred_meta'].get('nms_iou_threshold')))
     print("  top_k_per_image = {}".format(res['pred_meta'].get('top_k_per_image')))

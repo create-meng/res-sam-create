@@ -2,11 +2,17 @@
 Res-SAM v17 - Step 2: fully automatic inference with all improvements.
 
 V17 相对 V16 的核心改进（一次性实现所有改进）：
-1. 后处理过滤：
+1. Pixel-level Heatmap Bbox 生成：
+   - 在候选区域内生成 pixel-level heatmap
+   - 对 heatmap 归一化到 [0,1]
+   - 用归一化后的 beta 阈值化
+   - 取外接矩形作为最终 bbox
+   - 解决 pred 框太小的问题（74px → 接近 GT 224px）
+2. 后处理过滤：
    - 置信度过滤：只保留 score > percentile(scores, 80) 的框
    - NMS：IoU > 0.5 的重叠框只保留最高分的
    - Top-1：每张图只保留最高分的 1 个框
-2. 可选：Pixel-level Heatmap Bbox 生成（实验对比）
+   - 减少 FP，提升 Precision
 
 继承 V16 最优配置：
 - hidden_size = 30
@@ -15,9 +21,8 @@ V17 相对 V16 的核心改进（一次性实现所有改进）：
 - 验证集驱动的 beta 校准（从 metadata 读取）
 
 预期效果：
-- FP 从 170 减少到 50-80
-- Precision 从 0.056 提升到 0.10-0.15
-- F1 从 0.083 提升到 0.12-0.15
+- 短期（后处理过滤）：FP 从 170 减少到 50-80，Precision 从 0.056 提升到 0.10-0.15，F1 从 0.083 提升到 0.12-0.15
+- 中期（Pixel-level Heatmap）：cavities TP 从 10 提升到 20-30，F1 从 0.12-0.15 提升到 0.25-0.35
 """
 
 from __future__ import annotations
@@ -104,8 +109,8 @@ CONFIG = {
     "confidence_percentile": 80,  # 只保留 score > percentile(scores, 80) 的框
     "nms_iou_threshold": 0.5,     # NMS IoU 阈值
     "top_k_per_image": 1,         # 每张图只保留 top-1 框
-    # V17 实验选项：是否使用 pixel-level heatmap
-    "use_pixel_heatmap": False,   # 默认 False，使用原有 patch 合并方式
+    # V17 核心改进：pixel-level heatmap bbox 生成
+    "use_pixel_heatmap": True,    # 使用 pixel-level heatmap 生成 bbox
     "heatmap_beta_normalized": 0.5,  # heatmap 归一化阈值（0-1）
     "heatmap_min_area": 100,      # heatmap bbox 最小面积
     # SAM
@@ -335,16 +340,18 @@ def run_inference(config: dict) -> dict:
     config["beta_threshold"] = effective_beta
 
     print("=" * 60)
-    print("Res-SAM v17：全自动推理（后处理过滤）")
+    print("Res-SAM v17：全自动推理（所有改进一次性实现）")
     print("=" * 60)
     print(f"  hidden_size               = {config['hidden_size']}")
     print(f"  beta_threshold (adaptive) = {config['beta_threshold']:.4f}")
     print(f"  background_removal        = {config.get('background_removal_method')}")
     print(f"  merge_all                 = {config.get('merge_all_anomaly_patches')}")
+    print(f"  --- V17 核心改进 ---")
+    print(f"  use_pixel_heatmap         = {config.get('use_pixel_heatmap')}")
+    print(f"  heatmap_beta_normalized   = {config.get('heatmap_beta_normalized')}")
     print(f"  confidence_percentile     = {config.get('confidence_percentile')}")
     print(f"  nms_iou_threshold         = {config.get('nms_iou_threshold')}")
     print(f"  top_k_per_image           = {config.get('top_k_per_image')}")
-    print(f"  use_pixel_heatmap         = {config.get('use_pixel_heatmap')}")
     print("=" * 60)
 
     if not os.path.exists(config["feature_bank_path"]):
@@ -427,15 +434,52 @@ def run_inference(config: dict) -> dict:
                     orig_w, orig_h, img = load_image_with_orig_size(img_path, target_hw, config)
                     proc_h, proc_w = int(img.shape[0]), int(img.shape[1])
 
+                    # V17 方案 4：提取 image_id 用于多尺度 Memory Bank
+                    import re
+                    img_basename = os.path.splitext(img_file)[0]
+                    # 提取原始图 ID（去除 _aug_N 后缀）
+                    match = re.match(r'^(.+?)_aug_\d+$', img_basename)
+                    image_id = match.group(1) if match else img_basename
+
                     result = model.detect_automatic(
                         img,
                         min_region_area=config["min_region_area"],
                         max_regions=config["max_candidates_per_image"],
+                        image_id=image_id,
                     )
 
-                    pred_bboxes_resized = [r["bbox"] for r in result.get("anomaly_regions", [])]
-                    anomaly_scores = [r.get("max_anomaly_score", 0.0)
-                                      for r in result.get("anomaly_regions", [])]
+                    # V17 核心改进：使用 pixel-level heatmap 生成 bbox
+                    if config.get("use_pixel_heatmap", False):
+                        # 对每个候选区域生成 pixel-level heatmap
+                        pred_bboxes_resized = []
+                        anomaly_scores = []
+                        
+                        for region in result.get("anomaly_regions", []):
+                            region_bbox = region["bbox"]
+                            region_mask = region.get("mask")
+                            
+                            # 生成 heatmap
+                            heatmap = model.generate_pixel_heatmap(
+                                img, region_bbox, region_mask, image_id=image_id
+                            )
+                            
+                            # 从 heatmap 生成 bbox
+                            heatmap_bboxes = model.heatmap_to_bbox(
+                                heatmap,
+                                beta_normalized=config.get("heatmap_beta_normalized", 0.5),
+                                min_area=config.get("heatmap_min_area", 100),
+                            )
+                            
+                            # 为每个 bbox 分配分数（使用原始区域的最大分数）
+                            region_score = region.get("max_anomaly_score", 0.0)
+                            for bbox in heatmap_bboxes:
+                                pred_bboxes_resized.append(bbox)
+                                anomaly_scores.append(region_score)
+                    else:
+                        # 使用原有的 patch 合并方式
+                        pred_bboxes_resized = [r["bbox"] for r in result.get("anomaly_regions", [])]
+                        anomaly_scores = [r.get("max_anomaly_score", 0.0)
+                                          for r in result.get("anomaly_regions", [])]
 
                     # V17 核心改进：后处理过滤
                     pred_bboxes_resized, anomaly_scores = apply_v17_postprocessing(
@@ -533,11 +577,13 @@ def run_inference(config: dict) -> dict:
             "merge_all_anomaly_patches": bool(config.get("merge_all_anomaly_patches", False)),
             "gpr_background_removal": bool(config.get("gpr_background_removal", False)),
             "background_removal_method": config.get("background_removal_method", "both"),
-            # V17 后处理参数
+            # V17 核心改进参数
+            "use_pixel_heatmap": config.get("use_pixel_heatmap"),
+            "heatmap_beta_normalized": config.get("heatmap_beta_normalized"),
+            "heatmap_min_area": config.get("heatmap_min_area"),
             "confidence_percentile": config.get("confidence_percentile"),
             "nms_iou_threshold": config.get("nms_iou_threshold"),
             "top_k_per_image": config.get("top_k_per_image"),
-            "use_pixel_heatmap": config.get("use_pixel_heatmap"),
         },
         "results": all_results,
     }

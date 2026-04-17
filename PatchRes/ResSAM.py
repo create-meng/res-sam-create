@@ -173,6 +173,11 @@ class ResSAM:
         # Feature Bank
         self.feature_bank = None
         self.feature_bank_source = None  # 记录来源
+        
+        # V17 方案 4：多尺度 Memory Bank
+        self.global_memory_bank = None  # 全局 Memory Bank
+        self.local_memory_banks = None  # 局部 Memory Bank {group_id: features}
+        self.use_multiscale_scoring = False  # 是否启用多尺度评分
 
         self._beta_calibrated = False
 
@@ -300,7 +305,7 @@ class ResSAM:
         return self.feature_bank
 
     def load_feature_bank(self, path: str):
-        """加载预存的 Feature Bank（支持 v2 捆绑包：特征 + ESN state_dict；兼容旧版仅张量）。"""
+        """加载预存的 Feature Bank（支持 v2 捆绑包：特征 + ESN state_dict + 多尺度 Memory Bank；兼容旧版仅张量）。"""
         # 先加载到 CPU，再把张量迁到目标设备；ESN 权重通过 load_state_dict 写入当前模块。
         try:
             raw = torch.load(path, map_location="cpu", weights_only=False)
@@ -336,8 +341,21 @@ class ResSAM:
                     logger_fb.warning("Original load_state_dict error: %s", str(e))
                 except Exception:
                     pass
+            
+            # V17 方案 4：加载多尺度 Memory Bank
+            if "global_memory_bank" in raw and "local_memory_banks" in raw:
+                self.global_memory_bank = raw["global_memory_bank"].to(self.device)
+                self.local_memory_banks = {
+                    k: v.to(self.device) for k, v in raw["local_memory_banks"].items()
+                }
+                self.use_multiscale_scoring = True
+                print(f"  [V17] 多尺度 Memory Bank 已加载：全局 {self.global_memory_bank.shape}，局部 {len(self.local_memory_banks)} 组")
+            else:
+                self.use_multiscale_scoring = False
+                
         elif isinstance(raw, torch.Tensor):
             self.feature_bank = raw.to(self.device)
+            self.use_multiscale_scoring = False
             logger_fb = logging.getLogger(__name__)
             msg = (
                 "[FeatureBank] Legacy tensor-only file (no ESN weights in file). "
@@ -364,12 +382,13 @@ class ResSAM:
             logger = logging.getLogger(__name__)
             nn_backend = str(getattr(self, "nn_backend", "unknown"))
             msg = (
-                "[INIT] device=%s nn_backend=%s feature_bank_shape=%s feature_dim=%s"
+                "[INIT] device=%s nn_backend=%s feature_bank_shape=%s feature_dim=%s multiscale=%s"
                 % (
                     str(getattr(self, "device", "unknown")),
                     nn_backend,
                     str(tuple(getattr(self.feature_bank, "shape", ()))),
                     str(int(feature_bank_np.shape[1]) if (hasattr(feature_bank_np, "shape") and len(feature_bank_np.shape) > 1) else "unknown"),
+                    str(self.use_multiscale_scoring),
                 )
             )
             print(msg, flush=True)
@@ -441,14 +460,25 @@ class ResSAM:
         self.nn_backend = backend
     
     def save_feature_bank(self, path: str):
-        """保存 Feature Bank：v2 捆绑包含 2D-ESN 权重，推理时与建库阶段同一水库（对齐官方仅存向量的不足）。"""
+        """保存 Feature Bank：v2 捆绑包含 2D-ESN 权重 + 多尺度 Memory Bank，推理时与建库阶段同一水库（对齐官方仅存向量的不足）。"""
         bundle = {
             "format": FEATURE_BANK_BUNDLE_FORMAT,
             "feature_bank": self.feature_bank.detach().cpu(),
             "esn_state_dict": {k: v.detach().cpu() for k, v in self.esn.state_dict().items()},
         }
+        
+        # V17 方案 4：保存多尺度 Memory Bank
+        if hasattr(self, 'global_memory_bank') and self.global_memory_bank is not None:
+            bundle["global_memory_bank"] = self.global_memory_bank.detach().cpu()
+        if hasattr(self, 'local_memory_banks') and self.local_memory_banks is not None:
+            bundle["local_memory_banks"] = {
+                k: v.detach().cpu() for k, v in self.local_memory_banks.items()
+            }
+        
         torch.save(bundle, path)
         print(f"Feature Bank bundle ({FEATURE_BANK_BUNDLE_FORMAT}) saved to {path}")
+        if "global_memory_bank" in bundle:
+            print(f"  [V17] 多尺度 Memory Bank 已保存：全局 + {len(bundle.get('local_memory_banks', {}))} 个局部组")
     
     def _extract_patches(self, image: np.ndarray) -> torch.Tensor:
         """
@@ -573,6 +603,65 @@ class ResSAM:
         xq = _np.ascontiguousarray(features_np.astype(_np.float32, copy=False))
         dists, _ = self.nn_searcher.search(xq, 1)
         return _np.sqrt(_np.maximum(dists.reshape(-1), 0.0)).astype(_np.float32, copy=False)
+    
+    def _score_features_multiscale(
+        self,
+        features_np: np.ndarray,
+        image_id: Optional[str] = None,
+    ) -> np.ndarray:
+        """
+        V17 方案 4：使用多尺度 Memory Bank 进行异常评分
+        
+        理论依据：论文 "Multimodal Task Representation Memory Bank vs. Catastrophic Forgetting in Anomaly Detection"
+        
+        方法：
+        1. 计算特征与全局 Memory Bank 的距离
+        2. 如果有对应的局部 Memory Bank，计算与局部 Memory Bank 的距离
+        3. 取两者的最小值作为最终分数（双重判别）
+        
+        Parameters:
+        -----------
+        features_np : np.ndarray
+            特征数组 [N, D]
+        image_id : Optional[str]
+            图像 ID（用于查找对应的局部 Memory Bank）
+            
+        Returns:
+        --------
+        np.ndarray
+            异常分数 [N]
+        """
+        if not self.use_multiscale_scoring or self.global_memory_bank is None:
+            # 退化为单一 Feature Bank 评分
+            return self._score_features_against_bank(features_np)
+        
+        if features_np is None or getattr(features_np, "size", 0) == 0:
+            return np.zeros((0,), dtype=np.float32)
+        
+        # 1. 全局 Memory Bank 评分
+        global_memory_np = self.global_memory_bank.detach().cpu().numpy()
+        
+        # 使用 L2 距离计算
+        features_tensor = torch.from_numpy(features_np).to(self.device)
+        global_memory_tensor = self.global_memory_bank.to(self.device)
+        
+        # 计算距离矩阵 [N, M]
+        dists_global = torch.cdist(features_tensor, global_memory_tensor, p=2)
+        # 取最小距离 [N]
+        scores_global = torch.min(dists_global, dim=1)[0].detach().cpu().numpy()
+        
+        # 2. 局部 Memory Bank 评分（如果有）
+        if image_id and self.local_memory_banks and image_id in self.local_memory_banks:
+            local_memory_tensor = self.local_memory_banks[image_id].to(self.device)
+            dists_local = torch.cdist(features_tensor, local_memory_tensor, p=2)
+            scores_local = torch.min(dists_local, dim=1)[0].detach().cpu().numpy()
+            
+            # 3. 取最小值（双重判别：正常特征应该与全局或局部 Memory Bank 都接近）
+            scores = np.minimum(scores_global, scores_local)
+        else:
+            scores = scores_global
+        
+        return scores.astype(np.float32)
 
     def _collect_candidate_patches(
         self,
@@ -742,6 +831,7 @@ class ResSAM:
         min_region_area: Optional[int] = None,
         max_regions: Optional[int] = None,
         return_all_candidates: bool = False,
+        image_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Fully Automatic 模式异常检测（论文 Page 10-11）
@@ -770,6 +860,8 @@ class ResSAM:
             这是可选工程截断；若为 None，则不对 retained/final regions 施加固定上限。
         return_all_candidates : bool
             是否返回所有候选区域
+        image_id : Optional[str]
+            图像 ID（用于多尺度 Memory Bank 评分）
             
         Returns:
         --------
@@ -828,14 +920,14 @@ class ResSAM:
                 patches_tensor = self._patch_list_to_tensor(patches_np)
                 features = self._fit_patches(patches_tensor)
                 features_np = features.detach().cpu().numpy()
-                region_scores = self._score_features_against_bank(features_np)
+                region_scores = self._score_features_multiscale(features_np, image_id=image_id)
                 region_num_features = int(region_scores.shape[0])
             else:
                 # Paper-first automatic mode: discriminate the SAM region itself
                 # before converting it to a candidate rectangle.
                 region_feature = self._extract_region_feature(image, bbox, mask)
                 region_feature_np = region_feature.detach().cpu().numpy()
-                region_scores = self._score_features_against_bank(region_feature_np)
+                region_scores = self._score_features_multiscale(region_feature_np, image_id=image_id)
                 if region_scores.size == 0:
                     if debug_coarse:
                         print(
@@ -910,7 +1002,7 @@ class ResSAM:
             patches_tensor = self._patch_list_to_tensor(patches_np)
             features = self._fit_patches(patches_tensor)
             features_np = features.detach().cpu().numpy()
-            scores = self._score_features_against_bank(features_np)
+            scores = self._score_features_multiscale(features_np, image_id=image_id)
 
             if len(patch_positions) == 0:
                 continue
@@ -1103,6 +1195,7 @@ class ResSAM:
         image: np.ndarray,
         bbox: List[int],
         mask: Optional[np.ndarray] = None,
+        image_id: Optional[str] = None,
     ) -> np.ndarray:
         """
         V17: 生成 pixel-level heatmap（替代 patch 合并）
@@ -1166,7 +1259,7 @@ class ResSAM:
         patches_tensor = self._patch_list_to_tensor(patches_list)
         features = self._fit_patches(patches_tensor)
         features_np = features.detach().cpu().numpy()
-        scores = self._score_features_against_bank(features_np)
+        scores = self._score_features_multiscale(features_np, image_id=image_id)
         
         # 填充 heatmap
         for (cx, cy), score in zip(positions, scores):
