@@ -1097,6 +1097,204 @@ class ResSAM:
             cv2.imwrite(output_path, vis_image)
         
         return vis_image
+    
+    def generate_pixel_heatmap(
+        self,
+        image: np.ndarray,
+        bbox: List[int],
+        mask: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """
+        V17: 生成 pixel-level heatmap（替代 patch 合并）
+        
+        理论依据：论文 "Promptable Anomaly Segmentation with SAM Through Self-Perception Tuning" (arXiv 2411.17217)
+        
+        方法：
+        1. 在候选区域内每个像素提取 centered patch
+        2. 计算每个 patch 的异常分数
+        3. 生成 pixel-level heatmap
+        4. 归一化到 [0,1]
+        
+        Parameters:
+        -----------
+        image : np.ndarray
+            输入图像 [H, W]
+        bbox : List[int]
+            候选区域 [x1, y1, x2, y2]
+        mask : Optional[np.ndarray]
+            可选的 mask
+            
+        Returns:
+        --------
+        np.ndarray
+            Pixel-level heatmap [H, W]，值域 [0, 1]
+        """
+        x1, y1, x2, y2 = bbox
+        img_h, img_w = image.shape[:2]
+        half_win = self.window_size // 2
+        
+        # 初始化 heatmap
+        heatmap = np.zeros((img_h, img_w), dtype=np.float32)
+        count_map = np.zeros((img_h, img_w), dtype=np.int32)
+        
+        # 在候选区域内采样像素（降采样以提高速度）
+        sample_stride = max(1, self.stride // 2)  # 使用更密集的采样
+        
+        patches_list = []
+        positions = []
+        
+        for cy in range(y1 + half_win, y2 - half_win, sample_stride):
+            for cx in range(x1 + half_win, x2 - half_win, sample_stride):
+                if mask is not None and not mask[cy, cx]:
+                    continue
+                
+                # 提取 centered patch
+                py1 = max(0, cy - half_win)
+                py2 = min(img_h, cy + half_win)
+                px1 = max(0, cx - half_win)
+                px2 = min(img_w, cx + half_win)
+                
+                patch = image[py1:py2, px1:px2]
+                if patch.shape[0] == self.window_size and patch.shape[1] == self.window_size:
+                    patches_list.append(patch)
+                    positions.append((cx, cy))
+        
+        if len(patches_list) == 0:
+            return heatmap
+        
+        # 批量计算异常分数
+        patches_tensor = self._patch_list_to_tensor(patches_list)
+        features = self._fit_patches(patches_tensor)
+        features_np = features.detach().cpu().numpy()
+        scores = self._score_features_against_bank(features_np)
+        
+        # 填充 heatmap
+        for (cx, cy), score in zip(positions, scores):
+            # 将分数分配到 patch 覆盖的区域
+            py1 = max(0, cy - half_win)
+            py2 = min(img_h, cy + half_win)
+            px1 = max(0, cx - half_win)
+            px2 = min(img_w, cx + half_win)
+            
+            heatmap[py1:py2, px1:px2] += score
+            count_map[py1:py2, px1:px2] += 1
+        
+        # 平均化
+        heatmap = np.divide(heatmap, count_map, where=count_map > 0)
+        
+        # 归一化到 [0, 1]
+        if heatmap.max() > heatmap.min():
+            heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min())
+        
+        return heatmap
+    
+    def heatmap_to_bbox(
+        self,
+        heatmap: np.ndarray,
+        beta_normalized: float = 0.5,
+        min_area: int = 100,
+    ) -> List[List[int]]:
+        """
+        V17: 从 heatmap 生成 bbox
+        
+        Parameters:
+        -----------
+        heatmap : np.ndarray
+            Pixel-level heatmap [H, W]，值域 [0, 1]
+        beta_normalized : float
+            归一化后的阈值（0-1）
+        min_area : int
+            最小区域面积
+            
+        Returns:
+        --------
+        List[List[int]]
+            Bbox 列表 [[x1, y1, x2, y2], ...]
+        """
+        # 阈值化
+        binary = (heatmap > beta_normalized).astype(np.uint8)
+        
+        # 连通分量分析
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        
+        bboxes = []
+        for i in range(1, num_labels):  # 跳过背景（label=0）
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area < min_area:
+                continue
+            
+            x1 = int(stats[i, cv2.CC_STAT_LEFT])
+            y1 = int(stats[i, cv2.CC_STAT_TOP])
+            w = int(stats[i, cv2.CC_STAT_WIDTH])
+            h = int(stats[i, cv2.CC_STAT_HEIGHT])
+            x2 = x1 + w
+            y2 = y1 + h
+            
+            bboxes.append([x1, y1, x2, y2])
+        
+        return bboxes
+    
+    def apply_nms(
+        self,
+        bboxes: List[List[int]],
+        scores: List[float],
+        iou_threshold: float = 0.5,
+    ) -> Tuple[List[List[int]], List[float]]:
+        """
+        V17: 非极大值抑制（NMS）
+        
+        Parameters:
+        -----------
+        bboxes : List[List[int]]
+            Bbox 列表 [[x1, y1, x2, y2], ...]
+        scores : List[float]
+            对应的分数列表
+        iou_threshold : float
+            IoU 阈值
+            
+        Returns:
+        --------
+        Tuple[List[List[int]], List[float]]
+            过滤后的 (bboxes, scores)
+        """
+        if len(bboxes) == 0:
+            return [], []
+        
+        bboxes = np.array(bboxes)
+        scores = np.array(scores)
+        
+        # 计算面积
+        x1 = bboxes[:, 0]
+        y1 = bboxes[:, 1]
+        x2 = bboxes[:, 2]
+        y2 = bboxes[:, 3]
+        areas = (x2 - x1) * (y2 - y1)
+        
+        # 按分数排序
+        order = scores.argsort()[::-1]
+        
+        keep = []
+        while order.size > 0:
+            i = order[0]
+            keep.append(i)
+            
+            # 计算 IoU
+            xx1 = np.maximum(x1[i], x1[order[1:]])
+            yy1 = np.maximum(y1[i], y1[order[1:]])
+            xx2 = np.minimum(x2[i], x2[order[1:]])
+            yy2 = np.minimum(y2[i], y2[order[1:]])
+            
+            w = np.maximum(0.0, xx2 - xx1)
+            h = np.maximum(0.0, yy2 - yy1)
+            inter = w * h
+            
+            iou = inter / (areas[i] + areas[order[1:]] - inter)
+            
+            # 保留 IoU < threshold 的框
+            inds = np.where(iou <= iou_threshold)[0]
+            order = order[inds + 1]
+        
+        return bboxes[keep].tolist(), scores[keep].tolist()
 
 
 def load_image(path: str, size: Tuple[int, int] = None) -> np.ndarray:
