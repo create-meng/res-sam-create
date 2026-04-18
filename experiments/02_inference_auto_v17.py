@@ -105,14 +105,14 @@ CONFIG = {
     # v17 方案：行列双向背景去除
     "gpr_background_removal": True,
     "background_removal_method": "both",   # ← row_mean + column_mean
-    # V17 核心改进：后处理过滤
-    "confidence_percentile": 80,  # 只保留 score > percentile(scores, 80) 的框
-    "nms_iou_threshold": 0.5,     # NMS IoU 阈值
-    "top_k_per_image": 1,         # 每张图只保留 top-1 框
-    # V17 核心改进：pixel-level heatmap bbox 生成
+    # V17-2 调整：放宽后处理过滤，让框变大
+    "confidence_percentile": 60,  # 从 80 降到 60，保留更多候选框
+    "nms_iou_threshold": 0.5,     # NMS IoU 阈值（保持不变）
+    "top_k_per_image": 2,         # 从 1 增大到 2，每张图保留 top-2 框
+    # V17-2 调整：pixel-level heatmap bbox 生成参数
     "use_pixel_heatmap": True,    # 使用 pixel-level heatmap 生成 bbox
-    "heatmap_beta_normalized": 0.5,  # heatmap 归一化阈值（0-1）
-    "heatmap_min_area": 100,      # heatmap bbox 最小面积
+    "heatmap_beta_normalized": 0.2,  # 从 0.5 降到 0.2，让异常区域更大
+    "heatmap_min_area": 500,      # 从 100 增大到 500，过滤小框
     # SAM
     "sam_model_type": "vit_l",
     "sam_checkpoint": os.path.join(BASE_DIR, "sam", "sam_vit_l_0b3195.pth"),
@@ -124,12 +124,13 @@ CONFIG = {
     "max_images_per_category": None,
     "checkpoint_interval": 50,
     "random_seed": 11,
-    "version": "v17",
+    "version": "v17-2",
     "feature_with_bias": True,
     "automatic_fine_use_mask": True,
     "alignment_notes": (
-        "v17: 继承V16 + 后处理过滤(置信度+NMS+top-1) + 可选pixel-level heatmap; "
-        "目标：减少FP，提升Precision和F1"
+        "v17-2: V17参数调整 - 降低heatmap_beta(0.5→0.2)，增大min_area(100→500)，"
+        "放宽后处理过滤(confidence_percentile 80→60, top_k 1→2); "
+        "目标：让pred框变大，提升IoU>0.5的F1"
     ),
 }
 

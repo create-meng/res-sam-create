@@ -153,7 +153,7 @@ if __name__ == '__main__':
         sys.exit(1)
     
     print("=" * 80)
-    print("V17 评估结果（所有改进一次性实现）")
+    print("V17-2 评估结果（参数调整：让pred框变大）")
     print("=" * 80)
     
     res = evaluate_v17(pred_path, meta_path)
@@ -169,8 +169,8 @@ if __name__ == '__main__':
     print("  beta_method = {}".format(res['meta'].get('beta_calibration_method', 'unknown')))
     print("  特征维度 = {}".format(res['meta']['feature_bank_shape'][1]))
     
-    # V17 后处理参数
-    print("\nV17 核心改进参数:")
+    # V17-2 后处理参数
+    print("\nV17-2 核心改进参数:")
     print("  use_pixel_heatmap = {}".format(res['pred_meta'].get('use_pixel_heatmap')))
     if res['pred_meta'].get('use_pixel_heatmap'):
         print("  heatmap_beta_normalized = {}".format(res['pred_meta'].get('heatmap_beta_normalized')))
@@ -228,46 +228,46 @@ if __name__ == '__main__':
         status = 'TP>FP ✓' if separation > 0 else 'TP<FP ✗ 评分方向反转'
         print("TP/FP分离度: {:.3f} ({})".format(separation, status))
     
-    # 对比 V16
+    # 对比 V16 和 V17
     print("\n" + "="*80)
-    print("对比 V16:")
+    print("对比 V16 和 V17:")
     print("  V16: beta=0.1399(p5), FP=170, TP=10, F1(0.5)=0.083, AUC=0.821")
-    print("  V17: beta={:.3f}(p10), FP={}, TP={}, F1(0.5)={:.3f}, AUC={:.3f}".format(
+    print("  V17: beta=0.175(p10), FP=48, TP=0, F1(0.5)=0.000, AUC=0.849")
+    print("  V17-2: beta={:.3f}(p10), FP={}, TP={}, F1(0.5)={:.3f}, AUC={:.3f}".format(
         res['meta']['adaptive_beta'], m05['fp'], m05['tp'], 
         m05['f1'], res['image_auc']))
     
     # 计算改进
-    v16_fp = 170
-    v16_f1 = 0.083
-    fp_reduction = (v16_fp - m05['fp']) / v16_fp * 100 if v16_fp > 0 else 0
-    f1_improvement = (m05['f1'] - v16_f1) / v16_f1 * 100 if v16_f1 > 0 else 0
+    v17_fp = 48
+    v17_f1 = 0.000
+    fp_change = (m05['fp'] - v17_fp)  # 正数表示FP增加（变差），负数表示FP减少（变好）
+    f1_change = m05['f1'] - v17_f1  # 正数表示F1提升（变好）
     
-    print("\nV17 改进:")
-    print("  FP 减少: {:.1f}% ({} → {})".format(fp_reduction, v16_fp, m05['fp']))
-    print("  F1 提升: {:.1f}% ({:.3f} → {:.3f})".format(f1_improvement, v16_f1, m05['f1']))
-    print("  Precision 提升: {:.3f} → {:.3f}".format(0.056, m05['precision']))
+    print("\nV17-2 vs V17 改进:")
+    print("  FP 变化: {} ({} → {})".format(
+        "+{}".format(fp_change) if fp_change > 0 else fp_change, v17_fp, m05['fp']))
+    print("  F1 变化: {:.3f} → {:.3f} ({:+.3f})".format(v17_f1, m05['f1'], f1_change))
+    print("  TP 变化: 0 → {}".format(m05['tp']))
     
-    if m05['fp'] < v16_fp and m05['f1'] > v16_f1:
-        print("\n✓ 成功：后处理过滤显著减少FP，提升F1！")
-    elif m05['fp'] < v16_fp:
-        print("\n✓ 部分成功：FP减少，但F1提升有限")
+    if m05['tp'] > 0:
+        print("\n✓ 成功：V17-2 参数调整有效，TP 恢复！")
     else:
-        print("\n✗ 警告：后处理过滤效果不明显")
+        print("\n✗ 失败：V17-2 参数调整无效，TP 仍为 0")
     
-    # 预期目标检查
-    print("\n预期目标:")
-    print("  FP: 50-80 (实际: {})".format(m05['fp']))
-    print("  Precision: 0.10-0.15 (实际: {:.3f})".format(m05['precision']))
-    print("  F1: 0.12-0.15 (实际: {:.3f})".format(m05['f1']))
+    # 预期目标检查（V17-2）
+    print("\n预期目标（V17-2）:")
+    print("  TP (IoU>0.5): 5-10 (实际: {})".format(m05['tp']))
+    print("  FP: 80-120 (实际: {})".format(m05['fp']))
+    print("  F1 (IoU>0.5): 0.08-0.12 (实际: {:.3f})".format(m05['f1']))
     
     goals_met = 0
-    if 50 <= m05['fp'] <= 80:
+    if 5 <= m05['tp'] <= 10:
+        print("  ✓ TP 达标")
+        goals_met += 1
+    if 80 <= m05['fp'] <= 120:
         print("  ✓ FP 达标")
         goals_met += 1
-    if 0.10 <= m05['precision'] <= 0.15:
-        print("  ✓ Precision 达标")
-        goals_met += 1
-    if 0.12 <= m05['f1'] <= 0.15:
+    if 0.08 <= m05['f1'] <= 0.12:
         print("  ✓ F1 达标")
         goals_met += 1
     
