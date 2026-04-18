@@ -1196,7 +1196,7 @@ class ResSAM:
         bbox: List[int],
         mask: Optional[np.ndarray] = None,
         image_id: Optional[str] = None,
-    ) -> np.ndarray:
+    ) -> Tuple[np.ndarray, Tuple[int, int]]:
         """
         V17: 生成 pixel-level heatmap（替代 patch 合并）
         
@@ -1205,7 +1205,7 @@ class ResSAM:
         方法：
         1. 在候选区域内每个像素提取 centered patch
         2. 计算每个 patch 的异常分数
-        3. 生成 pixel-level heatmap
+        3. 生成 pixel-level heatmap（只在候选区域内）
         4. 归一化到 [0,1]
         
         Parameters:
@@ -1219,29 +1219,34 @@ class ResSAM:
             
         Returns:
         --------
-        np.ndarray
-            Pixel-level heatmap [H, W]，值域 [0, 1]
+        Tuple[np.ndarray, Tuple[int, int]]
+            - Heatmap [region_h, region_w]，值域 [0, 1]（只包含候选区域）
+            - 候选区域的偏移 (x1, y1)
         """
         x1, y1, x2, y2 = bbox
         img_h, img_w = image.shape[:2]
         half_win = self.window_size // 2
         
-        # 初始化 heatmap
-        heatmap = np.zeros((img_h, img_w), dtype=np.float32)
-        count_map = np.zeros((img_h, img_w), dtype=np.int32)
+        # 候选区域大小
+        region_h = y2 - y1
+        region_w = x2 - x1
+        
+        # 初始化 heatmap（只包含候选区域）
+        heatmap = np.zeros((region_h, region_w), dtype=np.float32)
+        count_map = np.zeros((region_h, region_w), dtype=np.int32)
         
         # 在候选区域内采样像素（降采样以提高速度）
         sample_stride = max(1, self.stride // 2)  # 使用更密集的采样
         
         patches_list = []
-        positions = []
+        positions = []  # 相对于候选区域的坐标
         
         for cy in range(y1 + half_win, y2 - half_win, sample_stride):
             for cx in range(x1 + half_win, x2 - half_win, sample_stride):
                 if mask is not None and not mask[cy, cx]:
                     continue
                 
-                # 提取 centered patch
+                # 提取 centered patch（全图坐标）
                 py1 = max(0, cy - half_win)
                 py2 = min(img_h, cy + half_win)
                 px1 = max(0, cx - half_win)
@@ -1250,10 +1255,11 @@ class ResSAM:
                 patch = image[py1:py2, px1:px2]
                 if patch.shape[0] == self.window_size and patch.shape[1] == self.window_size:
                     patches_list.append(patch)
-                    positions.append((cx, cy))
+                    # 保存相对于候选区域的坐标
+                    positions.append((cx - x1, cy - y1))
         
         if len(patches_list) == 0:
-            return heatmap
+            return heatmap, (x1, y1)
         
         # 批量计算异常分数
         patches_tensor = self._patch_list_to_tensor(patches_list)
@@ -1261,29 +1267,30 @@ class ResSAM:
         features_np = features.detach().cpu().numpy()
         scores = self._score_features_multiscale(features_np, image_id=image_id)
         
-        # 填充 heatmap
-        for (cx, cy), score in zip(positions, scores):
-            # 将分数分配到 patch 覆盖的区域
-            py1 = max(0, cy - half_win)
-            py2 = min(img_h, cy + half_win)
-            px1 = max(0, cx - half_win)
-            px2 = min(img_w, cx + half_win)
+        # 填充 heatmap（使用相对坐标）
+        for (rel_cx, rel_cy), score in zip(positions, scores):
+            # 计算 patch 覆盖的区域（相对坐标）
+            rel_py1 = max(0, rel_cy - half_win)
+            rel_py2 = min(region_h, rel_cy + half_win)
+            rel_px1 = max(0, rel_cx - half_win)
+            rel_px2 = min(region_w, rel_cx + half_win)
             
-            heatmap[py1:py2, px1:px2] += score
-            count_map[py1:py2, px1:px2] += 1
+            heatmap[rel_py1:rel_py2, rel_px1:rel_px2] += score
+            count_map[rel_py1:rel_py2, rel_px1:rel_px2] += 1
         
         # 平均化
         heatmap = np.divide(heatmap, count_map, where=count_map > 0)
         
-        # 归一化到 [0, 1]
+        # 归一化到 [0, 1]（只对候选区域内的值归一化）
         if heatmap.max() > heatmap.min():
             heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min())
         
-        return heatmap
+        return heatmap, (x1, y1)
     
     def heatmap_to_bbox(
         self,
         heatmap: np.ndarray,
+        offset: Tuple[int, int],
         beta_normalized: float = 0.5,
         min_area: int = 100,
     ) -> List[List[int]]:
@@ -1293,7 +1300,9 @@ class ResSAM:
         Parameters:
         -----------
         heatmap : np.ndarray
-            Pixel-level heatmap [H, W]，值域 [0, 1]
+            Pixel-level heatmap [region_h, region_w]，值域 [0, 1]（相对于候选区域）
+        offset : Tuple[int, int]
+            候选区域的偏移 (x1, y1)
         beta_normalized : float
             归一化后的阈值（0-1）
         min_area : int
@@ -1302,7 +1311,7 @@ class ResSAM:
         Returns:
         --------
         List[List[int]]
-            Bbox 列表 [[x1, y1, x2, y2], ...]
+            Bbox 列表 [[x1, y1, x2, y2], ...]（全图坐标）
         """
         # 阈值化
         binary = (heatmap > beta_normalized).astype(np.uint8)
@@ -1310,18 +1319,27 @@ class ResSAM:
         # 连通分量分析
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
         
+        offset_x, offset_y = offset
         bboxes = []
+        
         for i in range(1, num_labels):  # 跳过背景（label=0）
             area = stats[i, cv2.CC_STAT_AREA]
             if area < min_area:
                 continue
             
-            x1 = int(stats[i, cv2.CC_STAT_LEFT])
-            y1 = int(stats[i, cv2.CC_STAT_TOP])
+            # 相对于候选区域的坐标
+            rel_x1 = int(stats[i, cv2.CC_STAT_LEFT])
+            rel_y1 = int(stats[i, cv2.CC_STAT_TOP])
             w = int(stats[i, cv2.CC_STAT_WIDTH])
             h = int(stats[i, cv2.CC_STAT_HEIGHT])
-            x2 = x1 + w
-            y2 = y1 + h
+            rel_x2 = rel_x1 + w
+            rel_y2 = rel_y1 + h
+            
+            # 转换为全图坐标
+            x1 = rel_x1 + offset_x
+            y1 = rel_y1 + offset_y
+            x2 = rel_x2 + offset_x
+            y2 = rel_y2 + offset_y
             
             bboxes.append([x1, y1, x2, y2])
         

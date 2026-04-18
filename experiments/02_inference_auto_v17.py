@@ -458,14 +458,15 @@ def run_inference(config: dict) -> dict:
                             region_bbox = region["bbox"]
                             region_mask = region.get("mask")
                             
-                            # 生成 heatmap
-                            heatmap = model.generate_pixel_heatmap(
+                            # 生成 heatmap（返回候选区域内的 heatmap 和偏移）
+                            heatmap, offset = model.generate_pixel_heatmap(
                                 img, region_bbox, region_mask, image_id=image_id
                             )
                             
-                            # 从 heatmap 生成 bbox
+                            # 从 heatmap 生成 bbox（传入偏移以转换为全图坐标）
                             heatmap_bboxes = model.heatmap_to_bbox(
                                 heatmap,
+                                offset=offset,
                                 beta_normalized=config.get("heatmap_beta_normalized", 0.5),
                                 min_area=config.get("heatmap_min_area", 100),
                             )
