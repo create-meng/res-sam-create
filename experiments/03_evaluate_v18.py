@@ -146,8 +146,102 @@ def evaluate_v18(pred_path, meta_path):
 
 if __name__ == '__main__':
     # 设置全局日志
-    logger = setup_global_logger(BASE_DIR, "03_evaluate_v17")
+    logger = setup_global_logger(BASE_DIR, "03_evaluate_v18")
     
+    log_section("V18 评估：全图 patch 分数图方法", logger)
+    
+    # 输入文件路径
+    pred_path = os.path.join(BASE_DIR, "outputs", "predictions_v18", "auto_predictions_v18.json")
+    meta_path = os.path.join(BASE_DIR, "outputs", "feature_banks_v18", "metadata.json")
+    
+    # 检查文件是否存在
+    if not os.path.exists(pred_path):
+        logger.error(f"预测结果文件不存在: {pred_path}")
+        logger.error("请先运行: python Res-SAM/experiments/02_inference_auto_v18.py")
+        sys.exit(1)
+    
+    if not os.path.exists(meta_path):
+        logger.error(f"元数据文件不存在: {meta_path}")
+        logger.error("请先运行: python Res-SAM/experiments/01_build_feature_bank_v18.py")
+        sys.exit(1)
+    
+    logger.info(f"读取预测结果: {pred_path}")
+    logger.info(f"读取元数据: {meta_path}")
+    
+    # 评估
+    result = evaluate_v18(pred_path, meta_path)
+    
+    if result is None:
+        logger.error("评估失败")
+        sys.exit(1)
+    
+    # 输出结果
+    log_section("V18 评估结果", logger)
+    
+    logger.info(f"Feature Bank 配置:")
+    logger.info(f"  hidden_size: {result['meta'].get('config', {}).get('hidden_size')}")
+    logger.info(f"  beta_threshold: {result['meta'].get('adaptive_beta', 0.0):.4f}")
+    logger.info(f"  background_removal: {result['meta'].get('config', {}).get('background_removal_method')}")
+    
+    logger.info(f"\n推理配置:")
+    logger.info(f"  use_score_map: {result['pred_meta'].get('use_score_map')}")
+    logger.info(f"  score_map_smooth_sigma: {result['pred_meta'].get('score_map_smooth_sigma')}")
+    logger.info(f"  min_bbox_area: {result['pred_meta'].get('min_bbox_area')}")
+    logger.info(f"  max_bbox_area: {result['pred_meta'].get('max_bbox_area')}")
+    logger.info(f"  use_per_image_threshold: {result['pred_meta'].get('use_per_image_threshold')}")
+    logger.info(f"  per_image_threshold_ratio: {result['pred_meta'].get('per_image_threshold_ratio')}")
+    logger.info(f"  nms_iou_threshold: {result['pred_meta'].get('nms_iou_threshold')}")
+    logger.info(f"  top_k_per_image: {result['pred_meta'].get('top_k_per_image')}")
+    
+    logger.info(f"\n图像级分数:")
+    logger.info(f"  正常图平均分: {result['normal_mean']:.4f}")
+    logger.info(f"  异常图平均分: {result['anomaly_mean']:.4f}")
+    logger.info(f"  图像级 AUC: {result['image_auc']:.4f}")
+    
+    logger.info(f"\n总 pred 框数: {result['total_pred']}")
+    
+    logger.info(f"\n多 IoU 阈值评估:")
+    for iou_thresh in [0.1, 0.2, 0.3, 0.5]:
+        m = result['metrics_by_iou'][iou_thresh]
+        logger.info(f"  IoU={iou_thresh}:")
+        logger.info(f"    TP={m['tp']}, FP={m['fp']}, FN={m['fn']}")
+        logger.info(f"    Precision={m['precision']:.4f}, Recall={m['recall']:.4f}, F1={m['f1']:.4f}")
+    
+    # 保存评估报告
+    report_path = os.path.join(BASE_DIR, "outputs", "predictions_v18", "evaluation_report_v18.json")
+    with open(report_path, 'w', encoding='utf-8') as f:
+        # 移除不能序列化的部分
+        save_result = {
+            'meta': result['meta'],
+            'pred_meta': result['pred_meta'],
+            'metrics_by_iou': {
+                str(k): {
+                    'tp': v['tp'], 'fp': v['fp'], 'fn': v['fn'],
+                    'precision': v['precision'], 'recall': v['recall'], 'f1': v['f1']
+                }
+                for k, v in result['metrics_by_iou'].items()
+            },
+            'image_auc': result['image_auc'],
+            'discard_rate': result['discard_rate'],
+            'total_pred': result['total_pred'],
+            'normal_mean': result['normal_mean'],
+            'anomaly_mean': result['anomaly_mean'],
+        }
+        json.dump(save_result, f, indent=2, ensure_ascii=False)
+    
+    logger.info(f"\n评估报告已保存: {report_path}")
+    
+    log_finish("03_evaluate_v18", logger)
+    
+    print("\n" + "="*80)
+    print("V18 评估完成！")
+    print("="*80)
+    print(f"主要指标 (IoU=0.5):")
+    m = result['metrics_by_iou'][0.5]
+    print(f"  TP={m['tp']}, FP={m['fp']}, FN={m['fn']}")
+    print(f"  Precision={m['precision']:.4f}, Recall={m['recall']:.4f}, F1={m['f1']:.4f}")
+    print(f"  图像级 AUC={result['image_auc']:.4f}")
+    print("="*80)
     pred_path = os.path.join(BASE_DIR, 'outputs', 'predictions_v17', 'auto_predictions_v17.json')
     meta_path = os.path.join(BASE_DIR, 'outputs', 'feature_banks_v17', 'metadata.json')
     

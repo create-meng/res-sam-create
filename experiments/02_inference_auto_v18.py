@@ -97,6 +97,7 @@ CONFIG = {
     # v18：连通分量过滤
     "min_bbox_area": 3000,   # 最小 bbox 面积（GT 的 10%）
     "max_bbox_area": 80000,  # 最大 bbox 面积（GT 的 250%）
+    "bbox_expand_pixels": 15,  # bbox 膨胀像素数（修正连通分量过于保守）
     # v18：per-image 自适应阈值
     "use_per_image_threshold": True,
     "per_image_threshold_ratio": 0.7,  # max_score * 0.7
@@ -450,6 +451,7 @@ def run_inference(config: dict) -> dict:
             "score_map_smooth_sigma": float(config.get("score_map_smooth_sigma", 2.0)),
             "min_bbox_area": int(config.get("min_bbox_area", 3000)),
             "max_bbox_area": int(config.get("max_bbox_area", 80000)),
+            "bbox_expand_pixels": int(config.get("bbox_expand_pixels", 15)),
             "use_per_image_threshold": bool(config.get("use_per_image_threshold", True)),
             "per_image_threshold_ratio": float(config.get("per_image_threshold_ratio", 0.7)),
             "nms_iou_threshold": float(config.get("nms_iou_threshold", 0.5)),
@@ -636,6 +638,14 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
         
         y1, y2 = int(rows.min()), int(rows.max()) + 1
         x1, x2 = int(cols.min()), int(cols.max()) + 1
+        
+        # V18 改进：bbox 膨胀（修正连通分量过于保守的问题）
+        expand_px = config.get("bbox_expand_pixels", 15)
+        if expand_px > 0:
+            x1 = max(0, x1 - expand_px)
+            y1 = max(0, y1 - expand_px)
+            x2 = min(img_w, x2 + expand_px)
+            y2 = min(img_h, y2 + expand_px)
         
         # 尺寸过滤
         area = (x2 - x1) * (y2 - y1)
