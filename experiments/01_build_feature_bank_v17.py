@@ -40,6 +40,7 @@ from tqdm import tqdm
 from experiments.resize_policy import RESIZE_POLICY_FIXED, target_hw_for_preprocess
 from experiments.dataset_layout import DATASET_ENHANCED, apply_layout_to_config_01
 from experiments.paper_constants import DEFAULT_BETA_THRESHOLD, preflight_faiss_or_raise
+from PatchRes.logger import setup_global_logger, log_config, log_section, log_step, log_finish
 
 
 CONFIG = {
@@ -597,6 +598,9 @@ def build_feature_bank(config: dict):
 
 
 if __name__ == "__main__":
+    # 设置全局日志
+    logger = setup_global_logger(BASE_DIR, "01_build_feature_bank_v17")
+    
     preflight_faiss_or_raise()
     CONFIG = apply_layout_to_config_01(dict(CONFIG), BASE_DIR, "v17")
     CONFIG["version"] = "v17"
@@ -615,5 +619,10 @@ if __name__ == "__main__":
     CONFIG["anomaly_data_sources"] = {k: _to_abs(BASE_DIR, v)
                                        for k, v in CONFIG["anomaly_data_sources"].items()}
 
+    # 记录配置
+    log_config(CONFIG, logger)
+
     with torch.no_grad():
         build_feature_bank(CONFIG)
+    
+    log_finish("01_build_feature_bank_v17", logger)

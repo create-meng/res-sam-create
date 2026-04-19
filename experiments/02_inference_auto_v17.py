@@ -48,49 +48,7 @@ if BASE_DIR not in sys.path:
 from experiments.dataset_layout import DATASET_ENHANCED, apply_layout_to_config_02_03
 from experiments.paper_constants import DEFAULT_BETA_THRESHOLD, preflight_faiss_or_raise
 from experiments.resize_policy import RESIZE_POLICY_FIXED, target_hw_for_preprocess
-
-# V17-3: 详细日志配置
-DETAILED_LOG_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "outputs", "logs", "v17_detailed.log"
-)
-
-def _setup_detailed_logger():
-    """设置详细日志记录器"""
-    log_dir = os.path.dirname(DETAILED_LOG_FILE)
-    os.makedirs(log_dir, exist_ok=True)
-    
-    detailed_logger = logging.getLogger("v17_detailed")
-    detailed_logger.setLevel(logging.DEBUG)
-    
-    # 文件handler - 详细日志
-    fh = RotatingFileHandler(
-        DETAILED_LOG_FILE, 
-        maxBytes=50*1024*1024,  # 50MB
-        backupCount=3,
-        encoding='utf-8'
-    )
-    fh.setLevel(logging.DEBUG)
-    
-    # 格式：时间戳 | 级别 | 消息
-    formatter = logging.Formatter(
-        '%(asctime)s | %(levelname)-8s | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    fh.setFormatter(formatter)
-    
-    detailed_logger.addHandler(fh)
-    return detailed_logger
-
-# 全局详细日志记录器
-_detailed_logger = None
-
-def get_detailed_logger():
-    """获取详细日志记录器"""
-    global _detailed_logger
-    if _detailed_logger is None:
-        _detailed_logger = _setup_detailed_logger()
-    return _detailed_logger
+from PatchRes.logger import setup_global_logger, log_config, log_section, log_step, log_finish
 
 
 def _require_segment_anything() -> None:
@@ -353,25 +311,8 @@ def run_inference(config: dict) -> dict:
     run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    # V17-3: 初始化详细日志
-    detailed_logger = get_detailed_logger()
-    detailed_logger.info("="*80)
-    detailed_logger.info(f"V17-3 推理开始 | run_id={run_id}")
-    detailed_logger.info("="*80)
-
-    log_dir = os.path.join(base_dir, "outputs", "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, f"auto_inference_v17_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
-
-    file_handler = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
-    stream_handler = logging.StreamHandler(sys.stdout)
-    runid_filter = _RunIdFilter(run_id)
-    file_handler.addFilter(runid_filter)
-    stream_handler.addFilter(runid_filter)
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s | %(levelname)s | run_id=%(run_id)s | %(message)s",
-                        handlers=[file_handler, stream_handler], force=True)
-    logger = logging.getLogger(__name__)
+    # V17-3: 使用全局日志系统
+    logger = setup_global_logger(base_dir, "02_inference_auto_v17")
 
     config = dict(config)
     for key in ["feature_bank_path", "metadata_path", "output_dir", "checkpoint_dir", "sam_checkpoint"]:
@@ -391,16 +332,8 @@ def run_inference(config: dict) -> dict:
             print(f"  [v17] 无 adaptive_beta，使用默认值 {effective_beta}")
     config["beta_threshold"] = effective_beta
 
-    # V17-3: 记录所有配置参数到详细日志
-    detailed_logger.info("配置参数:")
-    for key, value in sorted(config.items()):
-        if isinstance(value, dict):
-            detailed_logger.info(f"  {key}:")
-            for k, v in value.items():
-                detailed_logger.info(f"    {k}: {v}")
-        else:
-            detailed_logger.info(f"  {key}: {value}")
-    detailed_logger.info("-"*80)
+    # V17-3: 记录配置参数
+    log_config(config, logger)
 
     print("=" * 60)
     print("Res-SAM v17：全自动推理（所有改进一次性实现）")
@@ -493,16 +426,16 @@ def run_inference(config: dict) -> dict:
                 gt = parse_voc_xml(xml_path) if xml_path and os.path.exists(xml_path) else None
                 target_hw = target_hw_for_preprocess(config, gt)
 
-                # V17-3: 记录开始处理图片
+                # V17-3: 记录开始处理图片（DEBUG级别，只在日志文件）
                 import time
                 img_start_time = time.time()
-                detailed_logger.info(f"[{category}] 开始处理图片 {i+1}/{len(image_files)}: {img_file}")
+                logger.debug(f"[{category}] 开始处理图片 {i+1}/{len(image_files)}: {img_file}")
 
                 try:
                     orig_w, orig_h, img = load_image_with_orig_size(img_path, target_hw, config)
                     proc_h, proc_w = int(img.shape[0]), int(img.shape[1])
                     
-                    detailed_logger.info(f"  图片尺寸: 原始={orig_w}x{orig_h}, 处理={proc_w}x{proc_h}")
+                    logger.debug(f"  图片尺寸: 原始={orig_w}x{orig_h}, 处理={proc_w}x{proc_h}")
 
                     # V17 方案 4：提取 image_id 用于多尺度 Memory Bank
                     import re
@@ -511,7 +444,7 @@ def run_inference(config: dict) -> dict:
                     match = re.match(r'^(.+?)_aug_\d+$', img_basename)
                     image_id = match.group(1) if match else img_basename
                     
-                    detailed_logger.info(f"  image_id: {image_id}")
+                    logger.debug(f"  image_id: {image_id}")
 
                     # V17-3: 记录SAM检测开始
                     sam_start_time = time.time()
@@ -523,21 +456,20 @@ def run_inference(config: dict) -> dict:
                     )
                     sam_time = time.time() - sam_start_time
                     
-                    # V17-3: 记录SAM结果
+                    # V17-3: 记录SAM结果（INFO级别，记录到日志但不显示在终端）
                     num_candidates = len(result.get("anomaly_regions", []))
                     num_coarse_discarded = result.get("num_coarse_discarded", 0)
-                    detailed_logger.info(f"  SAM检测耗时: {sam_time:.2f}秒")
-                    detailed_logger.info(f"  SAM候选区域数: {num_candidates}")
-                    detailed_logger.info(f"  粗筛丢弃数: {num_coarse_discarded}")
+                    logger.debug(f"  SAM检测耗时: {sam_time:.2f}秒")
+                    logger.info(f"[{img_file}] SAM候选: {num_candidates}, 粗筛丢弃: {num_coarse_discarded}, 耗时: {sam_time:.1f}s")
                     if num_candidates > 0:
                         scores = [r.get("max_anomaly_score", 0.0) for r in result.get("anomaly_regions", [])]
-                        detailed_logger.info(f"  候选区域分数: min={min(scores):.4f}, max={max(scores):.4f}, mean={sum(scores)/len(scores):.4f}")
+                        logger.debug(f"  候选区域分数: min={min(scores):.4f}, max={max(scores):.4f}, mean={sum(scores)/len(scores):.4f}")
 
                     # V17 核心改进：使用 pixel-level heatmap 生成 bbox
                     if config.get("use_pixel_heatmap", False):
                         # V17-3: 记录heatmap处理开始
                         heatmap_start_time = time.time()
-                        detailed_logger.info(f"  开始生成pixel-level heatmap...")
+                        logger.debug(f"  开始生成pixel-level heatmap...")
                         
                         # 对每个候选区域生成 pixel-level heatmap
                         pred_bboxes_resized = []
@@ -561,9 +493,9 @@ def run_inference(config: dict) -> dict:
                                 morphology_kernel_size=config.get("morphology_kernel_size", 0),  # V17-3
                             )
                             
-                            # V17-3: 记录每个候选区域的heatmap结果
-                            if region_idx < 3:  # 只记录前3个候选区域，避免日志过多
-                                detailed_logger.info(f"    候选区域{region_idx+1}: bbox={region_bbox}, 生成{len(heatmap_bboxes)}个pred框")
+                            # V17-3: 记录每个候选区域的heatmap结果（只记录前3个）
+                            if region_idx < 3:
+                                logger.debug(f"    候选区域{region_idx+1}: bbox={region_bbox}, 生成{len(heatmap_bboxes)}个pred框")
                             
                             # 为每个 bbox 分配分数（使用原始区域的最大分数）
                             region_score = region.get("max_anomaly_score", 0.0)
@@ -572,13 +504,14 @@ def run_inference(config: dict) -> dict:
                                 anomaly_scores.append(region_score)
                         
                         heatmap_time = time.time() - heatmap_start_time
-                        detailed_logger.info(f"  Heatmap处理耗时: {heatmap_time:.2f}秒, 生成{len(pred_bboxes_resized)}个pred框")
+                        logger.debug(f"  Heatmap处理耗时: {heatmap_time:.2f}秒, 生成{len(pred_bboxes_resized)}个pred框")
                     else:
                         # 使用原有的 patch 合并方式
                         pred_bboxes_resized = [r["bbox"] for r in result.get("anomaly_regions", [])]
                         anomaly_scores = [r.get("max_anomaly_score", 0.0)
                                           for r in result.get("anomaly_regions", [])]
-                        detailed_logger.info(f"  使用patch合并方式, 生成{len(pred_bboxes_resized)}个pred框")
+                        logger.debug(f"  使用patch合并方式, 生成{len(pred_bboxes_resized)}个pred框")
+                        heatmap_time = 0
 
                     # V17 核心改进：后处理过滤
                     postproc_start_time = time.time()
@@ -590,8 +523,8 @@ def run_inference(config: dict) -> dict:
                     num_after_postproc = len(pred_bboxes_resized)
                     
                     # V17-3: 记录后处理结果
-                    detailed_logger.info(f"  后处理耗时: {postproc_time:.2f}秒")
-                    detailed_logger.info(f"  后处理前: {num_before_postproc}个框, 后处理后: {num_after_postproc}个框")
+                    logger.debug(f"  后处理耗时: {postproc_time:.2f}秒")
+                    logger.debug(f"  后处理前: {num_before_postproc}个框, 后处理后: {num_after_postproc}个框")
 
                     target_w = int(gt["width"]) if gt and gt.get("width") else int(orig_w)
                     target_h = int(gt["height"]) if gt and gt.get("height") else int(orig_h)
@@ -601,13 +534,9 @@ def run_inference(config: dict) -> dict:
                                     int(b[2] * scale_x), int(b[3] * scale_y)]
                                    for b in pred_bboxes_resized]
                     
-                    # V17-3: 记录最终结果和总耗时
+                    # V17-3: 记录最终结果和总耗时（INFO级别，只在日志文件）
                     img_total_time = time.time() - img_start_time
-                    detailed_logger.info(f"  最终pred框数: {len(pred_bboxes)}")
-                    if len(pred_bboxes) > 0:
-                        detailed_logger.info(f"  最终分数: min={min(anomaly_scores):.4f}, max={max(anomaly_scores):.4f}")
-                    detailed_logger.info(f"  总耗时: {img_total_time:.2f}秒 (SAM:{sam_time:.2f}s, Heatmap:{heatmap_time if config.get('use_pixel_heatmap') else 0:.2f}s, 后处理:{postproc_time:.2f}s)")
-                    detailed_logger.info("-"*60)
+                    logger.info(f"[{img_file}] 完成: 最终{len(pred_bboxes)}框, 总耗时{img_total_time:.1f}s (SAM:{sam_time:.1f}s, 后处理:{postproc_time:.1f}s)")
 
                     record = {
                         "image_name": img_file, "image_path": img_path,

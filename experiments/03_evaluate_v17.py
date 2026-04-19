@@ -19,6 +19,7 @@ sys.path.insert(0, BASE_DIR)
 try:
     import numpy as np
     from sklearn.metrics import roc_auc_score
+    from PatchRes.logger import setup_global_logger, log_section, log_finish
 except ImportError as e:
     print("Error: Missing required packages. Please install: pip install numpy scikit-learn")
     print("Error details:", str(e))
@@ -144,6 +145,9 @@ def evaluate_v17(pred_path, meta_path):
     }
 
 if __name__ == '__main__':
+    # 设置全局日志
+    logger = setup_global_logger(BASE_DIR, "03_evaluate_v17")
+    
     pred_path = os.path.join(BASE_DIR, 'outputs', 'predictions_v17', 'auto_predictions_v17.json')
     meta_path = os.path.join(BASE_DIR, 'outputs', 'feature_banks_v17', 'metadata.json')
     
@@ -151,6 +155,10 @@ if __name__ == '__main__':
         print(f"结果文件不存在: {pred_path}")
         print("请先运行 01_build_feature_bank_v17.py 和 02_inference_auto_v17.py")
         sys.exit(1)
+    
+    logger.info("开始评估 V17-3 结果")
+    logger.info(f"预测文件: {pred_path}")
+    logger.info(f"元数据文件: {meta_path}")
     
     print("=" * 80)
     print("V17-3 评估结果（SAM参数+形态学膨胀）")
@@ -278,4 +286,19 @@ if __name__ == '__main__':
     
     print("\n达标项: {}/3".format(goals_met))
     
+    # 记录评估结果到日志
+    logger.info("="*80)
+    logger.info("评估结果汇总:")
+    logger.info(f"  TP (IoU>0.5): {m05['tp']}")
+    logger.info(f"  FP (IoU>0.5): {m05['fp']}")
+    logger.info(f"  FN (IoU>0.5): {m05['fn']}")
+    logger.info(f"  Precision: {m05['precision']:.3f}")
+    logger.info(f"  Recall: {m05['recall']:.3f}")
+    logger.info(f"  F1: {m05['f1']:.3f}")
+    logger.info(f"  AUC: {res['image_auc']:.3f}")
+    logger.info(f"  粗筛丢弃率: {res['discard_rate']:.1f}%")
+    logger.info("="*80)
+    
     print("=" * 80)
+    
+    log_finish("03_evaluate_v17", logger)
