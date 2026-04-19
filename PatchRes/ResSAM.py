@@ -1293,9 +1293,11 @@ class ResSAM:
         offset: Tuple[int, int],
         beta_normalized: float = 0.5,
         min_area: int = 100,
+        morphology_kernel_size: int = 0,  # V17-3: 新增形态学膨胀参数（默认0=不膨胀）
     ) -> List[List[int]]:
         """
         V17: 从 heatmap 生成 bbox
+        V17-3: 加入形态学膨胀，让pred框变大
         
         Parameters:
         -----------
@@ -1307,6 +1309,8 @@ class ResSAM:
             归一化后的阈值（0-1）
         min_area : int
             最小区域面积
+        morphology_kernel_size : int
+            形态学膨胀的kernel大小（V17-3新增）
             
         Returns:
         --------
@@ -1315,6 +1319,14 @@ class ResSAM:
         """
         # 阈值化
         binary = (heatmap > beta_normalized).astype(np.uint8)
+        
+        # V17-3: 形态学膨胀，让异常区域变大
+        if morphology_kernel_size > 0:
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, 
+                (morphology_kernel_size, morphology_kernel_size)
+            )
+            binary = cv2.dilate(binary, kernel, iterations=1)
         
         # 连通分量分析
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)

@@ -153,7 +153,7 @@ if __name__ == '__main__':
         sys.exit(1)
     
     print("=" * 80)
-    print("V17-2 评估结果（参数调整：让pred框变大）")
+    print("V17-3 评估结果（SAM参数+形态学膨胀）")
     print("=" * 80)
     
     res = evaluate_v17(pred_path, meta_path)
@@ -169,12 +169,13 @@ if __name__ == '__main__':
     print("  beta_method = {}".format(res['meta'].get('beta_calibration_method', 'unknown')))
     print("  特征维度 = {}".format(res['meta']['feature_bank_shape'][1]))
     
-    # V17-2 后处理参数
-    print("\nV17-2 核心改进参数:")
+    # V17-3 后处理参数
+    print("\nV17-3 核心改进参数:")
     print("  use_pixel_heatmap = {}".format(res['pred_meta'].get('use_pixel_heatmap')))
     if res['pred_meta'].get('use_pixel_heatmap'):
         print("  heatmap_beta_normalized = {}".format(res['pred_meta'].get('heatmap_beta_normalized')))
         print("  heatmap_min_area = {}".format(res['pred_meta'].get('heatmap_min_area')))
+        print("  morphology_kernel_size = {}".format(res['pred_meta'].get('morphology_kernel_size', 0)))
     print("  confidence_percentile = {}".format(res['pred_meta'].get('confidence_percentile')))
     print("  nms_iou_threshold = {}".format(res['pred_meta'].get('nms_iou_threshold')))
     print("  top_k_per_image = {}".format(res['pred_meta'].get('top_k_per_image')))
@@ -228,46 +229,50 @@ if __name__ == '__main__':
         status = 'TP>FP ✓' if separation > 0 else 'TP<FP ✗ 评分方向反转'
         print("TP/FP分离度: {:.3f} ({})".format(separation, status))
     
-    # 对比 V16 和 V17
+    # 对比 V16, V17, V17-2
     print("\n" + "="*80)
-    print("对比 V16 和 V17:")
+    print("对比 V16, V17, V17-2:")
     print("  V16: beta=0.1399(p5), FP=170, TP=10, F1(0.5)=0.083, AUC=0.821")
     print("  V17: beta=0.175(p10), FP=48, TP=0, F1(0.5)=0.000, AUC=0.849")
-    print("  V17-2: beta={:.3f}(p10), FP={}, TP={}, F1(0.5)={:.3f}, AUC={:.3f}".format(
+    print("  V17-2: beta=0.175(p10), FP=62, TP=1, F1(0.5)=0.016, AUC=0.846")
+    print("  V17-3: beta={:.3f}(p10), FP={}, TP={}, F1(0.5)={:.3f}, AUC={:.3f}".format(
         res['meta']['adaptive_beta'], m05['fp'], m05['tp'], 
         m05['f1'], res['image_auc']))
     
     # 计算改进
-    v17_fp = 48
-    v17_f1 = 0.000
-    fp_change = (m05['fp'] - v17_fp)  # 正数表示FP增加（变差），负数表示FP减少（变好）
-    f1_change = m05['f1'] - v17_f1  # 正数表示F1提升（变好）
+    v17_2_tp = 1
+    v17_2_fp = 62
+    v17_2_f1 = 0.016
+    tp_change = m05['tp'] - v17_2_tp
+    fp_change = m05['fp'] - v17_2_fp
+    f1_change = m05['f1'] - v17_2_f1
     
-    print("\nV17-2 vs V17 改进:")
-    print("  FP 变化: {} ({} → {})".format(
-        "+{}".format(fp_change) if fp_change > 0 else fp_change, v17_fp, m05['fp']))
-    print("  F1 变化: {:.3f} → {:.3f} ({:+.3f})".format(v17_f1, m05['f1'], f1_change))
-    print("  TP 变化: 0 → {}".format(m05['tp']))
+    print("\nV17-3 vs V17-2 改进:")
+    print("  TP 变化: {} → {} ({:+d})".format(v17_2_tp, m05['tp'], tp_change))
+    print("  FP 变化: {} → {} ({:+d})".format(v17_2_fp, m05['fp'], fp_change))
+    print("  F1 变化: {:.3f} → {:.3f} ({:+.3f})".format(v17_2_f1, m05['f1'], f1_change))
     
-    if m05['tp'] > 0:
-        print("\n✓ 成功：V17-2 参数调整有效，TP 恢复！")
+    if m05['tp'] >= 5:
+        print("\n✓ 成功：V17-3 改进有效（SAM参数+形态学膨胀），TP 恢复！")
+        print("  → 继续优化 heatmap 方法")
     else:
-        print("\n✗ 失败：V17-2 参数调整无效，TP 仍为 0")
+        print("\n✗ 失败：V17-3 改进无效，TP < 5")
+        print("  → 建议转向方案B：回到 V16 的 patch 合并方法")
     
-    # 预期目标检查（V17-2）
-    print("\n预期目标（V17-2）:")
-    print("  TP (IoU>0.5): 5-10 (实际: {})".format(m05['tp']))
-    print("  FP: 80-120 (实际: {})".format(m05['fp']))
-    print("  F1 (IoU>0.5): 0.08-0.12 (实际: {:.3f})".format(m05['f1']))
+    # 预期目标检查（V17-3）
+    print("\n预期目标（V17-3）:")
+    print("  TP (IoU>0.5): 3-8 (实际: {})".format(m05['tp']))
+    print("  FP: 60-150 (实际: {})".format(m05['fp']))
+    print("  F1 (IoU>0.5): 0.05-0.08 (实际: {:.3f})".format(m05['f1']))
     
     goals_met = 0
-    if 5 <= m05['tp'] <= 10:
+    if 3 <= m05['tp'] <= 8:
         print("  ✓ TP 达标")
         goals_met += 1
-    if 80 <= m05['fp'] <= 120:
+    if 60 <= m05['fp'] <= 150:
         print("  ✓ FP 达标")
         goals_met += 1
-    if 0.08 <= m05['f1'] <= 0.12:
+    if 0.05 <= m05['f1'] <= 0.08:
         print("  ✓ F1 达标")
         goals_met += 1
     

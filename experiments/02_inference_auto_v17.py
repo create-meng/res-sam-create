@@ -113,6 +113,8 @@ CONFIG = {
     "use_pixel_heatmap": True,    # 使用 pixel-level heatmap 生成 bbox
     "heatmap_beta_normalized": 0.2,  # 从 0.5 降到 0.2，让异常区域更大
     "heatmap_min_area": 500,      # 从 100 增大到 500，过滤小框
+    # V17-3 新增：形态学膨胀
+    "morphology_kernel_size": 20,  # 形态学膨胀kernel大小，让pred框变大
     # SAM
     "sam_model_type": "vit_l",
     "sam_checkpoint": os.path.join(BASE_DIR, "sam", "sam_vit_l_0b3195.pth"),
@@ -124,13 +126,13 @@ CONFIG = {
     "max_images_per_category": None,
     "checkpoint_interval": 50,
     "random_seed": 11,
-    "version": "v17-2",
+    "version": "v17-3",
     "feature_with_bias": True,
     "automatic_fine_use_mask": True,
     "alignment_notes": (
-        "v17-2: V17参数调整 - 降低heatmap_beta(0.5→0.2)，增大min_area(100→500)，"
-        "放宽后处理过滤(confidence_percentile 80→60, top_k 1→2); "
-        "目标：让pred框变大，提升IoU>0.5的F1"
+        "v17-3: V17-2基础上 + 降低SAM阈值(pred_iou 0.95→0.80, stability 0.95→0.85) + "
+        "形态学膨胀(kernel=20); "
+        "目标：增加SAM候选区域，让pred框变大，提升TP和F1"
     ),
 }
 
@@ -470,6 +472,7 @@ def run_inference(config: dict) -> dict:
                                 offset=offset,
                                 beta_normalized=config.get("heatmap_beta_normalized", 0.5),
                                 min_area=config.get("heatmap_min_area", 100),
+                                morphology_kernel_size=config.get("morphology_kernel_size", 0),  # V17-3
                             )
                             
                             # 为每个 bbox 分配分数（使用原始区域的最大分数）

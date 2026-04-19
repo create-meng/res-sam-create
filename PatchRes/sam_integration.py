@@ -29,10 +29,11 @@ _sam_amg_skip_nms_empty_crop_count = 0
 # 仅传入作者在 sam.py 里写出的 8 个关键字；其余全部使用当前已安装 segment_anything
 # 版本的构造函数默认值（与作者在官方仓库中的写法一致）。
 # 参考：https://github.com/zhouxr6066/Res-SAM/blob/main/sam/sam.py
+# V17-3: 降低阈值，让SAM生成更多候选区域
 _SAM_AUTOMATIC_MASK_GENERATOR_KWARGS = {
     "points_per_side": 32,
-    "pred_iou_thresh": 0.95,
-    "stability_score_thresh": 0.95,
+    "pred_iou_thresh": 0.80,  # V17-3: 从0.95降到0.80，生成更多候选
+    "stability_score_thresh": 0.85,  # V17-3: 从0.95降到0.85，生成更多候选
     "crop_n_layers": 1,
     "box_nms_thresh": 0.7,
     "crop_n_points_downscale_factor": 2,
