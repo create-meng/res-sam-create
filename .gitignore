@@ -48,6 +48,7 @@ outputs/predictions_v3/
 outputs/metrics_v3/
 outputs/checkpoints_v3/
 outputs/logs/
+outputs.tar.gz
 
 # 数据文件（如果数据集太大）
 data/
