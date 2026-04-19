@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-V17 评估脚本
-评估所有改进的综合效果（Pixel-level Heatmap + 后处理过滤）
+V18 评估脚本
+评估全图 patch 分数图方法的效果
 """
 from __future__ import print_function
 import json
@@ -38,8 +38,8 @@ def compute_iou(box1, box2):
     union = area1 + area2 - inter
     return inter / union if union > 0 else 0.0
 
-def evaluate_v17(pred_path, meta_path):
-    """评估 V17 结果"""
+def evaluate_v18(pred_path, meta_path):
+    """评估 V18 结果"""
     try:
         with open(pred_path, 'r', encoding='utf-8') as f:
             obj = json.load(f)

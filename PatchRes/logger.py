@@ -42,12 +42,21 @@ def setup_global_logger(
     LOG_DIR = os.path.join(base_dir, "outputs", "logs")
     os.makedirs(LOG_DIR, exist_ok=True)
     
-    # 日志文件名：v17_YYYYMMDD.log（同一天的所有操作记录在同一个文件）
-    log_filename = f"v17_{datetime.now().strftime('%Y%m%d')}.log"
+    # 日志文件名：根据脚本名称动态生成
+    # 例如：02_inference_auto_v18 → v18_YYYYMMDD.log
+    version = "v17"  # 默认版本
+    if "v18" in script_name:
+        version = "v18"
+    elif "v17" in script_name:
+        version = "v17"
+    elif "v16" in script_name:
+        version = "v16"
+    
+    log_filename = f"{version}_{datetime.now().strftime('%Y%m%d')}.log"
     log_path = os.path.join(LOG_DIR, log_filename)
     
-    # 创建logger
-    logger = logging.getLogger("res_sam_v17")
+    # 创建logger（使用版本特定的名称）
+    logger = logging.getLogger(f"res_sam_{version}")
     logger.setLevel(log_level)
     
     # 清除已有的handlers（避免重复）
