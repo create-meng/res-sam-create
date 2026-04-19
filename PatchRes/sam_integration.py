@@ -237,7 +237,11 @@ class SAMIntegration:
             **_SAM_AUTOMATIC_MASK_GENERATOR_KWARGS,
         )
         
+        # V17-3: 输出SAM参数到日志
         print(f"SAM model loaded successfully on {self.device}")
+        print(f"SAM AMG parameters:")
+        for key, value in _SAM_AUTOMATIC_MASK_GENERATOR_KWARGS.items():
+            print(f"  {key}: {value}")
     
     def generate_masks_automatic(
         self, 

@@ -49,6 +49,49 @@ from experiments.dataset_layout import DATASET_ENHANCED, apply_layout_to_config_
 from experiments.paper_constants import DEFAULT_BETA_THRESHOLD, preflight_faiss_or_raise
 from experiments.resize_policy import RESIZE_POLICY_FIXED, target_hw_for_preprocess
 
+# V17-3: 详细日志配置
+DETAILED_LOG_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "outputs", "logs", "v17_detailed.log"
+)
+
+def _setup_detailed_logger():
+    """设置详细日志记录器"""
+    log_dir = os.path.dirname(DETAILED_LOG_FILE)
+    os.makedirs(log_dir, exist_ok=True)
+    
+    detailed_logger = logging.getLogger("v17_detailed")
+    detailed_logger.setLevel(logging.DEBUG)
+    
+    # 文件handler - 详细日志
+    fh = RotatingFileHandler(
+        DETAILED_LOG_FILE, 
+        maxBytes=50*1024*1024,  # 50MB
+        backupCount=3,
+        encoding='utf-8'
+    )
+    fh.setLevel(logging.DEBUG)
+    
+    # 格式：时间戳 | 级别 | 消息
+    formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    fh.setFormatter(formatter)
+    
+    detailed_logger.addHandler(fh)
+    return detailed_logger
+
+# 全局详细日志记录器
+_detailed_logger = None
+
+def get_detailed_logger():
+    """获取详细日志记录器"""
+    global _detailed_logger
+    if _detailed_logger is None:
+        _detailed_logger = _setup_detailed_logger()
+    return _detailed_logger
+
 
 def _require_segment_anything() -> None:
     try:
@@ -310,6 +353,12 @@ def run_inference(config: dict) -> dict:
     run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+    # V17-3: 初始化详细日志
+    detailed_logger = get_detailed_logger()
+    detailed_logger.info("="*80)
+    detailed_logger.info(f"V17-3 推理开始 | run_id={run_id}")
+    detailed_logger.info("="*80)
+
     log_dir = os.path.join(base_dir, "outputs", "logs")
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, f"auto_inference_v17_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
@@ -341,6 +390,17 @@ def run_inference(config: dict) -> dict:
         else:
             print(f"  [v17] 无 adaptive_beta，使用默认值 {effective_beta}")
     config["beta_threshold"] = effective_beta
+
+    # V17-3: 记录所有配置参数到详细日志
+    detailed_logger.info("配置参数:")
+    for key, value in sorted(config.items()):
+        if isinstance(value, dict):
+            detailed_logger.info(f"  {key}:")
+            for k, v in value.items():
+                detailed_logger.info(f"    {k}: {v}")
+        else:
+            detailed_logger.info(f"  {key}: {value}")
+    detailed_logger.info("-"*80)
 
     print("=" * 60)
     print("Res-SAM v17：全自动推理（所有改进一次性实现）")
@@ -433,9 +493,16 @@ def run_inference(config: dict) -> dict:
                 gt = parse_voc_xml(xml_path) if xml_path and os.path.exists(xml_path) else None
                 target_hw = target_hw_for_preprocess(config, gt)
 
+                # V17-3: 记录开始处理图片
+                import time
+                img_start_time = time.time()
+                detailed_logger.info(f"[{category}] 开始处理图片 {i+1}/{len(image_files)}: {img_file}")
+
                 try:
                     orig_w, orig_h, img = load_image_with_orig_size(img_path, target_hw, config)
                     proc_h, proc_w = int(img.shape[0]), int(img.shape[1])
+                    
+                    detailed_logger.info(f"  图片尺寸: 原始={orig_w}x{orig_h}, 处理={proc_w}x{proc_h}")
 
                     # V17 方案 4：提取 image_id 用于多尺度 Memory Bank
                     import re
@@ -443,21 +510,40 @@ def run_inference(config: dict) -> dict:
                     # 提取原始图 ID（去除 _aug_N 后缀）
                     match = re.match(r'^(.+?)_aug_\d+$', img_basename)
                     image_id = match.group(1) if match else img_basename
+                    
+                    detailed_logger.info(f"  image_id: {image_id}")
 
+                    # V17-3: 记录SAM检测开始
+                    sam_start_time = time.time()
                     result = model.detect_automatic(
                         img,
                         min_region_area=config["min_region_area"],
                         max_regions=config["max_candidates_per_image"],
                         image_id=image_id,
                     )
+                    sam_time = time.time() - sam_start_time
+                    
+                    # V17-3: 记录SAM结果
+                    num_candidates = len(result.get("anomaly_regions", []))
+                    num_coarse_discarded = result.get("num_coarse_discarded", 0)
+                    detailed_logger.info(f"  SAM检测耗时: {sam_time:.2f}秒")
+                    detailed_logger.info(f"  SAM候选区域数: {num_candidates}")
+                    detailed_logger.info(f"  粗筛丢弃数: {num_coarse_discarded}")
+                    if num_candidates > 0:
+                        scores = [r.get("max_anomaly_score", 0.0) for r in result.get("anomaly_regions", [])]
+                        detailed_logger.info(f"  候选区域分数: min={min(scores):.4f}, max={max(scores):.4f}, mean={sum(scores)/len(scores):.4f}")
 
                     # V17 核心改进：使用 pixel-level heatmap 生成 bbox
                     if config.get("use_pixel_heatmap", False):
+                        # V17-3: 记录heatmap处理开始
+                        heatmap_start_time = time.time()
+                        detailed_logger.info(f"  开始生成pixel-level heatmap...")
+                        
                         # 对每个候选区域生成 pixel-level heatmap
                         pred_bboxes_resized = []
                         anomaly_scores = []
                         
-                        for region in result.get("anomaly_regions", []):
+                        for region_idx, region in enumerate(result.get("anomaly_regions", [])):
                             region_bbox = region["bbox"]
                             region_mask = region.get("mask")
                             
@@ -475,21 +561,37 @@ def run_inference(config: dict) -> dict:
                                 morphology_kernel_size=config.get("morphology_kernel_size", 0),  # V17-3
                             )
                             
+                            # V17-3: 记录每个候选区域的heatmap结果
+                            if region_idx < 3:  # 只记录前3个候选区域，避免日志过多
+                                detailed_logger.info(f"    候选区域{region_idx+1}: bbox={region_bbox}, 生成{len(heatmap_bboxes)}个pred框")
+                            
                             # 为每个 bbox 分配分数（使用原始区域的最大分数）
                             region_score = region.get("max_anomaly_score", 0.0)
                             for bbox in heatmap_bboxes:
                                 pred_bboxes_resized.append(bbox)
                                 anomaly_scores.append(region_score)
+                        
+                        heatmap_time = time.time() - heatmap_start_time
+                        detailed_logger.info(f"  Heatmap处理耗时: {heatmap_time:.2f}秒, 生成{len(pred_bboxes_resized)}个pred框")
                     else:
                         # 使用原有的 patch 合并方式
                         pred_bboxes_resized = [r["bbox"] for r in result.get("anomaly_regions", [])]
                         anomaly_scores = [r.get("max_anomaly_score", 0.0)
                                           for r in result.get("anomaly_regions", [])]
+                        detailed_logger.info(f"  使用patch合并方式, 生成{len(pred_bboxes_resized)}个pred框")
 
                     # V17 核心改进：后处理过滤
+                    postproc_start_time = time.time()
+                    num_before_postproc = len(pred_bboxes_resized)
                     pred_bboxes_resized, anomaly_scores = apply_v17_postprocessing(
                         pred_bboxes_resized, anomaly_scores, config
                     )
+                    postproc_time = time.time() - postproc_start_time
+                    num_after_postproc = len(pred_bboxes_resized)
+                    
+                    # V17-3: 记录后处理结果
+                    detailed_logger.info(f"  后处理耗时: {postproc_time:.2f}秒")
+                    detailed_logger.info(f"  后处理前: {num_before_postproc}个框, 后处理后: {num_after_postproc}个框")
 
                     target_w = int(gt["width"]) if gt and gt.get("width") else int(orig_w)
                     target_h = int(gt["height"]) if gt and gt.get("height") else int(orig_h)
@@ -498,6 +600,14 @@ def run_inference(config: dict) -> dict:
                     pred_bboxes = [[int(b[0] * scale_x), int(b[1] * scale_y),
                                     int(b[2] * scale_x), int(b[3] * scale_y)]
                                    for b in pred_bboxes_resized]
+                    
+                    # V17-3: 记录最终结果和总耗时
+                    img_total_time = time.time() - img_start_time
+                    detailed_logger.info(f"  最终pred框数: {len(pred_bboxes)}")
+                    if len(pred_bboxes) > 0:
+                        detailed_logger.info(f"  最终分数: min={min(anomaly_scores):.4f}, max={max(anomaly_scores):.4f}")
+                    detailed_logger.info(f"  总耗时: {img_total_time:.2f}秒 (SAM:{sam_time:.2f}s, Heatmap:{heatmap_time if config.get('use_pixel_heatmap') else 0:.2f}s, 后处理:{postproc_time:.2f}s)")
+                    detailed_logger.info("-"*60)
 
                     record = {
                         "image_name": img_file, "image_path": img_path,
