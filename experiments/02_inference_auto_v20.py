@@ -1,26 +1,26 @@
 """
-Res-SAM v19 - Step 2: fully automatic inference with TTA (Test-Time Augmentation).
+Res-SAM v20 - Step 2: fully automatic inference with morphological post-processing and adaptive thresholding.
 
-V19 相对 V18 的核心改进：
-1. **TTA (Test-Time Augmentation)**：对每张图像应用多个增强（旋转、翻转）
-2. **投票机制**：只保留在多数增强版本中都出现的框（min_votes=3）
-3. **显著降低 FP**：偶然噪声只在特定角度出现，真异常在多个角度都能检测到
-
-继承 V18 所有功能：
-- 全图 patch-level 异常分数图 + 连通分量分析
-- 多级 FP 抑制：尺寸过滤 + per-image 自适应阈值 + NMS
-- V19 形状+分数联合过滤
+V20 相对 V18 的核心改进：
+1. **方案2：形态学后处理** - 在分数图二值化后应用闭运算和开运算，减少碎片化FP
+2. **方案4：自适应阈值优化** - 基于图像统计的动态阈值 + 双阈值策略，提升检测精度
 
 理论依据：
-- arXiv 2110.15700: Boosting Anomaly Detection Using Unsupervised Diverse TTA
-- AnomalyDINO (WACV 2025): patch-level deep nearest neighbor without SAM
-- PatchCore (CVPR 2022): memory bank + patch matching
+- Morphological Operations for Image Processing (ResearchGate 2013)
+- Deep Anomaly Detection via Morphological Transformations (MDPI 2020)
+- Adaptive Threshold in Industrial Anomaly Detection (2024)
 
-预期效果（基于模拟测试）：
-- FP 从 44 减少到 7 (-84.1%)
-- Precision 从 0.443 提升到 0.829 (+38.6%)
-- F1 从 0.504 提升到 0.673 (+16.9%)
-- TP 保持在 34-35
+继承 V18 最优配置：
+- 全图 patch-level 异常分数图 + 连通分量分析
+- hidden_size = 30
+- background_removal_method = "both"（行列双向背景去除）
+- 验证集驱动的 beta 校准
+
+预期效果：
+- F1 从 0.504 提升到 0.53-0.55 (+3-5%)
+- Precision 从 0.443 提升到 0.48-0.52 (+4-8%)
+- FP 从 44 减少到 35-40 (-10-20%)
+- 保持 Recall 在 0.55+ 水平
 """
 
 from __future__ import annotations
@@ -70,9 +70,8 @@ class _RunIdFilter(logging.Filter):
 
 CONFIG = {
     "dataset_mode": DATASET_ENHANCED,
-    # V19 使用自己的 feature bank
-    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v19", "feature_bank_v19.pth"),
-    "metadata_path":     os.path.join(BASE_DIR, "outputs", "feature_banks_v19", "metadata.json"),
+    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v20", "feature_bank_v20.pth"),
+    "metadata_path":     os.path.join(BASE_DIR, "outputs", "feature_banks_v20", "metadata.json"),
     "test_data_dirs": {
         "cavities":   os.path.join(BASE_DIR, "data", "GPR_data", "augmented_cavities"),
         "utilities":  os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities"),
@@ -84,35 +83,39 @@ CONFIG = {
         "utilities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities",
                                   "annotations", "VOC_XML_format"),
     },
-    "output_dir":     os.path.join(BASE_DIR, "outputs", "predictions_v19"),
-    "checkpoint_dir": os.path.join(BASE_DIR, "outputs", "checkpoints_v19"),
-    # 继承 V18 配置
+    "output_dir":     os.path.join(BASE_DIR, "outputs", "predictions_v20"),
+    "checkpoint_dir": os.path.join(BASE_DIR, "outputs", "checkpoints_v20"),
+    # v20：继承 V18 最优配置
     "window_size": 50,
     "stride": 5,
     "hidden_size": 30,
+    # beta 从 metadata 读取
     "beta_threshold": DEFAULT_BETA_THRESHOLD,
     "use_adaptive_beta": True,
-    # V18 核心：全图 patch 分数图
+    # v20 核心：全图 patch 分数图
     "use_score_map": True,
-    "score_map_smooth_sigma": 2.0,
-    # V18：连通分量过滤
-    "min_bbox_area": 3000,
-    "max_bbox_area": 80000,
-    "bbox_expand_pixels": 15,
-    # V18：per-image 自适应阈值
+    "score_map_smooth_sigma": 2.0,  # 高斯平滑 sigma
+    # v20 方案2：形态学后处理
+    "use_morphology": True,
+    "morphology_closing_kernel": 5,  # 闭运算 kernel 大小（填充小孔洞）
+    "morphology_opening_kernel": 3,  # 开运算 kernel 大小（去除小噪声）
+    # v20：连通分量过滤
+    "min_bbox_area": 3000,   # 最小 bbox 面积（GT 的 10%）
+    "max_bbox_area": 80000,  # 最大 bbox 面积（GT 的 250%）
+    "bbox_expand_pixels": 15,  # bbox 膨胀像素数（修正连通分量过于保守）
+    # v20 方案4：自适应阈值优化
     "use_per_image_threshold": True,
-    "per_image_threshold_ratio": 0.7,
-    # V18：NMS
+    "adaptive_threshold_strategy": "dynamic",  # "fixed" or "dynamic"
+    "per_image_threshold_ratio": 0.7,  # 默认比例（dynamic 模式下会动态调整）
+    "use_dual_threshold": True,  # 启用双阈值策略
+    "dual_threshold_high_ratio": 0.8,  # 高阈值比例（确定异常）
+    "dual_threshold_low_ratio": 0.5,   # 低阈值比例（可能异常）
+    # v20：NMS
     "nms_iou_threshold": 0.5,
     "top_k_per_image": 3,
-    # V18/V19：形状和分数联合过滤
-    "aspect_ratio_threshold": 2.9,
-    "score_threshold_p80": 0.3283,
-    # V19 核心：TTA (Test-Time Augmentation)
-    "use_tta": True,
-    "tta_augmentations": ["original", "rot90", "rot180", "rot270", "flip_lr"],
-    "tta_min_votes": 3,  # 至少在 3 个增强版本中出现
-    "tta_iou_threshold": 0.3,  # 判断框是否"相同"的 IoU 阈值
+    # v18/v19 优化：形状和分数联合过滤（保留）
+    "aspect_ratio_threshold": 2.9,  # 过滤 aspect_ratio >= 2.9 的细长框
+    "score_threshold_p80": 0.3283,  # 过滤 score < 0.3283 (正常图像p80) 的低分框
     # GPR 背景去除
     "gpr_background_removal": True,
     "background_removal_method": "both",
@@ -123,11 +126,11 @@ CONFIG = {
     "max_images_per_category": None,
     "checkpoint_interval": 50,
     "random_seed": 11,
-    "version": "v19",
+    "version": "v20",
     "feature_with_bias": True,
     "alignment_notes": (
-        "v19: V18 + TTA (Test-Time Augmentation); "
-        "投票机制显著降低FP，预期Precision从0.443提升到0.829"
+        "v20: V18 + 方案2(形态学后处理) + 方案4(自适应阈值优化); "
+        "预期F1 0.504→0.53-0.55, Precision 0.443→0.48-0.52"
     ),
 }
 
@@ -244,175 +247,12 @@ def nms(bboxes, scores, iou_threshold=0.5):
     return keep
 
 
-def apply_augmentation(image: np.ndarray, aug_name: str) -> np.ndarray:
-    """
-    应用图像增强
-    
-    Parameters:
-    -----------
-    image : np.ndarray
-        输入图像 (H, W)
-    aug_name : str
-        增强名称: "original", "rot90", "rot180", "rot270", "flip_lr"
-    
-    Returns:
-    --------
-    np.ndarray : 增强后的图像
-    """
-    if aug_name == "original":
-        return image.copy()
-    elif aug_name == "rot90":
-        return np.rot90(image, k=1)
-    elif aug_name == "rot180":
-        return np.rot90(image, k=2)
-    elif aug_name == "rot270":
-        return np.rot90(image, k=3)
-    elif aug_name == "flip_lr":
-        return np.fliplr(image)
-    else:
-        raise ValueError(f"Unknown augmentation: {aug_name}")
-
-
-def inverse_transform_bbox(bbox, aug_name: str, img_h: int, img_w: int):
-    """
-    将增强后的 bbox 变换回原始坐标
-    
-    Parameters:
-    -----------
-    bbox : list of [x1, y1, x2, y2]
-        增强后图像中的 bbox
-    aug_name : str
-        增强名称
-    img_h, img_w : int
-        原始图像尺寸
-    
-    Returns:
-    --------
-    list of [x1, y1, x2, y2] : 原始坐标系中的 bbox
-    """
-    x1, y1, x2, y2 = bbox
-    
-    if aug_name == "original":
-        return [x1, y1, x2, y2]
-    
-    elif aug_name == "rot90":
-        # 旋转 90° 后：(x, y) -> (y, H-x)
-        # 逆变换：(x', y') -> (H-y', x')
-        return [img_h - y2, x1, img_h - y1, x2]
-    
-    elif aug_name == "rot180":
-        # 旋转 180° 后：(x, y) -> (W-x, H-y)
-        # 逆变换：(x', y') -> (W-x', H-y')
-        return [img_w - x2, img_h - y2, img_w - x1, img_h - y1]
-    
-    elif aug_name == "rot270":
-        # 旋转 270° 后：(x, y) -> (W-y, x)
-        # 逆变换：(x', y') -> (y', W-x')
-        return [y1, img_w - x2, y2, img_w - x1]
-    
-    elif aug_name == "flip_lr":
-        # 左右翻转：(x, y) -> (W-x, y)
-        # 逆变换：(x', y') -> (W-x', y')
-        return [img_w - x2, y1, img_w - x1, y2]
-    
-    else:
-        raise ValueError(f"Unknown augmentation: {aug_name}")
-
-
-def tta_vote_aggregation(all_predictions: list[dict], min_votes: int, iou_threshold: float, 
-                         logger: logging.Logger) -> tuple[list, list]:
-    """
-    TTA 投票聚合：只保留在至少 min_votes 个增强版本中都出现的框
-    
-    Parameters:
-    -----------
-    all_predictions : list of dict
-        每个增强版本的预测结果，每个 dict 包含 "bboxes" 和 "scores"
-    min_votes : int
-        最小投票数
-    iou_threshold : float
-        判断框是否"相同"的 IoU 阈值
-    
-    Returns:
-    --------
-    tuple of (list, list) : (final_bboxes, final_scores)
-    """
-    if len(all_predictions) == 0:
-        return [], []
-    
-    # 收集所有框
-    all_bboxes = []
-    all_scores = []
-    for pred in all_predictions:
-        all_bboxes.extend(pred["bboxes"])
-        all_scores.extend(pred["scores"])
-    
-    if len(all_bboxes) == 0:
-        return [], []
-    
-    # 对每个框，统计它在多少个增强版本中出现
-    votes = [0] * len(all_bboxes)
-    
-    for i, bbox_i in enumerate(all_bboxes):
-        # 找到与 bbox_i 相似的框（来自不同增强版本）
-        seen_aug_indices = set()
-        
-        # 确定 bbox_i 来自哪个增强版本
-        offset = 0
-        aug_idx_i = -1
-        for aug_idx, pred in enumerate(all_predictions):
-            if i < offset + len(pred["bboxes"]):
-                aug_idx_i = aug_idx
-                break
-            offset += len(pred["bboxes"])
-        
-        seen_aug_indices.add(aug_idx_i)
-        votes[i] = 1
-        
-        # 检查其他增强版本中是否有相似的框
-        offset = 0
-        for aug_idx, pred in enumerate(all_predictions):
-            if aug_idx in seen_aug_indices:
-                offset += len(pred["bboxes"])
-                continue
-            
-            for j in range(len(pred["bboxes"])):
-                bbox_j = all_bboxes[offset + j]
-                iou = compute_iou(bbox_i, bbox_j)
-                if iou >= iou_threshold:
-                    votes[i] += 1
-                    seen_aug_indices.add(aug_idx)
-                    break
-            
-            offset += len(pred["bboxes"])
-    
-    # 保留投票数 >= min_votes 的框
-    final_bboxes = []
-    final_scores = []
-    
-    for i, (bbox, score, vote) in enumerate(zip(all_bboxes, all_scores, votes)):
-        if vote >= min_votes:
-            final_bboxes.append(bbox)
-            final_scores.append(score)
-    
-    logger.debug(f"  [TTA] 投票聚合: {len(all_bboxes)} 个候选框 → {len(final_bboxes)} 个最终框 (min_votes={min_votes})")
-    
-    # NMS 去重（可能有多个相似的框都通过了投票）
-    if len(final_bboxes) > 1:
-        keep_indices = nms(final_bboxes, final_scores, iou_threshold=0.5)
-        final_bboxes = [final_bboxes[i] for i in keep_indices]
-        final_scores = [final_scores[i] for i in keep_indices]
-        logger.debug(f"  [TTA] NMS 后剩余 {len(final_bboxes)} 个框")
-    
-    return final_bboxes, final_scores
-
-
 def run_inference(config: dict) -> dict:
     run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     # 设置日志
-    logger = setup_global_logger(base_dir, "02_inference_auto_v19")
+    logger = setup_global_logger(base_dir, "02_inference_auto_v20")
     
     config = dict(config)
     for key in ["feature_bank_path", "metadata_path", "output_dir", "checkpoint_dir"]:
@@ -432,12 +272,12 @@ def run_inference(config: dict) -> dict:
             logger.info(f"无 adaptive_beta，使用默认值 {effective_beta}")
     config["beta_threshold"] = effective_beta
 
-    log_section("Res-SAM v19：全自动推理（V18 + TTA）", logger)
+    log_section("Res-SAM v20：全自动推理（全图 patch 分数图 + 形态学后处理 + 自适应阈值）", logger)
     log_config(config, logger)
 
     if not os.path.exists(config["feature_bank_path"]):
         raise FileNotFoundError(f"Feature bank not found: {config['feature_bank_path']}\n"
-                                f"请先运行 01_build_feature_bank_v18.py")
+                                f"请先运行 01_build_feature_bank_v20.py")
 
     os.makedirs(config["output_dir"], exist_ok=True)
     os.makedirs(config["checkpoint_dir"], exist_ok=True)
@@ -446,7 +286,7 @@ def run_inference(config: dict) -> dict:
 
     from PatchRes.ResSAM import ResSAM
 
-    logger.info("初始化 ResSAM（v19）...")
+    logger.info("初始化 ResSAM（v20）...")
     model = ResSAM(
         hidden_size=config["hidden_size"],
         window_size=config["window_size"],
@@ -516,69 +356,13 @@ def run_inference(config: dict) -> dict:
                     logger.debug(f"[{category}] 处理图像 {i+1}/{len(image_files)}: {img_file}")
                     logger.debug(f"  原始尺寸: {orig_w}×{orig_h}, 处理尺寸: {proc_w}×{proc_h}")
 
-                    # V19 核心：TTA (Test-Time Augmentation)
-                    if config.get("use_tta", False):
-                        augmentations = config.get("tta_augmentations", ["original"])
-                        min_votes = config.get("tta_min_votes", 3)
-                        tta_iou_threshold = config.get("tta_iou_threshold", 0.3)
-                        
-                        logger.debug(f"  [TTA] 使用 {len(augmentations)} 个增强版本")
-                        
-                        all_predictions = []
-                        
-                        for aug_name in augmentations:
-                            # 应用增强
-                            aug_img = apply_augmentation(img, aug_name)
-                            
-                            # 推理
-                            result = detect_with_score_map(
-                                model, aug_img, config, logger, f"{img_file}_{aug_name}"
-                            )
-                            
-                            # 逆变换 bbox 到原始坐标
-                            aug_bboxes = result["pred_bboxes"]
-                            aug_scores = result["anomaly_scores"]
-                            
-                            orig_bboxes = []
-                            for bbox in aug_bboxes:
-                                orig_bbox = inverse_transform_bbox(bbox, aug_name, proc_h, proc_w)
-                                orig_bboxes.append(orig_bbox)
-                            
-                            all_predictions.append({
-                                "aug_name": aug_name,
-                                "bboxes": orig_bboxes,
-                                "scores": aug_scores,
-                            })
-                            
-                            logger.debug(f"  [TTA] {aug_name}: {len(orig_bboxes)} 个框")
-                        
-                        # 投票聚合
-                        pred_bboxes_resized, anomaly_scores = tta_vote_aggregation(
-                            all_predictions, min_votes, tta_iou_threshold, logger
-                        )
-                        
-                        # 使用第一个增强版本（original）的统计信息
-                        result = detect_with_score_map(
-                            model, img, config, logger, img_file
-                        )
-                        num_patches = result.get("num_patches", 0)
-                        num_anomaly_patches = result.get("num_anomaly_patches", 0)
-                        num_connected_components = result.get("num_connected_components", 0)
-                        max_patch_score = result.get("max_patch_score", 0.0)
-                        mean_patch_score = result.get("mean_patch_score", 0.0)
-                    
-                    else:
-                        # V18 模式：不使用 TTA
-                        result = detect_with_score_map(
-                            model, img, config, logger, img_file
-                        )
-                        pred_bboxes_resized = result["pred_bboxes"]
-                        anomaly_scores = result["anomaly_scores"]
-                        num_patches = result.get("num_patches", 0)
-                        num_anomaly_patches = result.get("num_anomaly_patches", 0)
-                        num_connected_components = result.get("num_connected_components", 0)
-                        max_patch_score = result.get("max_patch_score", 0.0)
-                        mean_patch_score = result.get("mean_patch_score", 0.0)
+                    # V20 核心：生成全图 patch 分数图 + 形态学后处理 + 自适应阈值
+                    result = detect_with_score_map(
+                        model, img, config, logger, img_file
+                    )
+
+                    pred_bboxes_resized = result["pred_bboxes"]
+                    anomaly_scores = result["anomaly_scores"]
 
                     logger.debug(f"  检测到 {len(pred_bboxes_resized)} 个异常区域")
                     if len(pred_bboxes_resized) > 0:
@@ -598,11 +382,11 @@ def run_inference(config: dict) -> dict:
                         "pred_bboxes_resized": pred_bboxes_resized,
                         "pred_bboxes": pred_bboxes,
                         "anomaly_scores": anomaly_scores,
-                        "num_patches": num_patches,
-                        "num_anomaly_patches": num_anomaly_patches,
-                        "num_connected_components": num_connected_components,
-                        "max_patch_score": max_patch_score,
-                        "mean_patch_score": mean_patch_score,
+                        "num_patches": result.get("num_patches", 0),
+                        "num_anomaly_patches": result.get("num_anomaly_patches", 0),
+                        "num_connected_components": result.get("num_connected_components", 0),
+                        "max_patch_score": result.get("max_patch_score", 0.0),
+                        "mean_patch_score": result.get("mean_patch_score", 0.0),
                     }
 
                     if gt:
@@ -664,10 +448,10 @@ def run_inference(config: dict) -> dict:
                       f, ensure_ascii=False)
 
     # 保存最终结果
-    output_file = os.path.join(config["output_dir"], "auto_predictions_v19.json")
+    output_file = os.path.join(config["output_dir"], "auto_predictions_v20.json")
     output_data = {
         "meta": {
-            "version": "v19",
+            "version": "v20",
             "alignment_notes": config["alignment_notes"],
             "creation_time": datetime.now().isoformat(),
             "feature_bank_path": config["feature_bank_path"],
@@ -684,10 +468,6 @@ def run_inference(config: dict) -> dict:
             "per_image_threshold_ratio": float(config.get("per_image_threshold_ratio", 0.7)),
             "nms_iou_threshold": float(config.get("nms_iou_threshold", 0.5)),
             "top_k_per_image": int(config.get("top_k_per_image", 3)),
-            "use_tta": bool(config.get("use_tta", False)),
-            "tta_augmentations": config.get("tta_augmentations", []),
-            "tta_min_votes": int(config.get("tta_min_votes", 3)),
-            "tta_iou_threshold": float(config.get("tta_iou_threshold", 0.3)),
         },
         "results": all_results,
     }
@@ -700,7 +480,7 @@ def run_inference(config: dict) -> dict:
     logger.info(f"结果保存至：{output_file}")
     logger.info(f"处理图像数：{total_images}，检出框数：{total_detections}")
     
-    log_finish("02_inference_auto_v19", logger)
+    log_finish("02_inference_auto_v20", logger)
     
     return all_results
 
@@ -708,7 +488,7 @@ def run_inference(config: dict) -> dict:
 def detect_with_score_map(model, image: np.ndarray, config: dict, 
                           logger: logging.Logger, img_name: str) -> dict:
     """
-    V18 核心：使用全图 patch 分数图进行异常检测
+    V20 核心：使用全图 patch 分数图 + 形态学后处理 + 自适应阈值进行异常检测
     
     流程：
     1. 滑窗提取所有 patch
@@ -716,20 +496,23 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
     3. Feature Bank 比较得到 patch 分数
     4. 生成全图分数图
     5. 高斯平滑
-    6. 阈值化 + 连通分量分析
-    7. 多级 FP 抑制
+    6. V20 方案4：改进的自适应阈值（动态比例 + 双阈值）
+    7. 阈值化
+    8. V20 方案2：形态学后处理（闭运算 + 开运算）
+    9. 连通分量分析
+    10. 多级 FP 抑制
     """
     img_h, img_w = image.shape
     window_size = config["window_size"]
     stride = config["stride"]
     beta = config["beta_threshold"]
     
-    logger.debug(f"  [V18] 开始生成全图 patch 分数图")
+    logger.debug(f"  [V20] 开始生成全图 patch 分数图")
     
     # Step 1: 滑窗提取所有 patch 及其位置
     patches = model._extract_patches(image)  # [N, window_size, window_size]
     if patches.shape[0] == 0:
-        logger.debug(f"  [V18] 未提取到任何 patch")
+        logger.debug(f"  [V20] 未提取到任何 patch")
         return {
             "pred_bboxes": [],
             "anomaly_scores": [],
@@ -751,15 +534,15 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
     
     # 验证 patch 数量一致性
     if num_patches != patches.shape[0]:
-        logger.error(f"  [V18] Patch 数量不匹配: positions={num_patches}, patches={patches.shape[0]}")
-        logger.error(f"  [V18] 图像尺寸: {img_h}×{img_w}, window_size={window_size}, stride={stride}")
+        logger.error(f"  [V20] Patch 数量不匹配: positions={num_patches}, patches={patches.shape[0]}")
+        logger.error(f"  [V20] 图像尺寸: {img_h}×{img_w}, window_size={window_size}, stride={stride}")
         # 使用实际提取的 patch 数量
         num_patches = patches.shape[0]
         # 重新计算位置（如果数量不匹配，可能是边界处理问题）
         if num_patches < len(patch_positions):
             patch_positions = patch_positions[:num_patches]
         else:
-            logger.error(f"  [V18] 无法修复 patch 位置，跳过该图像")
+            logger.error(f"  [V20] 无法修复 patch 位置，跳过该图像")
             return {
                 "pred_bboxes": [],
                 "anomaly_scores": [],
@@ -770,7 +553,7 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
                 "mean_patch_score": 0.0,
             }
     
-    logger.debug(f"  [V18] 提取 {num_patches} 个 patch")
+    logger.debug(f"  [V20] 提取 {num_patches} 个 patch")
     
     # Step 2: ESN 特征提取
     features = model._fit_patches(patches)  # [N, hidden_size+1]
@@ -781,7 +564,8 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
     
     max_score = float(np.max(scores))
     mean_score = float(np.mean(scores))
-    logger.debug(f"  [V18] Patch 分数: max={max_score:.4f}, mean={mean_score:.4f}")
+    std_score = float(np.std(scores))
+    logger.debug(f"  [V20] Patch 分数: max={max_score:.4f}, mean={mean_score:.4f}, std={std_score:.4f}")
     
     # Step 4: 生成全图分数图
     # 创建分数图（初始化为 0）
@@ -806,15 +590,16 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
     sigma = config.get("score_map_smooth_sigma", 2.0)
     if sigma > 0:
         score_map = ndimage.gaussian_filter(score_map, sigma=sigma)
-        logger.debug(f"  [V18] 高斯平滑 (sigma={sigma})")
+        logger.debug(f"  [V20] 高斯平滑 (sigma={sigma})")
     
-    # Step 6: per-image 自适应阈值
+    # Step 6: V20 方案4 - 改进的自适应阈值
     use_per_image_threshold = config.get("use_per_image_threshold", True)
     if use_per_image_threshold:
-        per_image_ratio = config.get("per_image_threshold_ratio", 0.7)
+        adaptive_strategy = config.get("adaptive_threshold_strategy", "dynamic")
+        
         if max_score < beta:
             # 最高分都低于 beta，认为是正常图，不输出任何框
-            logger.debug(f"  [V18] 最高分 {max_score:.4f} < beta {beta:.4f}，判定为正常图")
+            logger.debug(f"  [V20] 最高分 {max_score:.4f} < beta {beta:.4f}，判定为正常图")
             return {
                 "pred_bboxes": [],
                 "anomaly_scores": [],
@@ -824,21 +609,41 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
                 "max_patch_score": max_score,
                 "mean_patch_score": mean_score,
             }
+        
+        if adaptive_strategy == "dynamic":
+            # V20 方案4：基于图像统计动态调整阈值比例
+            score_range = max_score - mean_score
+            
+            if std_score < 0.1:
+                # 分数分布集中 → 更严格
+                adaptive_ratio = 0.8
+                logger.debug(f"  [V20] 分数分布集中 (std={std_score:.4f})，使用严格阈值比例 {adaptive_ratio}")
+            elif score_range > 0.5:
+                # 分数范围大 → 更宽松
+                adaptive_ratio = 0.6
+                logger.debug(f"  [V20] 分数范围大 (range={score_range:.4f})，使用宽松阈值比例 {adaptive_ratio}")
+            else:
+                # 默认
+                adaptive_ratio = config.get("per_image_threshold_ratio", 0.7)
+                logger.debug(f"  [V20] 使用默认阈值比例 {adaptive_ratio}")
         else:
-            # 使用 max_score * ratio 作为阈值
-            adaptive_threshold = max_score * per_image_ratio
-            logger.debug(f"  [V18] 自适应阈值: {adaptive_threshold:.4f} (max_score * {per_image_ratio})")
+            # 固定比例（V18 模式）
+            adaptive_ratio = config.get("per_image_threshold_ratio", 0.7)
+            logger.debug(f"  [V20] 使用固定阈值比例 {adaptive_ratio}")
+        
+        adaptive_threshold = max_score * adaptive_ratio
+        logger.debug(f"  [V20] 自适应阈值: {adaptive_threshold:.4f} (max_score * {adaptive_ratio:.2f})")
     else:
         adaptive_threshold = beta
-        logger.debug(f"  [V18] 使用全局阈值: {beta:.4f}")
+        logger.debug(f"  [V20] 使用全局阈值: {beta:.4f}")
     
-    # Step 7: 阈值化 + 连通分量分析
+    # Step 7: 阈值化
     binary_map = (score_map > adaptive_threshold).astype(np.uint8)
-    num_anomaly_pixels = int(np.sum(binary_map))
-    logger.debug(f"  [V18] 异常像素数: {num_anomaly_pixels}")
+    num_anomaly_pixels_before = int(np.sum(binary_map))
+    logger.debug(f"  [V20] 阈值化后异常像素数: {num_anomaly_pixels_before}")
     
-    if num_anomaly_pixels == 0:
-        logger.debug(f"  [V18] 无异常像素")
+    if num_anomaly_pixels_before == 0:
+        logger.debug(f"  [V20] 无异常像素")
         return {
             "pred_bboxes": [],
             "anomaly_scores": [],
@@ -849,11 +654,60 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
             "mean_patch_score": mean_score,
         }
     
-    # 连通分量分析
-    labeled_map, num_components = ndimage.label(binary_map)
-    logger.debug(f"  [V18] 连通分量数: {num_components}")
+    # Step 8: V20 方案2 - 形态学后处理
+    if config.get("use_morphology", True):
+        # 8.1 闭运算（填充小孔洞，连接邻近区域）
+        closing_kernel_size = config.get("morphology_closing_kernel", 5)
+        if closing_kernel_size > 0:
+            closing_kernel = np.ones((closing_kernel_size, closing_kernel_size), dtype=np.uint8)
+            binary_map = ndimage.binary_closing(binary_map, structure=closing_kernel).astype(np.uint8)
+            logger.debug(f"  [V20] 形态学闭运算 (kernel={closing_kernel_size}×{closing_kernel_size})")
+        
+        # 8.2 开运算（去除小噪声点，平滑边界）
+        opening_kernel_size = config.get("morphology_opening_kernel", 3)
+        if opening_kernel_size > 0:
+            opening_kernel = np.ones((opening_kernel_size, opening_kernel_size), dtype=np.uint8)
+            binary_map = ndimage.binary_opening(binary_map, structure=opening_kernel).astype(np.uint8)
+            logger.debug(f"  [V20] 形态学开运算 (kernel={opening_kernel_size}×{opening_kernel_size})")
+        
+        num_anomaly_pixels_after = int(np.sum(binary_map))
+        logger.debug(f"  [V20] 形态学后异常像素数: {num_anomaly_pixels_after} "
+                    f"(变化: {num_anomaly_pixels_after - num_anomaly_pixels_before:+d})")
     
-    # Step 8: 提取每个连通分量的 bbox
+    # Step 9: V20 方案4 - 双阈值策略（可选）
+    if config.get("use_dual_threshold", False):
+        high_ratio = config.get("dual_threshold_high_ratio", 0.8)
+        low_ratio = config.get("dual_threshold_low_ratio", 0.5)
+        
+        high_threshold = max_score * high_ratio
+        low_threshold = max_score * low_ratio
+        
+        # 高阈值区域：确定异常
+        certain_anomaly = (score_map > high_threshold).astype(np.uint8)
+        # 低阈值区域：可能异常
+        possible_anomaly = (score_map > low_threshold).astype(np.uint8)
+        
+        # 只保留与高阈值区域连通的低阈值区域
+        labeled_certain, _ = ndimage.label(certain_anomaly)
+        final_binary_map = np.zeros_like(binary_map)
+        
+        for label_id in range(1, labeled_certain.max() + 1):
+            seed_mask = (labeled_certain == label_id)
+            # 从种子区域生长到可能异常区域
+            grown_mask = ndimage.binary_dilation(seed_mask, iterations=10) & possible_anomaly
+            final_binary_map |= grown_mask
+        
+        num_dual_pixels = int(np.sum(final_binary_map))
+        logger.debug(f"  [V20] 双阈值策略: high={high_threshold:.4f}, low={low_threshold:.4f}, "
+                    f"像素数: {num_dual_pixels}")
+        
+        binary_map = final_binary_map.astype(np.uint8)
+    
+    # Step 10: 连通分量分析
+    labeled_map, num_components = ndimage.label(binary_map)
+    logger.debug(f"  [V20] 连通分量数: {num_components}")
+    
+    # Step 11: 提取每个连通分量的 bbox
     pred_bboxes = []
     pred_scores = []
     
@@ -871,7 +725,7 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
         y1, y2 = int(rows.min()), int(rows.max()) + 1
         x1, x2 = int(cols.min()), int(cols.max()) + 1
         
-        # V18 改进：bbox 膨胀（修正连通分量过于保守的问题）
+        # V20 改进：bbox 膨胀（修正连通分量过于保守的问题）
         expand_px = config.get("bbox_expand_pixels", 15)
         if expand_px > 0:
             x1 = max(0, x1 - expand_px)
@@ -882,7 +736,7 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
         # 尺寸过滤
         area = (x2 - x1) * (y2 - y1)
         if area < min_area or area > max_area:
-            logger.debug(f"  [V18] 过滤连通分量 {comp_id}: area={area} (min={min_area}, max={max_area})")
+            logger.debug(f"  [V20] 过滤连通分量 {comp_id}: area={area} (min={min_area}, max={max_area})")
             continue
         
         # 计算该区域的平均分数
@@ -891,29 +745,28 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
         pred_bboxes.append([x1, y1, x2, y2])
         pred_scores.append(region_score)
         
-        logger.debug(f"  [V18] 连通分量 {comp_id}: bbox=[{x1},{y1},{x2},{y2}], area={area}, score={region_score:.4f}")
+        logger.debug(f"  [V20] 连通分量 {comp_id}: bbox=[{x1},{y1},{x2},{y2}], area={area}, score={region_score:.4f}")
     
-    logger.debug(f"  [V18] 尺寸过滤后剩余 {len(pred_bboxes)} 个框")
+    logger.debug(f"  [V20] 尺寸过滤后剩余 {len(pred_bboxes)} 个框")
     
-    # Step 9: NMS
+    # Step 12: NMS
     if len(pred_bboxes) > 1:
         nms_threshold = config.get("nms_iou_threshold", 0.5)
         keep_indices = nms(pred_bboxes, pred_scores, nms_threshold)
         pred_bboxes = [pred_bboxes[i] for i in keep_indices]
         pred_scores = [pred_scores[i] for i in keep_indices]
-        logger.debug(f"  [V18] NMS 后剩余 {len(pred_bboxes)} 个框")
+        logger.debug(f"  [V20] NMS 后剩余 {len(pred_bboxes)} 个框")
     
-    # Step 10: Top-K 过滤
+    # Step 13: Top-K 过滤
     top_k = config.get("top_k_per_image", 3)
     if len(pred_bboxes) > top_k:
         # 按分数降序排序，保留 top-k
         sorted_indices = sorted(range(len(pred_scores)), key=lambda i: pred_scores[i], reverse=True)
         pred_bboxes = [pred_bboxes[i] for i in sorted_indices[:top_k]]
         pred_scores = [pred_scores[i] for i in sorted_indices[:top_k]]
-        logger.debug(f"  [V18] Top-{top_k} 过滤后剩余 {len(pred_bboxes)} 个框")
+        logger.debug(f"  [V20] Top-{top_k} 过滤后剩余 {len(pred_bboxes)} 个框")
     
-    # Step 11: V19 优化 - 形状和分数联合过滤
-    # 基于数据分析的最优参数：aspect_ratio < 2.9 AND score >= 0.3283 (p80)
+    # Step 14: V18/V19 优化 - 形状和分数联合过滤（保留）
     if len(pred_bboxes) > 0:
         aspect_ratio_threshold = config.get("aspect_ratio_threshold", 2.9)
         score_threshold_p80 = config.get("score_threshold_p80", 0.3283)
@@ -932,11 +785,11 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
                 filtered_bboxes.append(bbox)
                 filtered_scores.append(score)
             else:
-                logger.debug(f"  [V19] 过滤框: bbox=[{x1},{y1},{x2},{y2}], aspect={aspect_ratio:.2f}, score={score:.4f}")
+                logger.debug(f"  [V20] 过滤框: bbox=[{x1},{y1},{x2},{y2}], aspect={aspect_ratio:.2f}, score={score:.4f}")
         
         num_filtered = len(pred_bboxes) - len(filtered_bboxes)
         if num_filtered > 0:
-            logger.debug(f"  [V19] 形状+分数过滤: 移除 {num_filtered} 个框，剩余 {len(filtered_bboxes)} 个")
+            logger.debug(f"  [V20] 形状+分数过滤: 移除 {num_filtered} 个框，剩余 {len(filtered_bboxes)} 个")
         
         pred_bboxes = filtered_bboxes
         pred_scores = filtered_scores
@@ -957,12 +810,11 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
 
 if __name__ == "__main__":
     preflight_faiss_or_raise()
-    CONFIG = apply_layout_to_config_02_03(dict(CONFIG), BASE_DIR, "v19")
-    # V19 使用自己的 feature bank
-    CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v19", "feature_bank_v19.pth")
-    CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", "feature_banks_v19", "metadata.json")
-    CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", "predictions_v19")
-    CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", "checkpoints_v19")
+    CONFIG = apply_layout_to_config_02_03(dict(CONFIG), BASE_DIR, "v20")
+    CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v20", "feature_bank_v20.pth")
+    CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", "feature_banks_v20", "metadata.json")
+    CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", "predictions_v20")
+    CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", "checkpoints_v20")
 
     with torch.no_grad():
         run_inference(CONFIG)

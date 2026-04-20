@@ -1,7 +1,7 @@
 """
-Res-SAM v19 - Step 1: build the feature bank with all improvements.
+Res-SAM v20 - Step 1: build the feature bank with all improvements.
 
-v19 相对 V16 的核心改进（一次性实现所有改进）：
+v20 相对 V16 的核心改进（一次性实现所有改进）：
 1. 继承 V16 的验证集驱动 beta 校准
 2. 使用多个 beta 候选值（p10, p20）用于后续推理
 3. 为后续的 pixel-level heatmap 和 NMS 做准备
@@ -17,7 +17,7 @@ v19 相对 V16 的核心改进（一次性实现所有改进）：
 - 验证集驱动的 beta 校准
 
 预期效果：
-- 为 v19 推理提供多个 beta 候选值（p5, p10, p20）
+- 为 v20 推理提供多个 beta 候选值（p5, p10, p20）
 - 保持 V16 的粗筛丢弃率改进（0% vs V15 的 100%）
 - F1(IoU>0.5) 目标：0.25-0.35（通过后续推理改进实现）
 """
@@ -52,10 +52,10 @@ CONFIG = {
         "augmented_cavities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_cavities"),
         "augmented_utilities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities"),
     },
-    "output_dir": os.path.join(BASE_DIR, "outputs", "feature_banks_v19"),
-    "output_file": "feature_bank_v19.pth",
+    "output_dir": os.path.join(BASE_DIR, "outputs", "feature_banks_v20"),
+    "output_file": "feature_bank_v20.pth",
     "metadata_file": "metadata.json",
-    # v19：继承 V16 最优配置
+    # v20：继承 V16 最优配置
     "window_size": 50,
     "stride": 5,
     "hidden_size": 30,  # V16 最优
@@ -66,13 +66,13 @@ CONFIG = {
     "coreset_ratio": 0.5,
     "coreset_min_size": 500,
     "coreset_max_size": 5000,
-    # v19 方案 4：多尺度 Memory Bank
+    # v20 方案 4：多尺度 Memory Bank
     "use_multiscale_memory": True,  # 启用多尺度 Memory Bank
     "local_memory_per_group": 50,   # 每个原始图组的局部 Memory Bank 大小
     # GPR 行列双向背景去除
     "gpr_background_removal": True,
     "background_removal_method": "both",  # V16 最优
-    # v19 核心：验证集驱动的 beta 校准（继承 V16）
+    # v20 核心：验证集驱动的 beta 校准（继承 V16）
     "num_val_normal": 20,  # 正常验证集大小
     "num_val_anomaly": 20,  # 异常验证集大小
     "val_seed": 42,  # 验证集划分的随机种子（与建库种子分离）
@@ -81,10 +81,10 @@ CONFIG = {
     "image_size": (369, 369),
     "device": "auto",
     "random_seed": 11,  # 建库的随机种子
-    "version": "v19",
+    "version": "v20",
     "feature_with_bias": True,
     "alignment_notes": (
-        "v19: 继承V16验证集驱动beta校准 + 为pixel-level heatmap和NMS做准备; "
+        "v20: 继承V16验证集驱动beta校准 + 为pixel-level heatmap和NMS做准备; "
         "一次性实现所有改进"
     ),
 }
@@ -248,7 +248,7 @@ def build_multiscale_memory_bank(
     config: dict
 ) -> dict:
     """
-    v19 方案 4：构建多尺度 Memory Bank
+    v20 方案 4：构建多尺度 Memory Bank
     
     理论依据：论文 "Multimodal Task Representation Memory Bank vs. Catastrophic Forgetting in Anomaly Detection"
     
@@ -305,14 +305,14 @@ def build_multiscale_memory_bank(
 
 def calibrate_beta_with_validation(model, feature_bank_np, val_split, config: dict) -> dict:
     """
-    v19 核心：用验证集（正常+异常）校准 beta（继承 V16）
+    v20 核心：用验证集（正常+异常）校准 beta（继承 V16）
     
     方法：
     1. 在验证集上计算 patch 级 anomaly scores
     2. 用 Youden Index 找最优阈值（最大化 TPR - FPR）
     3. 同时计算多个候选 beta（p5/p10/p20 等）
     
-    v19 改进：
+    v20 改进：
     - 保存更多候选 beta 值（p5, p10, p20）供推理时选择
     - 为后续的 pixel-level heatmap 提供归一化阈值
     
@@ -324,7 +324,7 @@ def calibrate_beta_with_validation(model, feature_bank_np, val_split, config: di
             'val_stats': dict,  # 验证集统计信息
         }
     """
-    print("\n=== v19 验证集驱动的 Beta 校准（继承 V16）===")
+    print("\n=== v20 验证集驱动的 Beta 校准（继承 V16）===")
     
     # 1. 加载验证集
     normal_dir = config["normal_data_sources"]["augmented_intact"]
@@ -371,7 +371,7 @@ def calibrate_beta_with_validation(model, feature_bank_np, val_split, config: di
           f"p20={np.percentile(anomaly_scores,20):.4f}, p50={np.percentile(anomaly_scores,50):.4f}, "
           f"max={anomaly_scores.max():.4f}")
     
-    # 3. 计算多个候选 beta（v19：保存更多候选值）
+    # 3. 计算多个候选 beta（v20：保存更多候选值）
     beta_candidates = {
         'anomaly_p5': float(np.percentile(anomaly_scores, 5)),
         'anomaly_p10': float(np.percentile(anomaly_scores, 10)),
@@ -406,15 +406,15 @@ def calibrate_beta_with_validation(model, feature_bank_np, val_split, config: di
     
     beta_candidates['youden_index'] = best_beta
     
-    print(f"\n  Beta 候选值（v19 扩展）:")
+    print(f"\n  Beta 候选值（v20 扩展）:")
     for name, value in beta_candidates.items():
         print(f"    {name:20s} = {value:.4f}")
     
-    # 5. v19：默认使用 anomaly_p10（比 V16 的 p5 更激进，减少 FP）
+    # 5. v20：默认使用 anomaly_p10（比 V16 的 p5 更激进，减少 FP）
     final_beta = beta_candidates['anomaly_p10']
     print(f"\n  最终 beta = {final_beta:.4f}  (策略: anomaly_p10)")
     print(f"  对比 V16 beta = {beta_candidates['anomaly_p5']:.4f}（anomaly_p5）")
-    print(f"  v19 策略：使用 p10 减少 FP，同时保留多个候选值供推理选择")
+    print(f"  v20 策略：使用 p10 减少 FP，同时保留多个候选值供推理选择")
     
     return {
         'beta': final_beta,
@@ -452,7 +452,7 @@ def build_feature_bank(config: dict):
     torch.manual_seed(config["random_seed"])
 
     print("=" * 60)
-    print("Res-SAM v19：Feature Bank 构建（继承 V16 + 扩展 beta 候选值）")
+    print("Res-SAM v20：Feature Bank 构建（继承 V16 + 扩展 beta 候选值）")
     print("=" * 60)
     print(f"  hidden_size              = {config['hidden_size']}")
     print(f"  background_removal       = {config.get('background_removal_method')}")
@@ -469,7 +469,7 @@ def build_feature_bank(config: dict):
     val_split = split_validation_set(config)
     
     # 2. 初始化模型
-    print("\n初始化 ResSAM (v19)...")
+    print("\n初始化 ResSAM (v20)...")
     model = ResSAM(
         hidden_size=config["hidden_size"],
         window_size=config["window_size"],
@@ -489,7 +489,7 @@ def build_feature_bank(config: dict):
     )
     
     all_features_list = []
-    image_ids_list = []  # v19: 记录每个 patch 对应的 image_id
+    image_ids_list = []  # v20: 记录每个 patch 对应的 image_id
     print(f"\n提取 {len(images)} 张图像的 patch 特征...")
     for i, img in enumerate(tqdm(images, desc="  提取特征")):
         img_file = os.path.basename(paths[i])
@@ -501,7 +501,7 @@ def build_feature_bank(config: dict):
         feats = model._fit_patches(patches)
         all_features_list.append(feats.detach().cpu().numpy())
         
-        # v19: 记录每个 patch 对应的 image_id
+        # v20: 记录每个 patch 对应的 image_id
         image_ids_list.extend([img_id] * patches.shape[0])
 
     if not all_features_list:
@@ -520,7 +520,7 @@ def build_feature_bank(config: dict):
     coreset_features = all_features[coreset_indices]
     print(f"Coreset 特征: {coreset_features.shape}")
 
-    # 4.5. v19 方案 4：构建多尺度 Memory Bank
+    # 4.5. v20 方案 4：构建多尺度 Memory Bank
     multiscale_memory = None
     if config.get("use_multiscale_memory", False):
         # image_ids_list 已经在特征提取时构建好了
@@ -532,7 +532,7 @@ def build_feature_bank(config: dict):
     model.anomaly_scorer.fit([coreset_features])
     model._init_nn_searcher(coreset_features)
     
-    # 6. v19 核心：验证集驱动的 beta 校准（继承 V16，扩展候选值）
+    # 6. v20 核心：验证集驱动的 beta 校准（继承 V16，扩展候选值）
     beta_result = calibrate_beta_with_validation(model, coreset_features, val_split, config)
     
     # 7. 保存 Feature Bank（包含多尺度 Memory Bank）
@@ -545,20 +545,20 @@ def build_feature_bank(config: dict):
         }
     
     model.save_feature_bank(output_path)
-    print(f"\nFeature Bank v19 保存至: {output_path}")
+    print(f"\nFeature Bank v20 保存至: {output_path}")
 
     # 8. 保存元数据
     all_metadata = {
         "config": {k: v for k, v in config.items() if not callable(v)},
         "creation_time": datetime.now().isoformat(),
-        "version": "v19",
+        "version": "v20",
         "alignment_notes": config.get("alignment_notes", ""),
         "feature_bank_shape": list(coreset_features.shape),
         "feature_bank_path": output_path,
         "total_patches_before_coreset": int(all_features.shape[0]),
         "coreset_size": int(coreset_features.shape[0]),
         "coreset_ratio_actual": float(coreset_features.shape[0] / all_features.shape[0]),
-        # v19 核心：验证集驱动的 beta（继承 V16，扩展候选值）
+        # v20 核心：验证集驱动的 beta（继承 V16，扩展候选值）
         "adaptive_beta": beta_result['beta'],
         "beta_calibration_method": beta_result['beta_method'],
         "beta_candidates": beta_result['beta_candidates'],
@@ -570,7 +570,7 @@ def build_feature_bank(config: dict):
             "stats": beta_result['val_stats'],
         },
         "fixed_beta_legacy": float(DEFAULT_BETA_THRESHOLD),
-        # v19 方案 4：多尺度 Memory Bank 信息
+        # v20 方案 4：多尺度 Memory Bank 信息
         "multiscale_memory": {
             "enabled": config.get("use_multiscale_memory", False),
             "global_memory_shape": list(multiscale_memory['global_memory'].shape) if multiscale_memory else None,
@@ -592,20 +592,20 @@ def build_feature_bank(config: dict):
     print(f"元数据保存至: {metadata_path}")
     print(f"\n最终 adaptive_beta = {beta_result['beta']:.4f}")
     print(f"对比 V16 beta = {beta_result['beta_candidates']['anomaly_p5']:.4f}（anomaly_p5）")
-    print(f"v19 策略：使用 anomaly_p10，同时保存多个候选值供推理选择")
+    print(f"v20 策略：使用 anomaly_p10，同时保存多个候选值供推理选择")
 
     return torch.from_numpy(coreset_features)
 
 
 if __name__ == "__main__":
     # 设置全局日志
-    logger = setup_global_logger(BASE_DIR, "01_build_feature_bank_v19")
+    logger = setup_global_logger(BASE_DIR, "01_build_feature_bank_v20")
     
     preflight_faiss_or_raise()
-    CONFIG = apply_layout_to_config_01(dict(CONFIG), BASE_DIR, "v19")
-    CONFIG["version"] = "v19"
-    CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v19")
-    CONFIG["output_file"] = "feature_bank_v19.pth"
+    CONFIG = apply_layout_to_config_01(dict(CONFIG), BASE_DIR, "v20")
+    CONFIG["version"] = "v20"
+    CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v20")
+    CONFIG["output_file"] = "feature_bank_v20.pth"
     CONFIG["normal_data_sources"] = {
         "augmented_intact": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_intact")
     }
@@ -625,6 +625,7 @@ if __name__ == "__main__":
     with torch.no_grad():
         build_feature_bank(CONFIG)
     
-    log_finish("01_build_feature_bank_v19", logger)
+    log_finish("01_build_feature_bank_v20", logger)
+
 
 
