@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-V18 评估脚本
+v19 评估脚本
 评估全图 patch 分数图方法的效果
 """
 from __future__ import print_function
@@ -38,8 +38,8 @@ def compute_iou(box1, box2):
     union = area1 + area2 - inter
     return inter / union if union > 0 else 0.0
 
-def evaluate_v18(pred_path, meta_path):
-    """评估 V18 结果"""
+def evaluate_v19(pred_path, meta_path):
+    """评估 v19 结果"""
     try:
         with open(pred_path, 'r', encoding='utf-8') as f:
             obj = json.load(f)
@@ -146,37 +146,37 @@ def evaluate_v18(pred_path, meta_path):
 
 if __name__ == '__main__':
     # 设置全局日志
-    logger = setup_global_logger(BASE_DIR, "03_evaluate_v18")
+    logger = setup_global_logger(BASE_DIR, "03_evaluate_v19")
     
-    log_section("V18 评估：全图 patch 分数图方法", logger)
+    log_section("v19 评估：全图 patch 分数图方法", logger)
     
     # 输入文件路径
-    pred_path = os.path.join(BASE_DIR, "outputs", "predictions_v18", "auto_predictions_v18.json")
-    meta_path = os.path.join(BASE_DIR, "outputs", "feature_banks_v18", "metadata.json")
+    pred_path = os.path.join(BASE_DIR, "outputs", "predictions_v19", "auto_predictions_v19.json")
+    meta_path = os.path.join(BASE_DIR, "outputs", "feature_banks_v19", "metadata.json")
     
     # 检查文件是否存在
     if not os.path.exists(pred_path):
         logger.error(f"预测结果文件不存在: {pred_path}")
-        logger.error("请先运行: python Res-SAM/experiments/02_inference_auto_v18.py")
+        logger.error("请先运行: python Res-SAM/experiments/02_inference_auto_v19.py")
         sys.exit(1)
     
     if not os.path.exists(meta_path):
         logger.error(f"元数据文件不存在: {meta_path}")
-        logger.error("请先运行: python Res-SAM/experiments/01_build_feature_bank_v18.py")
+        logger.error("请先运行: python Res-SAM/experiments/01_build_feature_bank_v19.py")
         sys.exit(1)
     
     logger.info(f"读取预测结果: {pred_path}")
     logger.info(f"读取元数据: {meta_path}")
     
     # 评估
-    result = evaluate_v18(pred_path, meta_path)
+    result = evaluate_v19(pred_path, meta_path)
     
     if result is None:
         logger.error("评估失败")
         sys.exit(1)
     
     # 输出结果
-    log_section("V18 评估结果", logger)
+    log_section("v19 评估结果", logger)
     
     logger.info(f"Feature Bank 配置:")
     logger.info(f"  hidden_size: {result['meta'].get('config', {}).get('hidden_size')}")
@@ -208,7 +208,7 @@ if __name__ == '__main__':
         logger.info(f"    Precision={m['precision']:.4f}, Recall={m['recall']:.4f}, F1={m['f1']:.4f}")
     
     # 保存评估报告
-    report_path = os.path.join(BASE_DIR, "outputs", "predictions_v18", "evaluation_report_v18.json")
+    report_path = os.path.join(BASE_DIR, "outputs", "predictions_v19", "evaluation_report_v19.json")
     with open(report_path, 'w', encoding='utf-8') as f:
         # 移除不能序列化的部分
         save_result = {
@@ -231,10 +231,10 @@ if __name__ == '__main__':
     
     logger.info(f"\n评估报告已保存: {report_path}")
     
-    log_finish("03_evaluate_v18", logger)
+    log_finish("03_evaluate_v19", logger)
     
     print("\n" + "="*80)
-    print("V18 评估完成！")
+    print("v19 评估完成！")
     print("="*80)
     print(f"主要指标 (IoU=0.5):")
     m = result['metrics_by_iou'][0.5]
@@ -396,3 +396,4 @@ if __name__ == '__main__':
     print("=" * 80)
     
     log_finish("03_evaluate_v17", logger)
+
