@@ -150,8 +150,17 @@ if __name__ == '__main__':
     
     log_section("v20 评估：全图 patch 分数图方法", logger)
     
+    # 从环境变量读取输出目录后缀
+    output_suffix = os.environ.get("OUTPUT_SUFFIX", "").strip()
+    
     # 输入文件路径
-    pred_path = os.path.join(BASE_DIR, "outputs", "predictions_v20", "auto_predictions_v20.json")
+    if output_suffix:
+        pred_path = os.path.join(BASE_DIR, "outputs", f"predictions_v20{output_suffix}", "auto_predictions_v20.json")
+        report_path = os.path.join(BASE_DIR, "outputs", f"predictions_v20{output_suffix}", "evaluation_report_v20.json")
+    else:
+        pred_path = os.path.join(BASE_DIR, "outputs", "predictions_v20", "auto_predictions_v20.json")
+        report_path = os.path.join(BASE_DIR, "outputs", "predictions_v20", "evaluation_report_v20.json")
+    
     meta_path = os.path.join(BASE_DIR, "outputs", "feature_banks_v20", "metadata.json")
     
     # 检查文件是否存在
@@ -208,7 +217,6 @@ if __name__ == '__main__':
         logger.info(f"    Precision={m['precision']:.4f}, Recall={m['recall']:.4f}, F1={m['f1']:.4f}")
     
     # 保存评估报告
-    report_path = os.path.join(BASE_DIR, "outputs", "predictions_v20", "evaluation_report_v20.json")
     with open(report_path, 'w', encoding='utf-8') as f:
         # 移除不能序列化的部分
         save_result = {

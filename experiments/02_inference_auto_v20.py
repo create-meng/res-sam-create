@@ -85,6 +85,7 @@ CONFIG = {
     },
     "output_dir":     os.path.join(BASE_DIR, "outputs", "predictions_v20"),
     "checkpoint_dir": os.path.join(BASE_DIR, "outputs", "checkpoints_v20"),
+    "output_suffix": "",  # 输出目录后缀，用于区分不同实验
     # v20：继承 V18 最优配置
     "window_size": 50,
     "stride": 5,
@@ -142,6 +143,29 @@ if _max_images_env:
             CONFIG["max_images_per_category"] = v
     except Exception:
         pass
+
+# 环境变量控制：USE_MORPHOLOGY (0=关闭, 1=启用)
+_use_morphology_env = (os.environ.get("USE_MORPHOLOGY") or "").strip()
+if _use_morphology_env:
+    try:
+        CONFIG["use_morphology"] = bool(int(_use_morphology_env))
+    except Exception:
+        pass
+
+# 环境变量控制：USE_DUAL_THRESHOLD (0=关闭, 1=启用)
+_use_dual_threshold_env = (os.environ.get("USE_DUAL_THRESHOLD") or "").strip()
+if _use_dual_threshold_env:
+    try:
+        CONFIG["use_dual_threshold"] = bool(int(_use_dual_threshold_env))
+    except Exception:
+        pass
+
+# 环境变量控制：OUTPUT_SUFFIX (用于区分不同实验的输出目录)
+_output_suffix_env = (os.environ.get("OUTPUT_SUFFIX") or "").strip()
+if _output_suffix_env:
+    CONFIG["output_suffix"] = _output_suffix_env
+    CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", f"predictions_v20{_output_suffix_env}")
+    CONFIG["checkpoint_dir"] = os.path.join(BASE_DIR, "outputs", f"checkpoints_v20{_output_suffix_env}")
 
 
 def remove_gpr_background(arr: np.ndarray, method: str = "both") -> np.ndarray:
@@ -811,10 +835,18 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
 if __name__ == "__main__":
     preflight_faiss_or_raise()
     CONFIG = apply_layout_to_config_02_03(dict(CONFIG), BASE_DIR, "v20")
+    
+    # 应用输出目录后缀
+    if CONFIG.get("output_suffix"):
+        suffix = CONFIG["output_suffix"]
+        CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", f"predictions_v20{suffix}")
+        CONFIG["checkpoint_dir"] = os.path.join(BASE_DIR, "outputs", f"checkpoints_v20{suffix}")
+    else:
+        CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", "predictions_v20")
+        CONFIG["checkpoint_dir"] = os.path.join(BASE_DIR, "outputs", "checkpoints_v20")
+    
     CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v20", "feature_bank_v20.pth")
     CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", "feature_banks_v20", "metadata.json")
-    CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", "predictions_v20")
-    CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", "checkpoints_v20")
 
     with torch.no_grad():
         run_inference(CONFIG)
