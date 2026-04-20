@@ -70,9 +70,9 @@ class _RunIdFilter(logging.Filter):
 
 CONFIG = {
     "dataset_mode": DATASET_ENHANCED,
-    # V19 使用 V18 的 feature bank（不需要重新构建）
-    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v18", "feature_bank_v18.pth"),
-    "metadata_path":     os.path.join(BASE_DIR, "outputs", "feature_banks_v18", "metadata.json"),
+    # V19 使用自己的 feature bank
+    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v19", "feature_bank_v19.pth"),
+    "metadata_path":     os.path.join(BASE_DIR, "outputs", "feature_banks_v19", "metadata.json"),
     "test_data_dirs": {
         "cavities":   os.path.join(BASE_DIR, "data", "GPR_data", "augmented_cavities"),
         "utilities":  os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities"),
@@ -958,9 +958,9 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
 if __name__ == "__main__":
     preflight_faiss_or_raise()
     CONFIG = apply_layout_to_config_02_03(dict(CONFIG), BASE_DIR, "v19")
-    # V19 使用 V18 的 feature bank
-    CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v18", "feature_bank_v18.pth")
-    CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", "feature_banks_v18", "metadata.json")
+    # V19 使用自己的 feature bank
+    CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v19", "feature_bank_v19.pth")
+    CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", "feature_banks_v19", "metadata.json")
     CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", "predictions_v19")
     CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", "checkpoints_v19")
 
