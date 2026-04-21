@@ -1,25 +1,24 @@
 """
-Res-SAM v20 - Step 1: build the feature bank with all improvements.
+Res-SAM v21 - Step 1: build the feature bank (继承 V20，无需修改)
 
-v20 相对 V16 的核心改进（一次性实现所有改进）：
-1. 继承 V16 的验证集驱动 beta 校准
-2. 使用多个 beta 候选值（p10, p20）用于后续推理
-3. 为后续的 pixel-level heatmap 和 NMS 做准备
+V21 说明：
+- Feature Bank 构建过程与 V20 完全相同
+- V21 的优化主要在推理阶段（方案1参数优化 + 方案2局部对比度增强）
+- 本脚本仅更新版本号和输出目录，核心逻辑不变
 
-理论依据：
-- 验证集驱动 beta：论文 "Anomalous Samples for Few-Shot Anomaly Detection" (IJCNN 2025)
-- Coreset 采样：论文 "Continual Anomaly Detection Based on Incremental Coreset" (arXiv 2511.08634)
+V21 优化方案（在推理阶段实施）：
+- 方案1：参数优化（top_k=1, nms=0.3, min_area=5000）
+- 方案2：局部对比度增强（在 remove_gpr_background 中实施）
 
-继承 V16 最优配置：
+继承 V20/V16 最优配置：
 - hidden_size = 30
 - background_removal_method = "both"（行列双向背景去除）
 - 分组采样(20张) + coreset + merge_all
 - 验证集驱动的 beta 校准
 
 预期效果：
-- 为 v20 推理提供多个 beta 候选值（p5, p10, p20）
-- 保持 V16 的粗筛丢弃率改进（0% vs V15 的 100%）
-- F1(IoU>0.5) 目标：0.25-0.35（通过后续推理改进实现）
+- 为 v21 推理提供多个 beta 候选值（p5, p10, p20）
+- F1(IoU>0.5) 目标：0.45-0.50（通过推理阶段优化实现）
 """
 
 import sys
@@ -52,8 +51,8 @@ CONFIG = {
         "augmented_cavities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_cavities"),
         "augmented_utilities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities"),
     },
-    "output_dir": os.path.join(BASE_DIR, "outputs", "feature_banks_v20"),
-    "output_file": "feature_bank_v20.pth",
+    "output_dir": os.path.join(BASE_DIR, "outputs", "feature_banks_v21"),
+    "output_file": "feature_bank_v21.pth",
     "metadata_file": "metadata.json",
     # v20：继承 V16 最优配置
     "window_size": 50,
@@ -81,11 +80,11 @@ CONFIG = {
     "image_size": (369, 369),
     "device": "auto",
     "random_seed": 11,  # 建库的随机种子
-    "version": "v20",
+    "version": "v21",
     "feature_with_bias": True,
     "alignment_notes": (
-        "v20: 继承V16验证集驱动beta校准 + 为pixel-level heatmap和NMS做准备; "
-        "一次性实现所有改进"
+        "v21: 继承V20 Feature Bank构建; "
+        "优化在推理阶段实施（方案1参数优化 + 方案2局部对比度增强）"
     ),
 }
 
@@ -599,13 +598,13 @@ def build_feature_bank(config: dict):
 
 if __name__ == "__main__":
     # 设置全局日志
-    logger = setup_global_logger(BASE_DIR, "01_build_feature_bank_v20")
+    logger = setup_global_logger(BASE_DIR, "01_build_feature_bank_v21")
     
     preflight_faiss_or_raise()
-    CONFIG = apply_layout_to_config_01(dict(CONFIG), BASE_DIR, "v20")
-    CONFIG["version"] = "v20"
-    CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v20")
-    CONFIG["output_file"] = "feature_bank_v20.pth"
+    CONFIG = apply_layout_to_config_01(dict(CONFIG), BASE_DIR, "v21")
+    CONFIG["version"] = "v21"
+    CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v21")
+    CONFIG["output_file"] = "feature_bank_v21.pth"
     CONFIG["normal_data_sources"] = {
         "augmented_intact": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_intact")
     }
@@ -625,7 +624,7 @@ if __name__ == "__main__":
     with torch.no_grad():
         build_feature_bank(CONFIG)
     
-    log_finish("01_build_feature_bank_v20", logger)
+    log_finish("01_build_feature_bank_v21", logger)
 
 
 
