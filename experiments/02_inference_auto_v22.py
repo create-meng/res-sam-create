@@ -659,7 +659,7 @@ def run_inference(config: dict) -> dict:
             image_files = image_files[:int(config["max_images_per_category"])]
         logger.info(f"共找到 {len(image_files)} 张图像")
 
-        checkpoint_file = os.path.join(config["checkpoint_dir"], f"checkpoint_auto_{category}.json")
+        checkpoint_file = os.path.join(config["checkpoint_dir"], f"checkpoint_auto_{category}{config.get('output_suffix', '')}.json")
         category_results: list[dict] = []
         start_idx = 0
         last_completed = 0
