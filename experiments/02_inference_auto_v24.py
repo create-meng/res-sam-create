@@ -141,7 +141,11 @@ CONFIG = {
     "device": "auto",
     "resize_policy": RESIZE_POLICY_FIXED,
     "image_size": (369, 369),
-    "max_images_per_category": None,
+    "max_images_per_category": (
+        int(os.getenv("MAX_IMAGES_PER_CATEGORY", "").strip())
+        if os.getenv("MAX_IMAGES_PER_CATEGORY", "").strip()
+        else None
+    ),
     "checkpoint_interval": 50,
     "random_seed": 11,
     "version": "v24",
