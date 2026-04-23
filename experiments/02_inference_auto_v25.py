@@ -1,8 +1,8 @@
 """
-Res-SAM v24 - Step 2: fully automatic inference
+Res-SAM v25 - Step 2: fully automatic inference
 
-V24 说明：
-- 当前继承 V23 最优基线
+V25 说明：
+- 当前继承 V24 最优基线
 - 用作后续检测指标优化主线
 
 固定配置：
@@ -61,8 +61,8 @@ def _to_abs(base_dir: str, path: str) -> str:
 
 CONFIG = {
     "dataset_mode": DATASET_ENHANCED,
-    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v24", "feature_bank_v24.pth"),
-    "metadata_path":     os.path.join(BASE_DIR, "outputs", "feature_banks_v24", "metadata.json"),
+    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v25", "feature_bank_v25.pth"),
+    "metadata_path":     os.path.join(BASE_DIR, "outputs", "feature_banks_v25", "metadata.json"),
     "test_data_dirs": {
         "cavities":   os.path.join(BASE_DIR, "data", "GPR_data", "augmented_cavities"),
         "utilities":  os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities"),
@@ -74,8 +74,8 @@ CONFIG = {
         "utilities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities",
                                   "annotations", "VOC_XML_format"),
     },
-    "output_dir":     os.path.join(BASE_DIR, "outputs", "predictions_v24"),
-    "checkpoint_dir": os.path.join(BASE_DIR, "outputs", "checkpoints_v24"),
+    "output_dir":     os.path.join(BASE_DIR, "outputs", "predictions_v25"),
+    "checkpoint_dir": os.path.join(BASE_DIR, "outputs", "checkpoints_v25"),
     "output_suffix": _normalize_suffix("OUTPUT_SUFFIX", ""),
     "bank_suffix": _normalize_suffix("BANK_SUFFIX", ""),
     
@@ -111,28 +111,17 @@ CONFIG = {
     "aspect_ratio_threshold": 2.9,
     "score_threshold_p80": 0.3283,
 
-    # V24 新增：原图坐标系下的二次筛选
-    "use_secondary_filter": int(os.getenv("USE_SECONDARY_FILTER", "1")),
-    "secondary_filter_min_area_orig": int(os.getenv("SECONDARY_FILTER_MIN_AREA_ORIG", "4000")),
-    "secondary_filter_min_mean_patch": float(os.getenv("SECONDARY_FILTER_MIN_MEAN_PATCH", "0.0")),
+    # V25 固化基线：沿用 V24 最优原图坐标二次筛选
+    "use_secondary_filter": 1,
+    "secondary_filter_min_area_orig": 3500,
+    "secondary_filter_min_mean_patch": 0.27,
 
-    # V24 新增：邻域一致性过滤
-    "use_neighborhood_consistency": int(os.getenv("USE_NEIGHBORHOOD_CONSISTENCY", "0")),
-    "neighborhood_kernel_size": int(os.getenv("NEIGHBORHOOD_KERNEL_SIZE", "3")),
-    "neighborhood_min_support_ratio": float(os.getenv("NEIGHBORHOOD_MIN_SUPPORT_RATIO", "0.45")),
-    "neighborhood_score_margin": float(os.getenv("NEIGHBORHOOD_SCORE_MARGIN", "0.0")),
+    # 新方案：邻域分数融合（比二值图一致性更接近 N-pad / PNI 的邻域建模思路）
+    "use_neighborhood_score_fusion": int(os.getenv("USE_NEIGHBORHOOD_SCORE_FUSION", "0")),
+    "neighborhood_fusion_kernel_size": int(os.getenv("NEIGHBORHOOD_FUSION_KERNEL_SIZE", "5")),
+    "neighborhood_fusion_weight": float(os.getenv("NEIGHBORHOOD_FUSION_WEIGHT", "0.35")),
+    "neighborhood_fusion_mode": os.getenv("NEIGHBORHOOD_FUSION_MODE", "mean").strip().lower(),
 
-    # V24 新增：框细化
-    "use_box_refinement": int(os.getenv("USE_BOX_REFINEMENT", "0")),
-    "box_refine_threshold_ratio": float(os.getenv("BOX_REFINE_THRESHOLD_RATIO", "0.88")),
-    "box_refine_min_pixels": int(os.getenv("BOX_REFINE_MIN_PIXELS", "25")),
-    "box_refine_expand_pixels": int(os.getenv("BOX_REFINE_EXPAND_PIXELS", "4")),
-
-    # V24 新增：小范围平移鲁棒聚合
-    "use_shift_robust_aggregation": int(os.getenv("USE_SHIFT_ROBUST_AGGREGATION", "0")),
-    "shift_robust_radius": int(os.getenv("SHIFT_ROBUST_RADIUS", "1")),
-    "shift_robust_reduce": os.getenv("SHIFT_ROBUST_REDUCE", "median").strip().lower(),
-    
     # GPR 背景去除
     "gpr_background_removal": True,
     "background_removal_method": "both",
@@ -148,7 +137,7 @@ CONFIG = {
     ),
     "checkpoint_interval": 50,
     "random_seed": 11,
-    "version": "v24",
+    "version": "v25",
     "feature_with_bias": True,
 }
 
@@ -250,95 +239,30 @@ def generate_score_map_single_scale(image_shape: tuple, patch_positions: list,
     return score_map
 
 
-def apply_shift_robust_aggregation(score_map: np.ndarray, config: dict,
-                                   logger: logging.Logger) -> np.ndarray:
-    radius = max(0, int(config.get("shift_robust_radius", 1) or 0))
-    if radius <= 0:
-        return score_map
-
-    reduce_mode = str(config.get("shift_robust_reduce", "median")).strip().lower()
-    shifted_maps = []
-    for dy in range(-radius, radius + 1):
-        for dx in range(-radius, radius + 1):
-            shifted = ndimage.shift(score_map, shift=(dy, dx), order=1, mode="nearest")
-            shifted_maps.append(shifted)
-
-    stacked = np.stack(shifted_maps, axis=0)
-    if reduce_mode == "mean":
-        aggregated = stacked.mean(axis=0)
-    elif reduce_mode == "min":
-        aggregated = stacked.min(axis=0)
-    elif reduce_mode == "max":
-        aggregated = stacked.max(axis=0)
-    else:
-        aggregated = np.median(stacked, axis=0)
-        reduce_mode = "median"
-
-    logger.debug(
-        f"  [V24] 小平移鲁棒聚合: radius={radius}, reduce={reduce_mode}, shifts={len(shifted_maps)}"
-    )
-    return aggregated.astype(np.float32)
-
-
-def apply_neighborhood_consistency(binary_map: np.ndarray, score_map: np.ndarray,
-                                   adaptive_threshold: float, config: dict,
-                                   logger: logging.Logger) -> np.ndarray:
-    kernel_size = max(1, int(config.get("neighborhood_kernel_size", 3) or 1))
+def apply_neighborhood_score_fusion(score_map: np.ndarray, config: dict,
+                                    logger: logging.Logger) -> np.ndarray:
+    kernel_size = max(1, int(config.get("neighborhood_fusion_kernel_size", 5) or 1))
     if kernel_size % 2 == 0:
         kernel_size += 1
-    min_support_ratio = float(config.get("neighborhood_min_support_ratio", 0.45))
-    score_margin = float(config.get("neighborhood_score_margin", 0.0))
+    weight = float(config.get("neighborhood_fusion_weight", 0.35))
+    weight = min(max(weight, 0.0), 1.0)
+    mode = str(config.get("neighborhood_fusion_mode", "mean")).strip().lower()
 
-    support_mask = (score_map >= max(0.0, adaptive_threshold - score_margin)).astype(np.uint8)
-    kernel = np.ones((kernel_size, kernel_size), dtype=np.int32)
-    support_counts = ndimage.convolve(support_mask.astype(np.int32), kernel, mode="constant", cval=0)
-    min_support = max(1, int(np.ceil(kernel_size * kernel_size * min_support_ratio)))
-    filtered = ((binary_map > 0) & (support_counts >= min_support)).astype(np.uint8)
+    local_mean = ndimage.uniform_filter(score_map, size=kernel_size, mode="nearest")
+    if mode == "max":
+        support_map = ndimage.maximum_filter(score_map, size=kernel_size, mode="nearest")
+    elif mode == "meanmax":
+        local_max = ndimage.maximum_filter(score_map, size=kernel_size, mode="nearest")
+        support_map = 0.5 * local_mean + 0.5 * local_max
+    else:
+        support_map = local_mean
+        mode = "mean"
 
+    fused = (1.0 - weight) * score_map + weight * support_map
     logger.debug(
-        f"  [V24] 邻域一致性过滤: kernel={kernel_size}, min_support={min_support}, "
-        f"before={int(binary_map.sum())}, after={int(filtered.sum())}"
+        f"  [V25] 邻域分数融合: kernel={kernel_size}, weight={weight:.2f}, mode={mode}"
     )
-    return filtered
-
-
-def refine_bbox_from_score_map(score_map: np.ndarray, bbox: list[int], adaptive_threshold: float,
-                               config: dict, logger: logging.Logger) -> list[int]:
-    x1, y1, x2, y2 = [int(v) for v in bbox]
-    h, w = score_map.shape
-    pad = max(0, int(config.get("box_refine_expand_pixels", 4) or 0))
-    x1 = max(0, x1 - pad)
-    y1 = max(0, y1 - pad)
-    x2 = min(w, x2 + pad)
-    y2 = min(h, y2 + pad)
-
-    region = score_map[y1:y2, x1:x2]
-    if region.size == 0:
-        return [x1, y1, x2, y2]
-
-    local_max = float(region.max())
-    ratio = float(config.get("box_refine_threshold_ratio", 0.88))
-    min_pixels = max(1, int(config.get("box_refine_min_pixels", 25) or 1))
-    local_threshold = max(float(adaptive_threshold), local_max * ratio)
-    refined_mask = region >= local_threshold
-
-    if int(refined_mask.sum()) < min_pixels:
-        logger.debug(
-            f"  [V24] 框细化跳过: refined_pixels={int(refined_mask.sum())} < {min_pixels}"
-        )
-        return [x1, y1, x2, y2]
-
-    rows, cols = np.where(refined_mask)
-    rx1 = x1 + int(cols.min())
-    ry1 = y1 + int(rows.min())
-    rx2 = x1 + int(cols.max()) + 1
-    ry2 = y1 + int(rows.max()) + 1
-
-    logger.debug(
-        f"  [V24] 框细化: [{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}] -> "
-        f"[{rx1},{ry1},{rx2},{ry2}], local_thr={local_threshold:.4f}"
-    )
-    return [rx1, ry1, rx2, ry2]
+    return fused.astype(np.float32)
 
 
 def nms(bboxes, scores, iou_threshold=0.5):
@@ -556,10 +480,10 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
         score_map = ndimage.gaussian_filter(score_map, sigma=sigma)
         logger.debug(f"  [V23] 高斯平滑 (sigma={sigma})")
 
-    # Step 5.5: 小范围平移鲁棒聚合
-    if config.get("use_shift_robust_aggregation", 0):
-        score_map = apply_shift_robust_aggregation(score_map, config, logger)
-    
+    # Step 5.2: 邻域分数融合
+    if config.get("use_neighborhood_score_fusion", 0):
+        score_map = apply_neighborhood_score_fusion(score_map, config, logger)
+
     # Step 6: 自适应阈值
     use_per_image_threshold = config.get("use_per_image_threshold", True)
     if use_per_image_threshold:
@@ -604,12 +528,6 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
     num_anomaly_pixels = int(np.sum(binary_map))
     logger.debug(f"  [V23] 阈值化后异常像素数: {num_anomaly_pixels}")
 
-    # Step 7.5: 邻域一致性过滤
-    if config.get("use_neighborhood_consistency", 0) and num_anomaly_pixels > 0:
-        binary_map = apply_neighborhood_consistency(binary_map, score_map, adaptive_threshold, config, logger)
-        num_anomaly_pixels = int(np.sum(binary_map))
-        logger.debug(f"  [V24] 邻域一致性过滤后异常像素数: {num_anomaly_pixels}")
-    
     if num_anomaly_pixels == 0:
         logger.debug(f"  [V23] 无异常像素")
         return {
@@ -642,11 +560,6 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
         
         y1, y2 = int(rows.min()), int(rows.max()) + 1
         x1, x2 = int(cols.min()), int(cols.max()) + 1
-
-        bbox = [x1, y1, x2, y2]
-        if config.get("use_box_refinement", 0):
-            bbox = refine_bbox_from_score_map(score_map, bbox, adaptive_threshold, config, logger)
-            x1, y1, x2, y2 = bbox
 
         # bbox 膨胀
         expand_px = config.get("bbox_expand_pixels", 15)
@@ -732,7 +645,7 @@ def run_inference(config: dict) -> dict:
     run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    logger = setup_global_logger(base_dir, "02_inference_auto_v24")
+    logger = setup_global_logger(base_dir, "02_inference_auto_v25")
     
     config = dict(config)
     for key in ["feature_bank_path", "metadata_path", "output_dir", "checkpoint_dir"]:
@@ -752,12 +665,12 @@ def run_inference(config: dict) -> dict:
             logger.info(f"无 adaptive_beta，使用默认值 {effective_beta}")
     config["beta_threshold"] = effective_beta
 
-    log_section("Res-SAM V24：继承 V23 最优基线，准备继续优化检测指标", logger)
+    log_section("Res-SAM V25：继承 V24 归档基线，准备继续优化检测指标", logger)
     log_config(config, logger)
 
     if not os.path.exists(config["feature_bank_path"]):
         raise FileNotFoundError(f"Feature bank not found: {config['feature_bank_path']}\n"
-                                f"请先运行 01_build_feature_bank_v24.py")
+                                f"请先运行 01_build_feature_bank_v25.py")
 
     os.makedirs(config["output_dir"], exist_ok=True)
     os.makedirs(config["checkpoint_dir"], exist_ok=True)
@@ -766,7 +679,7 @@ def run_inference(config: dict) -> dict:
 
     from PatchRes.ResSAM import ResSAM
 
-    logger.info("初始化 ResSAM（V24）...")
+    logger.info("初始化 ResSAM（V25）...")
     model = ResSAM(
         hidden_size=config["hidden_size"],
         window_size=config["window_size"],
@@ -869,11 +782,11 @@ def run_inference(config: dict) -> dict:
                         for bbox_orig, bbox_resized, score in zip(pred_bboxes, pred_bboxes_resized, anomaly_scores):
                             area_orig = max(0, (bbox_orig[2] - bbox_orig[0])) * max(0, (bbox_orig[3] - bbox_orig[1]))
                             if area_orig < min_area_orig:
-                                logger.debug(f"  [V24] 二次筛选移除框: 原图面积 {area_orig} < {min_area_orig}")
+                                logger.debug(f"  [V25] 二次筛选移除框: 原图面积 {area_orig} < {min_area_orig}")
                                 continue
                             if mean_patch_score < min_mean_patch:
                                 logger.debug(
-                                    f"  [V24] 二次筛选移除框: mean_patch_score {mean_patch_score:.4f} < {min_mean_patch:.4f}"
+                                    f"  [V25] 二次筛选移除框: mean_patch_score {mean_patch_score:.4f} < {min_mean_patch:.4f}"
                                 )
                                 continue
                             kept_pred.append(bbox_orig)
@@ -956,11 +869,11 @@ def run_inference(config: dict) -> dict:
 
     # 保存最终结果
     suffix = config.get("output_suffix", "")
-    output_filename = f"auto_predictions_v24{suffix}.json" if suffix else "auto_predictions_v24.json"
+    output_filename = f"auto_predictions_v25{suffix}.json" if suffix else "auto_predictions_v25.json"
     output_file = os.path.join(config["output_dir"], output_filename)
     output_data = {
         "meta": {
-            "version": "v24",
+            "version": "v25",
             "creation_time": datetime.now().isoformat(),
             "feature_bank_path": config["feature_bank_path"],
             "bank_suffix": config.get("bank_suffix", ""),
@@ -983,17 +896,10 @@ def run_inference(config: dict) -> dict:
             "use_secondary_filter": int(config.get("use_secondary_filter", 0)),
             "secondary_filter_min_area_orig": int(config.get("secondary_filter_min_area_orig", 0)),
             "secondary_filter_min_mean_patch": float(config.get("secondary_filter_min_mean_patch", 0.0)),
-            "use_neighborhood_consistency": int(config.get("use_neighborhood_consistency", 0)),
-            "neighborhood_kernel_size": int(config.get("neighborhood_kernel_size", 3)),
-            "neighborhood_min_support_ratio": float(config.get("neighborhood_min_support_ratio", 0.45)),
-            "neighborhood_score_margin": float(config.get("neighborhood_score_margin", 0.0)),
-            "use_box_refinement": int(config.get("use_box_refinement", 0)),
-            "box_refine_threshold_ratio": float(config.get("box_refine_threshold_ratio", 0.88)),
-            "box_refine_min_pixels": int(config.get("box_refine_min_pixels", 25)),
-            "box_refine_expand_pixels": int(config.get("box_refine_expand_pixels", 4)),
-            "use_shift_robust_aggregation": int(config.get("use_shift_robust_aggregation", 0)),
-            "shift_robust_radius": int(config.get("shift_robust_radius", 1)),
-            "shift_robust_reduce": config.get("shift_robust_reduce", "median"),
+            "use_neighborhood_score_fusion": int(config.get("use_neighborhood_score_fusion", 0)),
+            "neighborhood_fusion_kernel_size": int(config.get("neighborhood_fusion_kernel_size", 5)),
+            "neighborhood_fusion_weight": float(config.get("neighborhood_fusion_weight", 0.35)),
+            "neighborhood_fusion_mode": config.get("neighborhood_fusion_mode", "mean"),
             # 自适应阈值
             "use_per_image_threshold": bool(config.get("use_per_image_threshold", True)),
             "per_image_threshold_ratio": float(config.get("per_image_threshold_ratio", 0.7)),
@@ -1009,27 +915,27 @@ def run_inference(config: dict) -> dict:
     logger.info(f"结果保存至：{output_file}")
     logger.info(f"处理图像数：{total_images}，检出框数：{total_detections}")
     
-    log_finish("02_inference_auto_v24", logger)
+    log_finish("02_inference_auto_v25", logger)
     
     return all_results
 
 
 if __name__ == "__main__":
     preflight_faiss_or_raise()
-    CONFIG = apply_layout_to_config_02_03(dict(CONFIG), BASE_DIR, "v24")
+    CONFIG = apply_layout_to_config_02_03(dict(CONFIG), BASE_DIR, "v25")
     bank_suffix = CONFIG.get("bank_suffix", "")
     if bank_suffix:
         CONFIG["feature_bank_path"] = os.path.join(
-            BASE_DIR, "outputs", f"feature_banks_v24{bank_suffix}", f"feature_bank_v24{bank_suffix}.pth"
+            BASE_DIR, "outputs", f"feature_banks_v25{bank_suffix}", f"feature_bank_v25{bank_suffix}.pth"
         )
         CONFIG["metadata_path"] = os.path.join(
-            BASE_DIR, "outputs", f"feature_banks_v24{bank_suffix}", "metadata.json"
+            BASE_DIR, "outputs", f"feature_banks_v25{bank_suffix}", "metadata.json"
         )
     else:
-        CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v24", "feature_bank_v24.pth")
-        CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", "feature_banks_v24", "metadata.json")
-    CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", "predictions_v24")
-    CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", "checkpoints_v24")
+        CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v25", "feature_bank_v25.pth")
+        CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", "feature_banks_v25", "metadata.json")
+    CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", "predictions_v25")
+    CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", "checkpoints_v25")
 
     with torch.no_grad():
         run_inference(CONFIG)

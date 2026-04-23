@@ -1,8 +1,8 @@
 """
-Res-SAM v24 - Step 1: build the feature bank
+Res-SAM v25 - Step 1: build the feature bank
 
-V24 说明：
-- 继承 V23 当前最优基线
+V25 说明：
+- 继承 V24 当前最优基线
 - 作为后续提升 F1 / Precision / Recall 的主线版本
 
 固定配置：
@@ -52,8 +52,8 @@ CONFIG = {
         "augmented_cavities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_cavities"),
         "augmented_utilities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities"),
     },
-    "output_dir": os.path.join(BASE_DIR, "outputs", "feature_banks_v24"),
-    "output_file": "feature_bank_v24.pth",
+    "output_dir": os.path.join(BASE_DIR, "outputs", "feature_banks_v25"),
+    "output_file": "feature_bank_v25.pth",
     "metadata_file": "metadata.json",
     "bank_suffix": _normalize_suffix("BANK_SUFFIX", ""),
     
@@ -88,7 +88,7 @@ CONFIG = {
     "image_size": (369, 369),
     "device": "auto",
     "random_seed": 11,
-    "version": "v24",
+    "version": "v25",
     "feature_with_bias": True,
 }
 
@@ -333,7 +333,7 @@ def build_feature_bank(config: dict):
     torch.manual_seed(config["random_seed"])
 
     print("=" * 60)
-    print("Res-SAM v24：Feature Bank 构建（继承 V23 基线）")
+    print("Res-SAM v25：Feature Bank 构建（继承 V24 基线）")
     print("=" * 60)
     print(f"  hidden_size              = {config['hidden_size']}")
     print(f"  background_removal       = {config.get('background_removal_method')}")
@@ -348,7 +348,7 @@ def build_feature_bank(config: dict):
     val_split = split_validation_set(config)
     
     # 2. 初始化模型
-    print("\n初始化 ResSAM (v24)...")
+    print("\n初始化 ResSAM (v25)...")
     model = ResSAM(
         hidden_size=config["hidden_size"],
         window_size=config["window_size"],
@@ -400,13 +400,13 @@ def build_feature_bank(config: dict):
     
     # 7. 保存 Feature Bank
     model.save_feature_bank(output_path)
-    print(f"\nFeature Bank v24 保存至: {output_path}")
+    print(f"\nFeature Bank v25 保存至: {output_path}")
 
     # 8. 保存元数据
     all_metadata = {
         "config": {k: v for k, v in config.items() if not callable(v)},
         "creation_time": datetime.now().isoformat(),
-        "version": "v24",
+        "version": "v25",
         "feature_bank_shape": list(coreset_features.shape),
         "feature_bank_path": output_path,
         "total_patches_before_coreset": int(all_features.shape[0]),
@@ -438,18 +438,18 @@ def build_feature_bank(config: dict):
 
 
 if __name__ == "__main__":
-    logger = setup_global_logger(BASE_DIR, "01_build_feature_bank_v24")
+    logger = setup_global_logger(BASE_DIR, "01_build_feature_bank_v25")
     
     preflight_faiss_or_raise()
-    CONFIG = apply_layout_to_config_01(dict(CONFIG), BASE_DIR, "v24")
-    CONFIG["version"] = "v24"
+    CONFIG = apply_layout_to_config_01(dict(CONFIG), BASE_DIR, "v25")
+    CONFIG["version"] = "v25"
     bank_suffix = CONFIG.get("bank_suffix", "")
     if bank_suffix:
-        CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", f"feature_banks_v24{bank_suffix}")
-        CONFIG["output_file"] = f"feature_bank_v24{bank_suffix}.pth"
+        CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", f"feature_banks_v25{bank_suffix}")
+        CONFIG["output_file"] = f"feature_bank_v25{bank_suffix}.pth"
     else:
-        CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v24")
-        CONFIG["output_file"] = "feature_bank_v24.pth"
+        CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v25")
+        CONFIG["output_file"] = "feature_bank_v25.pth"
     CONFIG["normal_data_sources"] = {
         "augmented_intact": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_intact")
     }
@@ -468,4 +468,4 @@ if __name__ == "__main__":
     with torch.no_grad():
         build_feature_bank(CONFIG)
     
-    log_finish("01_build_feature_bank_v24", logger)
+    log_finish("01_build_feature_bank_v25", logger)

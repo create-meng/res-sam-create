@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Res-SAM V24 评估脚本
-评估 V24 主线实验效果
+Res-SAM V25 评估脚本
+评估 V25 主线实验效果
 
-V24 说明：
-- 当前继承 V23 基线
+V25 说明：
+- 当前继承 V24 基线
 - 多 IoU 阈值评估（0.1, 0.2, 0.3, 0.5）
 - 图像级 AUC
 """
@@ -73,8 +73,8 @@ def get_image_score_strategies(record):
     }
 
 
-def evaluate_v24(pred_path, meta_path):
-    """评估 v24 结果"""
+def evaluate_v25(pred_path, meta_path):
+    """评估 v25 结果"""
     try:
         with open(pred_path, 'r', encoding='utf-8') as f:
             obj = json.load(f)
@@ -188,47 +188,47 @@ def evaluate_v24(pred_path, meta_path):
 
 
 if __name__ == '__main__':
-    logger = setup_global_logger(BASE_DIR, "03_evaluate_v24")
-    log_section("V24 评估：主线版本", logger)
+    logger = setup_global_logger(BASE_DIR, "03_evaluate_v25")
+    log_section("V25 评估：主线版本", logger)
 
     output_suffix = _normalize_suffix("OUTPUT_SUFFIX", "")
     bank_suffix = _normalize_suffix("BANK_SUFFIX", "")
-    pred_filename = f"auto_predictions_v24{output_suffix}.json" if output_suffix else "auto_predictions_v24.json"
-    report_filename = f"evaluation_report_v24{output_suffix}.json" if output_suffix else "evaluation_report_v24.json"
-    pred_path   = os.path.join(BASE_DIR, "outputs", "predictions_v24", pred_filename)
-    report_path = os.path.join(BASE_DIR, "outputs", "predictions_v24", report_filename)
+    pred_filename = f"auto_predictions_v25{output_suffix}.json" if output_suffix else "auto_predictions_v25.json"
+    report_filename = f"evaluation_report_v25{output_suffix}.json" if output_suffix else "evaluation_report_v25.json"
+    pred_path   = os.path.join(BASE_DIR, "outputs", "predictions_v25", pred_filename)
+    report_path = os.path.join(BASE_DIR, "outputs", "predictions_v25", report_filename)
     if bank_suffix:
-        meta_path = os.path.join(BASE_DIR, "outputs", f"feature_banks_v24{bank_suffix}", "metadata.json")
+        meta_path = os.path.join(BASE_DIR, "outputs", f"feature_banks_v25{bank_suffix}", "metadata.json")
     else:
-        meta_path = os.path.join(BASE_DIR, "outputs", "feature_banks_v24", "metadata.json")
+        meta_path = os.path.join(BASE_DIR, "outputs", "feature_banks_v25", "metadata.json")
 
     if not os.path.exists(pred_path):
         logger.error(f"预测结果文件不存在: {pred_path}")
-        logger.error("请先运行: python experiments/02_inference_auto_v24.py")
+        logger.error("请先运行: python experiments/02_inference_auto_v25.py")
         sys.exit(1)
 
     if not os.path.exists(meta_path):
         logger.error(f"元数据文件不存在: {meta_path}")
-        logger.error("请先运行: python experiments/01_build_feature_bank_v24.py")
+        logger.error("请先运行: python experiments/01_build_feature_bank_v25.py")
         sys.exit(1)
 
     logger.info(f"读取预测结果: {pred_path}")
     logger.info(f"读取元数据:   {meta_path}")
 
-    result = evaluate_v24(pred_path, meta_path)
+    result = evaluate_v25(pred_path, meta_path)
 
     if result is None:
         logger.error("评估失败")
         sys.exit(1)
 
-    log_section("v24 评估结果", logger)
+    log_section("v25 评估结果", logger)
 
     logger.info("Feature Bank 配置:")
     logger.info(f"  hidden_size:          {result['meta'].get('config', {}).get('hidden_size')}")
     logger.info(f"  beta_threshold:       {result['meta'].get('adaptive_beta', 0.0):.4f}")
     logger.info(f"  background_removal:   {result['meta'].get('config', {}).get('background_removal_method')}")
 
-    logger.info("\nV24 推理配置:")
+    logger.info("\nV25 推理配置:")
     pm = result['pred_meta']
     logger.info(f"  top_k_per_image:       {pm.get('top_k_per_image')}")
     logger.info(f"  nms_iou_threshold:     {pm.get('nms_iou_threshold')}")
@@ -282,11 +282,11 @@ if __name__ == '__main__':
         json.dump(save_result, f, indent=2, ensure_ascii=False)
 
     logger.info(f"\n评估报告已保存: {report_path}")
-    log_finish("03_evaluate_v24", logger)
+    log_finish("03_evaluate_v25", logger)
 
     # 终端汇总输出
     print("\n" + "=" * 80)
-    print("v24 评估完成！")
+    print("v25 评估完成！")
     print("=" * 80)
     print(f"主要指标 (IoU=0.5):")
     print(f"  TP={m05['tp']}, FP={m05['fp']}, FN={m05['fn']}")
@@ -295,5 +295,5 @@ if __name__ == '__main__':
     print(f"  图像级 AUC(patch_mean)={result['image_auc_by_strategy']['patch_mean']['auc']:.4f}")
     print(f"  图像级 AUC(region_max)={result['image_auc_by_strategy']['region_max']['auc']:.4f}")
     print(f"\n对比 V23 基线 (IoU=0.5):")
-    print(f"  V24 当前: TP={m05['tp']}, FP={m05['fp']}, F1={m05['f1']:.3f}, Precision={m05['precision']:.3f}, AUC(patch_mean)={result['image_auc_by_strategy']['patch_mean']['auc']:.3f}, AUC(region_max)={result['image_auc_by_strategy']['region_max']['auc']:.3f}")
+    print(f"  V25 当前: TP={m05['tp']}, FP={m05['fp']}, F1={m05['f1']:.3f}, Precision={m05['precision']:.3f}, AUC(patch_mean)={result['image_auc_by_strategy']['patch_mean']['auc']:.3f}, AUC(region_max)={result['image_auc_by_strategy']['region_max']['auc']:.3f}")
     print("=" * 80)
