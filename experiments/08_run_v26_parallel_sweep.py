@@ -174,10 +174,22 @@ def read_json(path: Path) -> dict | None:
         return None
 
 
-def summarize_single_case(case_name: str, category_totals: dict[str, int]) -> tuple[str, bool]:
-    category_chunks: list[str] = []
+def render_bar(done: int, total: int, width: int = 18) -> str:
+    total = max(0, int(total))
+    done = max(0, min(int(done), total if total > 0 else int(done)))
+    if total <= 0:
+        return "[" + ("-" * width) + "]"
+    filled = int(round((done / total) * width))
+    filled = max(0, min(filled, width))
+    return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
+
+
+def collect_case_progress(case_name: str, category_totals: dict[str, int]) -> dict[str, object]:
+    categories: list[dict[str, object]] = []
     completed_categories = 0
     seen_checkpoint = False
+    total_processed = 0
+    total_items = 0
 
     for category in ["cavities", "utilities", "normal_auc"]:
         total = int(category_totals.get(category, 0))
@@ -192,8 +204,16 @@ def summarize_single_case(case_name: str, category_totals: dict[str, int]) -> tu
                 processed = total
         if completed:
             completed_categories += 1
+        total_processed += processed
+        total_items += total
         short_name = {"cavities": "cav", "utilities": "util", "normal_auc": "normal"}[category]
-        category_chunks.append(f"{short_name} {processed}/{total}")
+        categories.append({
+            "key": category,
+            "name": short_name,
+            "processed": processed,
+            "total": total,
+            "completed": completed,
+        })
 
     if report_path(case_name).exists():
         stage = "done"
@@ -204,24 +224,35 @@ def summarize_single_case(case_name: str, category_totals: dict[str, int]) -> tu
     else:
         stage = "pending"
 
-    return f"{case_name}:{stage} [{' | '.join(category_chunks)}]", stage == "done"
+    return {
+        "case_name": case_name,
+        "stage": stage,
+        "done": stage == "done",
+        "processed": total_processed,
+        "total": total_items,
+        "categories": categories,
+    }
 
 
-def summarize_runner(runner: dict, category_totals: dict[str, int]) -> str:
-    case_summaries: list[str] = []
+def build_runner_snapshot(runner: dict, category_totals: dict[str, int]) -> dict[str, object]:
+    case_infos: list[dict[str, object]] = []
     done_cases = 0
     current_case = "unknown"
+    total_processed = 0
+    total_items = 0
 
     for idx in runner["case_indices"]:
         case_name = str(ALL_CASES[idx]["name"])
-        summary, finished = summarize_single_case(case_name, category_totals)
-        case_summaries.append(summary)
-        if finished:
+        info = collect_case_progress(case_name, category_totals)
+        case_infos.append(info)
+        total_processed += int(info["processed"])
+        total_items += int(info["total"])
+        if bool(info["done"]):
             done_cases += 1
         elif current_case == "unknown":
             current_case = case_name
 
-    if current_case == "unknown" and case_summaries:
+    if current_case == "unknown" and case_infos:
         current_case = str(ALL_CASES[runner["case_indices"][-1]]["name"])
 
     proc = runner["proc"]
@@ -232,11 +263,52 @@ def summarize_runner(runner: dict, category_totals: dict[str, int]) -> str:
     else:
         stage = "waiting_restart"
 
+    return {
+        "title": runner["title"],
+        "stage": stage,
+        "restart_count": runner["restart_count"],
+        "done_cases": done_cases,
+        "total_cases": len(runner["case_indices"]),
+        "current_case": current_case,
+        "log_name": runner["log_path"].name,
+        "processed": total_processed,
+        "total": total_items,
+        "cases": case_infos,
+    }
+
+
+def format_case_line(case_info: dict[str, object]) -> str:
+    stage = str(case_info["stage"]).upper()
+    name = str(case_info["case_name"])
+    processed = int(case_info["processed"])
+    total = int(case_info["total"])
+    categories = case_info["categories"]
+    cat_chunks = []
+    for cat in categories:
+        cat_chunks.append(
+            f"{cat['name']} {render_bar(int(cat['processed']), int(cat['total']), width=8)} "
+            f"{int(cat['processed'])}/{int(cat['total'])}"
+        )
     return (
-        f"[{runner['title']}] cases {done_cases}/{len(runner['case_indices'])} | "
-        f"{stage} | restart={runner['restart_count']} | "
-        f"log={runner['log_path'].name} | " + " || ".join(case_summaries)
+        f"  {name:<20} {stage:<11} {render_bar(processed, total, width=14)} "
+        f"{processed:>3}/{total:<3} | " + " | ".join(cat_chunks)
     )
+
+
+def render_dashboard(runners: list[dict], category_totals: dict[str, int]) -> str:
+    lines = ["V26 Parallel Progress", ""]
+    for runner in runners:
+        snapshot = build_runner_snapshot(runner, category_totals)
+        lines.append(
+            f"{snapshot['title'][-1]} total {render_bar(int(snapshot['processed']), int(snapshot['total']), width=22)} "
+            f"{int(snapshot['processed'])}/{int(snapshot['total'])} | "
+            f"cases {int(snapshot['done_cases'])}/{int(snapshot['total_cases'])} | "
+            f"{snapshot['stage']} | restart={snapshot['restart_count']}"
+        )
+        for case_info in snapshot["cases"]:
+            lines.append(format_case_line(case_info))
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def open_log_file(log_path: Path):
@@ -343,12 +415,13 @@ def monitor_parallel_runs(runners: list[dict], category_totals: dict[str, int],
     last_snapshot = ""
     failures: dict[str, str] = {}
     while True:
-        lines = [summarize_runner(runner, category_totals) for runner in runners]
-        snapshot = "\n".join(lines)
+        snapshot = render_dashboard(runners, category_totals)
         if snapshot != last_snapshot:
-            print("\n=== PARALLEL PROGRESS ===")
-            for line in lines:
-                print(line)
+            if sys.stdout.isatty():
+                print("\033[2J\033[H", end="")
+            else:
+                print("\n=== PARALLEL PROGRESS ===")
+            print(snapshot)
             last_snapshot = snapshot
 
         for runner in runners:
