@@ -12,41 +12,62 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
 SCRIPT_07 = BASE_DIR / "experiments" / "07_run_v28_quick_sweep.py"
+BANK_PATH = BASE_DIR / "outputs" / "feature_banks_v28" / "feature_bank_v28.pth"
+WAIT_TIMEOUT_SEC = 60 * 60
+
+
+def wait_for_shared_bank(timeout_sec: int = WAIT_TIMEOUT_SEC) -> None:
+    print(f"[wait] waiting for shared feature bank: {BANK_PATH}")
+    start = time.time()
+    while True:
+        if BANK_PATH.exists() and BANK_PATH.stat().st_size > 0:
+            print(f"[wait] shared feature bank ready: {BANK_PATH}")
+            return
+        if time.time() - start > timeout_sec:
+            raise TimeoutError(f"Timed out waiting for shared feature bank: {BANK_PATH}")
+        time.sleep(2.0)
 
 
 def main() -> int:
     common_env = os.environ.copy()
+    cmd = [PYTHON, str(SCRIPT_07)]
 
-    runners = [
-        {"name": "part_a", "case_indices": "0,1"},
-        {"name": "part_b", "case_indices": "2,3"},
-    ]
+    env_a = common_env.copy()
+    env_a["V28_CASE_INDICES"] = "0,1"
+    env_a["BUILD_BANK"] = "1"
 
-    procs: list[subprocess.Popen] = []
+    print(f"[part_a] >>> {' '.join(cmd)}  (V28_CASE_INDICES={env_a['V28_CASE_INDICES']}, BUILD_BANK={env_a['BUILD_BANK']})")
+    proc_a = subprocess.Popen(cmd, cwd=str(BASE_DIR), env=env_a)
+
+    proc_b = None
     try:
-        for i, runner in enumerate(runners):
-            env = common_env.copy()
-            env["V28_CASE_INDICES"] = runner["case_indices"]
-            env["BUILD_BANK"] = "1" if i == 0 else "0"
-            cmd = [PYTHON, str(SCRIPT_07)]
-            print(f"[{runner['name']}] >>> {' '.join(cmd)}  (V28_CASE_INDICES={runner['case_indices']}, BUILD_BANK={env['BUILD_BANK']})")
-            procs.append(subprocess.Popen(cmd, cwd=str(BASE_DIR), env=env))
+        wait_for_shared_bank()
+
+        env_b = common_env.copy()
+        env_b["V28_CASE_INDICES"] = "2,3"
+        env_b["BUILD_BANK"] = "0"
+        print(f"[part_b] >>> {' '.join(cmd)}  (V28_CASE_INDICES={env_b['V28_CASE_INDICES']}, BUILD_BANK={env_b['BUILD_BANK']})")
+        proc_b = subprocess.Popen(cmd, cwd=str(BASE_DIR), env=env_b)
 
         rc = 0
-        for proc in procs:
-            proc.wait()
-            if proc.returncode != 0 and rc == 0:
-                rc = proc.returncode
+        proc_a.wait()
+        if proc_a.returncode != 0:
+            rc = proc_a.returncode
+        if proc_b is not None:
+            proc_b.wait()
+            if proc_b.returncode != 0 and rc == 0:
+                rc = proc_b.returncode
         return rc
     finally:
-        for proc in procs:
-            if proc.poll() is None:
+        for proc in [proc_a, proc_b]:
+            if proc is not None and proc.poll() is None:
                 proc.terminate()
 
 
