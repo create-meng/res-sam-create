@@ -1,7 +1,7 @@
 """
-Res-SAM v25 - Step 1: build the feature bank
+Res-SAM v26 - Step 1: build the feature bank
 
-V25 说明：
+V26 说明：
 - 继承 V24 当前最优基线
 - 作为后续提升 F1 / Precision / Recall 的主线版本
 
@@ -33,6 +33,11 @@ from experiments.paper_constants import DEFAULT_BETA_THRESHOLD, preflight_faiss_
 from PatchRes.logger import setup_global_logger, log_config, log_finish
 
 
+def _env_flag(name: str, default: str = "0") -> int:
+    value = (os.getenv(name, default) or default).strip().lower()
+    return 1 if value in {"1", "true", "yes", "on"} else 0
+
+
 def _normalize_suffix(env_name: str, fallback: str = "") -> str:
     value = (os.getenv(env_name, fallback) or "").strip()
     if not value:
@@ -52,8 +57,8 @@ CONFIG = {
         "augmented_cavities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_cavities"),
         "augmented_utilities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities"),
     },
-    "output_dir": os.path.join(BASE_DIR, "outputs", "feature_banks_v25"),
-    "output_file": "feature_bank_v25.pth",
+    "output_dir": os.path.join(BASE_DIR, "outputs", "feature_banks_v26"),
+    "output_file": "feature_bank_v26.pth",
     "metadata_file": "metadata.json",
     "bank_suffix": _normalize_suffix("BANK_SUFFIX", ""),
     
@@ -88,8 +93,12 @@ CONFIG = {
     "image_size": (369, 369),
     "device": "auto",
     "random_seed": 11,
-    "version": "v25",
+    "version": "v26",
     "feature_with_bias": True,
+    "use_softpatch_bank_filter": _env_flag("USE_SOFTPATCH_BANK_FILTER", "0"),
+    "softpatch_keep_ratio": float(os.getenv("SOFTPATCH_KEEP_RATIO", "0.85")),
+    "softpatch_knn_k": int(os.getenv("SOFTPATCH_KNN_K", "5")),
+    "softpatch_score_power": float(os.getenv("SOFTPATCH_SCORE_POWER", "1.0")),
 }
 
 
@@ -248,6 +257,51 @@ def greedy_coreset_sampling(features: np.ndarray, target_size: int, seed: int = 
     return np.array(selected, dtype=np.int64)
 
 
+def apply_softpatch_bank_filter(features: np.ndarray, config: dict) -> tuple[np.ndarray, dict]:
+    """近似 SoftPatch: 删除最孤立的正常 patch，再做 coreset。"""
+    keep_ratio = float(config.get("softpatch_keep_ratio", 1.0))
+    knn_k = max(2, int(config.get("softpatch_knn_k", 5)))
+    score_power = max(0.1, float(config.get("softpatch_score_power", 1.0)))
+
+    if features.shape[0] <= knn_k + 1 or keep_ratio >= 0.999:
+        stats = {
+            "enabled": True,
+            "applied": False,
+            "keep_ratio": keep_ratio,
+            "knn_k": knn_k,
+            "score_power": score_power,
+            "num_before": int(features.shape[0]),
+            "num_after": int(features.shape[0]),
+        }
+        return features, stats
+
+    import faiss
+
+    xb = np.ascontiguousarray(features.astype(np.float32, copy=False))
+    index = faiss.IndexFlatL2(int(xb.shape[1]))
+    index.add(xb)
+    dists, _ = index.search(xb, knn_k + 1)
+    local_density = np.sqrt(np.maximum(dists[:, 1:], 0.0)).mean(axis=1)
+    weighted_density = np.power(local_density, score_power)
+
+    keep_count = max(knn_k + 1, int(round(features.shape[0] * keep_ratio)))
+    keep_indices = np.argsort(weighted_density)[:keep_count]
+    filtered = features[np.sort(keep_indices)]
+    stats = {
+        "enabled": True,
+        "applied": True,
+        "keep_ratio": keep_ratio,
+        "knn_k": knn_k,
+        "score_power": score_power,
+        "num_before": int(features.shape[0]),
+        "num_after": int(filtered.shape[0]),
+        "local_density_mean": float(local_density.mean()),
+        "local_density_p90": float(np.percentile(local_density, 90)),
+        "local_density_max": float(local_density.max()),
+    }
+    return filtered, stats
+
+
 def calibrate_beta_with_validation(model, feature_bank_np, val_split, config: dict) -> dict:
     """验证集驱动的 beta 校准"""
     print("\n=== 验证集驱动的 Beta 校准 ===")
@@ -333,7 +387,7 @@ def build_feature_bank(config: dict):
     torch.manual_seed(config["random_seed"])
 
     print("=" * 60)
-    print("Res-SAM v25：Feature Bank 构建（继承 V24 基线）")
+    print("Res-SAM v26：Feature Bank 构建（继承 V25 基线）")
     print("=" * 60)
     print(f"  hidden_size              = {config['hidden_size']}")
     print(f"  background_removal       = {config.get('background_removal_method')}")
@@ -348,7 +402,7 @@ def build_feature_bank(config: dict):
     val_split = split_validation_set(config)
     
     # 2. 初始化模型
-    print("\n初始化 ResSAM (v25)...")
+    print("\n初始化 ResSAM (v26)...")
     model = ResSAM(
         hidden_size=config["hidden_size"],
         window_size=config["window_size"],
@@ -378,7 +432,17 @@ def build_feature_bank(config: dict):
         raise RuntimeError("没有提取到任何特征")
 
     all_features = np.concatenate(all_features_list, axis=0).astype(np.float32)
+    all_features_before_filter = int(all_features.shape[0])
     print(f"\n全量特征: {all_features.shape}")
+
+    softpatch_stats = {"enabled": False, "applied": False}
+    if int(config.get("use_softpatch_bank_filter", 0)):
+        print("\n应用 SoftPatch 风格 bank 去噪...")
+        all_features, softpatch_stats = apply_softpatch_bank_filter(all_features, config)
+        print(
+            "  SoftPatch 风格过滤: "
+            f"{softpatch_stats['num_before']} -> {softpatch_stats['num_after']} patches"
+        )
 
     # 4. Coreset 采样
     target_size = max(
@@ -400,17 +464,19 @@ def build_feature_bank(config: dict):
     
     # 7. 保存 Feature Bank
     model.save_feature_bank(output_path)
-    print(f"\nFeature Bank v25 保存至: {output_path}")
+    print(f"\nFeature Bank v26 保存至: {output_path}")
 
     # 8. 保存元数据
     all_metadata = {
         "config": {k: v for k, v in config.items() if not callable(v)},
         "creation_time": datetime.now().isoformat(),
-        "version": "v25",
+        "version": "v26",
         "feature_bank_shape": list(coreset_features.shape),
         "feature_bank_path": output_path,
         "total_patches_before_coreset": int(all_features.shape[0]),
+        "total_patches_before_softpatch_filter": all_features_before_filter,
         "coreset_size": int(coreset_features.shape[0]),
+        "softpatch_bank_filter": softpatch_stats,
         "adaptive_beta": beta_result['beta'],
         "beta_calibration_method": beta_result['beta_method'],
         "beta_candidates": beta_result['beta_candidates'],
@@ -438,18 +504,18 @@ def build_feature_bank(config: dict):
 
 
 if __name__ == "__main__":
-    logger = setup_global_logger(BASE_DIR, "01_build_feature_bank_v25")
+    logger = setup_global_logger(BASE_DIR, "01_build_feature_bank_v26")
     
     preflight_faiss_or_raise()
-    CONFIG = apply_layout_to_config_01(dict(CONFIG), BASE_DIR, "v25")
-    CONFIG["version"] = "v25"
+    CONFIG = apply_layout_to_config_01(dict(CONFIG), BASE_DIR, "v26")
+    CONFIG["version"] = "v26"
     bank_suffix = CONFIG.get("bank_suffix", "")
     if bank_suffix:
-        CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", f"feature_banks_v25{bank_suffix}")
-        CONFIG["output_file"] = f"feature_bank_v25{bank_suffix}.pth"
+        CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", f"feature_banks_v26{bank_suffix}")
+        CONFIG["output_file"] = f"feature_bank_v26{bank_suffix}.pth"
     else:
-        CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v25")
-        CONFIG["output_file"] = "feature_bank_v25.pth"
+        CONFIG["output_dir"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v26")
+        CONFIG["output_file"] = "feature_bank_v26.pth"
     CONFIG["normal_data_sources"] = {
         "augmented_intact": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_intact")
     }
@@ -468,4 +534,4 @@ if __name__ == "__main__":
     with torch.no_grad():
         build_feature_bank(CONFIG)
     
-    log_finish("01_build_feature_bank_v25", logger)
+    log_finish("01_build_feature_bank_v26", logger)

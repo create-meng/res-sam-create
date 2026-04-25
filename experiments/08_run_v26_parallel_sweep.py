@@ -1,11 +1,10 @@
 """
-V25 parallel quick sweep runner.
+V26 parallel quick sweep runner.
 
 用途：
 - 自动拆成两路并行运行
-- 父进程按需只建一次 bank，再拆成前后两组
-- 子进程日志分别写入文件，避免 tqdm 抢占同一终端
-- 父进程定时读取 checkpoint，汇总显示两路进度
+- 每个 case 使用独立 output suffix，bank 侧 case 使用独立 bank suffix
+- 父进程定时读取 checkpoint，汇总显示当前 case 进度
 - 子进程异常退出后自动重启，并从已有 checkpoint 继续
 """
 
@@ -22,10 +21,10 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
-SCRIPT_07 = BASE_DIR / "experiments" / "07_run_v25_quick_sweep.py"
-CHECKPOINT_DIR = BASE_DIR / "outputs" / "checkpoints_v25"
-PREDICTION_DIR = BASE_DIR / "outputs" / "predictions_v25"
-LOG_ROOT_DIR = BASE_DIR / "outputs" / "parallel_logs_v25"
+SCRIPT_07 = BASE_DIR / "experiments" / "07_run_v26_quick_sweep.py"
+CHECKPOINT_DIR = BASE_DIR / "outputs" / "checkpoints_v26"
+PREDICTION_DIR = BASE_DIR / "outputs" / "predictions_v26"
+LOG_ROOT_DIR = BASE_DIR / "outputs" / "parallel_logs_v26"
 
 
 def env_str(name: str, default: str) -> str:
@@ -33,42 +32,98 @@ def env_str(name: str, default: str) -> str:
 
 
 def build_common_env() -> dict[str, str]:
+    bank_root_suffix = env_str("BANK_SUFFIX", "")
     return {
-        "BANK_SUFFIX": env_str("BANK_SUFFIX", ""),
+        "BANK_SUFFIX": bank_root_suffix,
+        "BANK_ROOT_SUFFIX": bank_root_suffix,
         "MAX_IMAGES_PER_CATEGORY": env_str("MAX_IMAGES_PER_CATEGORY", "30"),
+        "SECONDARY_FILTER_MIN_MEAN_PATCH": env_str("SECONDARY_FILTER_MIN_MEAN_PATCH", "0.275"),
+        "SECONDARY_FILTER_BOX_SCORE_MIN": env_str("SECONDARY_FILTER_BOX_SCORE_MIN", "0.0"),
+        "SOFTPATCH_KEEP_RATIO": env_str("SOFTPATCH_KEEP_RATIO", "0.85"),
+        "SOFTPATCH_KNN_K": env_str("SOFTPATCH_KNN_K", "5"),
+        "SOFTPATCH_SCORE_POWER": env_str("SOFTPATCH_SCORE_POWER", "1.0"),
+        "PATCHCORE_TOPK": env_str("PATCHCORE_TOPK", "3"),
+        "PATCHCORE_REWEIGHT_LAMBDA": env_str("PATCHCORE_REWEIGHT_LAMBDA", "0.35"),
+        "THRESHOLD_NORMAL_STD_MULT": env_str("THRESHOLD_NORMAL_STD_MULT", "2.5"),
+        "THRESHOLD_IMAGE_STD_MULT": env_str("THRESHOLD_IMAGE_STD_MULT", "1.0"),
+        "THRESHOLD_MIN_FLOOR_DELTA": env_str("THRESHOLD_MIN_FLOOR_DELTA", "0.0"),
+    }
+
+
+def build_case(name: str, bank_tag: str, **env_overrides: str) -> dict[str, object]:
+    return {
+        "name": name,
+        "bank_tag": bank_tag,
+        "env": env_overrides,
     }
 
 
 ALL_CASES = [
-    ("base", 0),
-    ("nfuse", 1),
+    build_case("base", "base"),
+    build_case("softpatch", "softpatch", USE_SOFTPATCH_BANK_FILTER="1"),
+    build_case("patchcore", "base", USE_PATCHCORE_TOPK_AGG="1"),
+    build_case("threshold", "base", USE_THRESHOLD_LEARNER="1"),
+    build_case(
+        "softpatch_patchcore",
+        "softpatch",
+        USE_SOFTPATCH_BANK_FILTER="1",
+        USE_PATCHCORE_TOPK_AGG="1",
+    ),
+    build_case(
+        "softpatch_threshold",
+        "softpatch",
+        USE_SOFTPATCH_BANK_FILTER="1",
+        USE_THRESHOLD_LEARNER="1",
+    ),
+    build_case(
+        "patchcore_threshold",
+        "base",
+        USE_PATCHCORE_TOPK_AGG="1",
+        USE_THRESHOLD_LEARNER="1",
+    ),
+    build_case(
+        "all3",
+        "softpatch",
+        USE_SOFTPATCH_BANK_FILTER="1",
+        USE_PATCHCORE_TOPK_AGG="1",
+        USE_THRESHOLD_LEARNER="1",
+    ),
 ]
 
-CASE_TO_SUFFIX = {name: f"_{name}" for name, _ in ALL_CASES}
-
+CASE_BY_NAME = {str(case["name"]): case for case in ALL_CASES}
 CATEGORY_DIRS = {
     "cavities": BASE_DIR / "data" / "GPR_data" / "augmented_cavities",
     "utilities": BASE_DIR / "data" / "GPR_data" / "augmented_utilities",
     "normal_auc": BASE_DIR / "data" / "GPR_data" / "augmented_intact",
 }
-
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+
+
+def case_output_suffix(case_name: str) -> str:
+    return f"_{case_name}"
+
+
+def case_bank_suffix(root_suffix: str, bank_tag: str) -> str:
+    suffix = root_suffix or ""
+    if bank_tag == "base":
+        return suffix
+    return f"{suffix}_{bank_tag}" if suffix else f"_{bank_tag}"
 
 
 def bank_file_path(bank_suffix: str) -> Path:
     if bank_suffix:
-        return BASE_DIR / "outputs" / f"feature_banks_v25{bank_suffix}" / f"feature_bank_v25{bank_suffix}.pth"
-    return BASE_DIR / "outputs" / "feature_banks_v25" / "feature_bank_v25.pth"
+        return BASE_DIR / "outputs" / f"feature_banks_v26{bank_suffix}" / f"feature_bank_v26{bank_suffix}.pth"
+    return BASE_DIR / "outputs" / "feature_banks_v26" / "feature_bank_v26.pth"
 
 
-def resolve_build_bank(common_env: dict[str, str], default_mode: str) -> bool:
-    mode = env_str("BUILD_BANK", default_mode).lower()
-    if mode == "1":
+def resolve_build_bank(mode: str, bank_suffix: str) -> bool:
+    lower = mode.lower()
+    if lower == "1":
         return True
-    if mode == "0":
+    if lower == "0":
         return False
-    if mode == "auto":
-        return not bank_file_path(common_env["BANK_SUFFIX"]).exists()
+    if lower == "auto":
+        return not bank_file_path(bank_suffix).exists()
     raise ValueError(f"Unsupported BUILD_BANK={mode!r}, expected auto/0/1")
 
 
@@ -94,15 +149,15 @@ def build_category_totals(common_env: dict[str, str]) -> dict[str, int]:
 
 
 def checkpoint_path(case_name: str, category: str) -> Path:
-    return CHECKPOINT_DIR / f"checkpoint_auto_{category}{CASE_TO_SUFFIX[case_name]}.json"
+    return CHECKPOINT_DIR / f"checkpoint_auto_{category}{case_output_suffix(case_name)}.json"
 
 
 def prediction_path(case_name: str) -> Path:
-    return PREDICTION_DIR / f"auto_predictions_v25{CASE_TO_SUFFIX[case_name]}.json"
+    return PREDICTION_DIR / f"auto_predictions_v26{case_output_suffix(case_name)}.json"
 
 
 def report_path(case_name: str) -> Path:
-    return PREDICTION_DIR / f"evaluation_report_v25{CASE_TO_SUFFIX[case_name]}.json"
+    return PREDICTION_DIR / f"evaluation_report_v26{case_output_suffix(case_name)}.json"
 
 
 def case_is_done(case_name: str) -> bool:
@@ -119,14 +174,10 @@ def read_json(path: Path) -> dict | None:
         return None
 
 
-def summarize_case(case_name: str, title: str, log_path: Path,
-                   category_totals: dict[str, int], proc: subprocess.Popen | None,
-                   restart_count: int) -> str:
+def summarize_single_case(case_name: str, category_totals: dict[str, int]) -> tuple[str, bool]:
     category_chunks: list[str] = []
     completed_categories = 0
     seen_checkpoint = False
-    latest_category = ""
-    latest_timestamp = ""
 
     for category in ["cavities", "utilities", "normal_auc"]:
         total = int(category_totals.get(category, 0))
@@ -139,10 +190,6 @@ def summarize_case(case_name: str, title: str, log_path: Path,
             completed = bool(info.get("completed", False))
             if completed and total > 0:
                 processed = total
-            ts = str(info.get("timestamp", "") or "")
-            if ts and ts >= latest_timestamp:
-                latest_timestamp = ts
-                latest_category = category
         if completed:
             completed_categories += 1
         short_name = {"cavities": "cav", "utilities": "util", "normal_auc": "normal"}[category]
@@ -153,13 +200,43 @@ def summarize_case(case_name: str, title: str, log_path: Path,
     elif prediction_path(case_name).exists() and completed_categories == 3:
         stage = "evaluating"
     elif seen_checkpoint:
-        stage = f"running:{latest_category or 'unknown'}"
-    elif proc is not None and proc.poll() is None:
-        stage = "starting"
+        stage = "running"
     else:
         stage = "pending"
 
-    return f"[{title}] {case_name} | {stage} | restart={restart_count} | {' | '.join(category_chunks)} | log={log_path.name}"
+    return f"{case_name}:{stage} [{' | '.join(category_chunks)}]", stage == "done"
+
+
+def summarize_runner(runner: dict, category_totals: dict[str, int]) -> str:
+    case_summaries: list[str] = []
+    done_cases = 0
+    current_case = "unknown"
+
+    for idx in runner["case_indices"]:
+        case_name = str(ALL_CASES[idx]["name"])
+        summary, finished = summarize_single_case(case_name, category_totals)
+        case_summaries.append(summary)
+        if finished:
+            done_cases += 1
+        elif current_case == "unknown":
+            current_case = case_name
+
+    if current_case == "unknown" and case_summaries:
+        current_case = str(ALL_CASES[runner["case_indices"][-1]]["name"])
+
+    proc = runner["proc"]
+    if all(case_is_done(str(ALL_CASES[idx]["name"])) for idx in runner["case_indices"]):
+        stage = "done"
+    elif proc is not None and proc.poll() is None:
+        stage = f"running:{current_case}"
+    else:
+        stage = "waiting_restart"
+
+    return (
+        f"[{runner['title']}] cases {done_cases}/{len(runner['case_indices'])} | "
+        f"{stage} | restart={runner['restart_count']} | "
+        f"log={runner['log_path'].name} | " + " || ".join(case_summaries)
+    )
 
 
 def open_log_file(log_path: Path):
@@ -172,10 +249,10 @@ def spawn_runner(case_indices: list[int], build_bank: str, title: str,
     env = os.environ.copy()
     env.update(common_env)
     env["BUILD_BANK"] = build_bank
-    env["V25_CASE_INDICES"] = ",".join(str(i) for i in case_indices)
-    env["V25_SWEEP_TITLE"] = title
+    env["V26_CASE_INDICES"] = ",".join(str(i) for i in case_indices)
+    env["V26_SWEEP_TITLE"] = title
 
-    first_case_name = ALL_CASES[case_indices[0]][0]
+    first_case_name = str(ALL_CASES[case_indices[0]]["name"])
     log_path = log_dir / f"{title.lower().replace(' ', '_')}_{first_case_name}.log"
     log_file = open_log_file(log_path)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -239,7 +316,6 @@ def report_runner_failure(runner: dict) -> str:
     status = describe_return_code(proc.poll())
     print("\n=== PARALLEL FAILURE DETECTED ===")
     print(f"runner={runner['title']}")
-    print(f"case={runner['case_name']}")
     print(f"status={status}")
     print(f"log={runner['log_path']}")
     tail_lines = read_log_tail(runner["log_path"], max_lines=25)
@@ -267,13 +343,7 @@ def monitor_parallel_runs(runners: list[dict], category_totals: dict[str, int],
     last_snapshot = ""
     failures: dict[str, str] = {}
     while True:
-        lines = [
-            summarize_case(
-                runner["case_name"], runner["title"], runner["log_path"],
-                category_totals, runner["proc"], runner["restart_count"]
-            )
-            for runner in runners
-        ]
+        lines = [summarize_runner(runner, category_totals) for runner in runners]
         snapshot = "\n".join(lines)
         if snapshot != last_snapshot:
             print("\n=== PARALLEL PROGRESS ===")
@@ -286,11 +356,17 @@ def monitor_parallel_runs(runners: list[dict], category_totals: dict[str, int],
             rc = proc.poll()
             if rc is None or rc == 0:
                 continue
-            if runner["case_name"] in failures:
+            failure_key = runner["title"]
+            if failure_key in failures:
                 continue
 
             status = report_runner_failure(runner)
-            if runner["restart_count"] < runner["max_restarts"] and not case_is_done(runner["case_name"]):
+            remaining_cases = [
+                str(ALL_CASES[idx]["name"])
+                for idx in runner["case_indices"]
+                if not case_is_done(str(ALL_CASES[idx]["name"]))
+            ]
+            if runner["restart_count"] < runner["max_restarts"] and remaining_cases:
                 print(
                     f"[monitor] restarting {runner['title']} "
                     f"({runner['restart_count'] + 1}/{runner['max_restarts']}) from checkpoint"
@@ -299,11 +375,11 @@ def monitor_parallel_runs(runners: list[dict], category_totals: dict[str, int],
                 last_snapshot = ""
                 continue
 
-            failures[runner["case_name"]] = status
+            failures[failure_key] = status
 
         if all(
-            case_is_done(runner["case_name"]) or
-            (runner["proc"].poll() is not None and runner["case_name"] in failures) or
+            all(case_is_done(str(ALL_CASES[idx]["name"])) for idx in runner["case_indices"]) or
+            (runner["proc"].poll() is not None and runner["title"] in failures) or
             (runner["proc"].poll() == 0)
             for runner in runners
         ):
@@ -312,24 +388,37 @@ def monitor_parallel_runs(runners: list[dict], category_totals: dict[str, int],
     return failures
 
 
+def split_case_indices(total_cases: int) -> tuple[list[int], list[int]]:
+    midpoint = (total_cases + 1) // 2
+    return list(range(0, midpoint)), list(range(midpoint, total_cases))
+
+
 def main() -> int:
     common_env = build_common_env()
-    bank_suffix = common_env["BANK_SUFFIX"]
+    bank_root_suffix = common_env["BANK_ROOT_SUFFIX"]
     category_totals = build_category_totals(common_env)
     log_dir = LOG_ROOT_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir.mkdir(parents=True, exist_ok=True)
     max_restarts = int(env_str("MAX_RESTARTS_PER_RUNNER", "2"))
 
-    first_half = list(range(0, len(ALL_CASES) // 2))
-    second_half = list(range(len(ALL_CASES) // 2, len(ALL_CASES)))
-    pending_first_half = [idx for idx in first_half if not case_is_done(ALL_CASES[idx][0])]
-    pending_second_half = [idx for idx in second_half if not case_is_done(ALL_CASES[idx][0])]
+    first_half, second_half = split_case_indices(len(ALL_CASES))
+    pending_first_half = [idx for idx in first_half if not case_is_done(str(ALL_CASES[idx]["name"]))]
+    pending_second_half = [idx for idx in second_half if not case_is_done(str(ALL_CASES[idx]["name"]))]
 
     print(f"BASE_DIR={BASE_DIR}")
     print(f"PYTHON={PYTHON}")
-    print(f"BANK_SUFFIX={bank_suffix!r}")
-    print(f"BANK_PATH={bank_file_path(bank_suffix)}")
+    print(f"BANK_ROOT_SUFFIX={bank_root_suffix!r}")
     print(f"MAX_IMAGES_PER_CATEGORY={common_env['MAX_IMAGES_PER_CATEGORY']}")
+    print(f"SECONDARY_FILTER_MIN_MEAN_PATCH={common_env['SECONDARY_FILTER_MIN_MEAN_PATCH']}")
+    print(f"SECONDARY_FILTER_BOX_SCORE_MIN={common_env['SECONDARY_FILTER_BOX_SCORE_MIN']}")
+    print(f"SOFTPATCH_KEEP_RATIO={common_env['SOFTPATCH_KEEP_RATIO']}")
+    print(f"SOFTPATCH_KNN_K={common_env['SOFTPATCH_KNN_K']}")
+    print(f"SOFTPATCH_SCORE_POWER={common_env['SOFTPATCH_SCORE_POWER']}")
+    print(f"PATCHCORE_TOPK={common_env['PATCHCORE_TOPK']}")
+    print(f"PATCHCORE_REWEIGHT_LAMBDA={common_env['PATCHCORE_REWEIGHT_LAMBDA']}")
+    print(f"THRESHOLD_NORMAL_STD_MULT={common_env['THRESHOLD_NORMAL_STD_MULT']}")
+    print(f"THRESHOLD_IMAGE_STD_MULT={common_env['THRESHOLD_IMAGE_STD_MULT']}")
+    print(f"THRESHOLD_MIN_FLOOR_DELTA={common_env['THRESHOLD_MIN_FLOOR_DELTA']}")
     print(f"TOTAL_CASES={len(ALL_CASES)}")
     print(f"PARALLEL_SPLIT={len(first_half)}+{len(second_half)}")
     print(f"PENDING_SPLIT={len(pending_first_half)}+{len(pending_second_half)}")
@@ -342,25 +431,34 @@ def main() -> int:
         f"normal_auc:{category_totals['normal_auc']}"
     )
 
-    build_bank = resolve_build_bank(common_env, "auto")
-    print(f"BUILD_BANK={int(build_bank)}")
-    print(f"BUILD_BANK_MODE={env_str('BUILD_BANK', 'auto').lower()}")
+    for bank_tag in sorted({str(case["bank_tag"]) for case in ALL_CASES}):
+        bank_suffix = case_bank_suffix(bank_root_suffix, bank_tag)
+        print(f"BANK[{bank_tag}]={bank_file_path(bank_suffix)}")
 
-    if build_bank:
+    build_bank_mode = env_str("BUILD_BANK", "auto").lower()
+    print(f"BUILD_BANK_MODE={build_bank_mode}")
+
+    pending_indices = pending_first_half + pending_second_half
+    required_bank_tags = sorted({str(ALL_CASES[idx]["bank_tag"]) for idx in pending_indices})
+    for bank_tag in required_bank_tags:
+        bank_suffix = case_bank_suffix(bank_root_suffix, bank_tag)
+        should_build = resolve_build_bank(build_bank_mode, bank_suffix)
+        print(f"BUILD_BANK[{bank_tag}]={int(should_build)}")
+        if not should_build:
+            continue
         env = os.environ.copy()
         env.update(common_env)
-        cmd = [PYTHON, str(BASE_DIR / "experiments" / "01_build_feature_bank_v25.py")]
-        print(">>>", " ".join(cmd), "[V25 parallel build bank]")
+        env["BANK_SUFFIX"] = bank_suffix
+        env["USE_SOFTPATCH_BANK_FILTER"] = "1" if bank_tag == "softpatch" else "0"
+        cmd = [PYTHON, str(BASE_DIR / "experiments" / "01_build_feature_bank_v26.py")]
+        print(">>>", " ".join(cmd), f"[build bank:{bank_tag}]")
         subprocess.run(cmd, cwd=str(BASE_DIR), env=env, check=True)
-    else:
-        print("\n=== SKIP FEATURE BANK BUILD: existing bank detected or BUILD_BANK=0 ===")
 
     runners: list[dict] = []
     if pending_first_half:
-        proc_a, log_a = spawn_runner(pending_first_half, "0", "V25 parallel part A", common_env, log_dir, 0)
+        proc_a, log_a = spawn_runner(pending_first_half, "0", "V26 parallel part A", common_env, log_dir, 0)
         runners.append({
-            "title": "V25 parallel part A",
-            "case_name": ALL_CASES[pending_first_half[0]][0],
+            "title": "V26 parallel part A",
             "case_indices": pending_first_half,
             "proc": proc_a,
             "log_path": log_a,
@@ -369,13 +467,12 @@ def main() -> int:
             "last_failure": "",
         })
     else:
-        print("[resume] skip V25 parallel part A: all assigned cases already have evaluation reports")
+        print("[resume] skip V26 parallel part A: all assigned cases already have evaluation reports")
 
     if pending_second_half:
-        proc_b, log_b = spawn_runner(pending_second_half, "0", "V25 parallel part B", common_env, log_dir, 0)
+        proc_b, log_b = spawn_runner(pending_second_half, "0", "V26 parallel part B", common_env, log_dir, 0)
         runners.append({
-            "title": "V25 parallel part B",
-            "case_name": ALL_CASES[pending_second_half[0]][0],
+            "title": "V26 parallel part B",
             "case_indices": pending_second_half,
             "proc": proc_b,
             "log_path": log_b,
@@ -384,10 +481,10 @@ def main() -> int:
             "last_failure": "",
         })
     else:
-        print("[resume] skip V25 parallel part B: all assigned cases already have evaluation reports")
+        print("[resume] skip V26 parallel part B: all assigned cases already have evaluation reports")
 
     if not runners:
-        print("\nAll pending v25 parallel cases are already completed.")
+        print("\nAll pending v26 parallel cases are already completed.")
         return 0
 
     try:
@@ -408,10 +505,10 @@ def main() -> int:
 
     if failures:
         print("\n=== RESUME HINT ===")
-        print("Some runners still failed after auto-restart. Re-run 08_run_v25_parallel_sweep.py and it will continue unfinished cases.")
+        print("Some runners still failed after auto-restart. Re-run 08_run_v26_parallel_sweep.py and it will continue unfinished cases.")
         raise SystemExit(final_rc or 1)
 
-    print("\nV25 parallel sweep completed.")
+    print("\nV26 parallel sweep completed.")
     return 0
 
 
