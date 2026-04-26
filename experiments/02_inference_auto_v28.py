@@ -6,6 +6,7 @@ V28 说明：
 - 不再展开 patchcore / threshold learner 对比分支
 - 新增 `utilities` 分类别后处理
 - 新增可选的细小目标增强融合分支
+- 新增 `utilities` 专用框精筛与缩框分支
 
 固定配置：
 - top_k_per_image = 1
@@ -135,6 +136,12 @@ CONFIG = {
     "utilities_small_target_blend_alpha": float(os.getenv("UTILITIES_SMALL_TARGET_BLEND_ALPHA", "0.35")),
     "utilities_small_target_sigma": float(os.getenv("UTILITIES_SMALL_TARGET_SIGMA", "1.2")),
     "utilities_small_target_percentile": float(os.getenv("UTILITIES_SMALL_TARGET_PERCENTILE", "85.0")),
+    "use_utilities_box_refiner": _env_flag("USE_UTILITIES_BOX_REFINER", "0"),
+    "utilities_refiner_percentile": float(os.getenv("UTILITIES_REFINER_PERCENTILE", "90.0")),
+    "utilities_refiner_expand_pixels": int(os.getenv("UTILITIES_REFINER_EXPAND_PIXELS", "8")),
+    "utilities_refiner_min_peak_ratio": float(os.getenv("UTILITIES_REFINER_MIN_PEAK_RATIO", "1.10")),
+    "utilities_refiner_max_core_area_ratio": float(os.getenv("UTILITIES_REFINER_MAX_CORE_AREA_RATIO", "0.55")),
+    "utilities_refiner_min_core_pixels": int(os.getenv("UTILITIES_REFINER_MIN_CORE_PIXELS", "24")),
     "use_patchcore_topk_agg": 0,
     "patchcore_topk": int(os.getenv("PATCHCORE_TOPK", "3")),
     "patchcore_reweight_lambda": float(os.getenv("PATCHCORE_REWEIGHT_LAMBDA", "0.35")),
@@ -225,6 +232,60 @@ def get_category_filter_params(category: str, config: dict) -> dict[str, float]:
         "secondary_filter_min_mean_patch": float(config.get("secondary_filter_min_mean_patch", 0.275)),
         "secondary_filter_box_score_min": float(config.get("secondary_filter_box_score_min", 0.0)),
     }
+
+
+def refine_utilities_bbox(bbox: list[int], score: float, score_map: np.ndarray, config: dict,
+                          logger: logging.Logger | None = None) -> tuple[list[int] | None, float]:
+    """对 utilities 框做缩框和 diffuse FP 抑制。"""
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    h, w = score_map.shape[:2]
+    x1 = max(0, min(x1, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    x2 = max(x1 + 1, min(x2, w))
+    y2 = max(y1 + 1, min(y2, h))
+
+    patch = score_map[y1:y2, x1:x2]
+    if patch.size == 0:
+        return None, score
+
+    patch_mean = float(np.mean(patch))
+    patch_max = float(np.max(patch))
+    peak_ratio = patch_max / (patch_mean + 1e-6)
+    if peak_ratio < float(config.get("utilities_refiner_min_peak_ratio", 1.10)):
+        if logger is not None:
+            logger.debug(f"  [V28] utilities 精筛移除框: peak_ratio={peak_ratio:.3f} 过低")
+        return None, score
+
+    percentile = float(config.get("utilities_refiner_percentile", 90.0))
+    threshold = np.percentile(patch, percentile)
+    core_mask = patch >= threshold
+    core_pixels = int(np.sum(core_mask))
+    min_core_pixels = int(config.get("utilities_refiner_min_core_pixels", 24))
+    if core_pixels < min_core_pixels:
+        if logger is not None:
+            logger.debug(f"  [V28] utilities 精筛移除框: core_pixels={core_pixels} < {min_core_pixels}")
+        return None, score
+
+    core_ratio = core_pixels / float(patch.size)
+    max_core_ratio = float(config.get("utilities_refiner_max_core_area_ratio", 0.55))
+    if core_ratio > max_core_ratio:
+        if logger is not None:
+            logger.debug(f"  [V28] utilities 精筛移除框: core_ratio={core_ratio:.3f} > {max_core_ratio:.3f}")
+        return None, score
+
+    rows, cols = np.where(core_mask)
+    if len(rows) == 0:
+        return None, score
+
+    expand = int(config.get("utilities_refiner_expand_pixels", 8))
+    rx1 = max(0, x1 + int(cols.min()) - expand)
+    ry1 = max(0, y1 + int(rows.min()) - expand)
+    rx2 = min(w, x1 + int(cols.max()) + 1 + expand)
+    ry2 = min(h, y1 + int(rows.max()) + 1 + expand)
+
+    refined = [rx1, ry1, rx2, ry2]
+    refined_score = max(score, patch_max)
+    return refined, float(refined_score)
 
 
 def parse_voc_xml(xml_path: str) -> dict | None:
@@ -681,6 +742,19 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
         pred_bboxes = [pred_bboxes[i] for i in keep_indices]
         pred_scores = [pred_scores[i] for i in keep_indices]
         logger.debug(f"  [V23] NMS (threshold={nms_threshold}) 后剩余 {len(pred_bboxes)} 个框")
+
+    if category == "utilities" and int(config.get("use_utilities_box_refiner", 0)) and len(pred_bboxes) > 0:
+        refined_bboxes = []
+        refined_scores = []
+        for bbox, score in zip(pred_bboxes, pred_scores):
+            refined_bbox, refined_score = refine_utilities_bbox(bbox, float(score), score_map, config, logger)
+            if refined_bbox is None:
+                continue
+            refined_bboxes.append(refined_bbox)
+            refined_scores.append(refined_score)
+        pred_bboxes = refined_bboxes
+        pred_scores = refined_scores
+        logger.debug(f"  [V28] utilities 精筛后剩余 {len(pred_bboxes)} 个框")
     
     # Step 11: 固定 Top-K 过滤
     top_k = config.get("top_k_per_image", 1)
@@ -1020,6 +1094,12 @@ def run_inference(config: dict) -> dict:
             "utilities_small_target_blend_alpha": float(config.get("utilities_small_target_blend_alpha", 0.35)),
             "utilities_small_target_sigma": float(config.get("utilities_small_target_sigma", 1.2)),
             "utilities_small_target_percentile": float(config.get("utilities_small_target_percentile", 85.0)),
+            "use_utilities_box_refiner": int(config.get("use_utilities_box_refiner", 0)),
+            "utilities_refiner_percentile": float(config.get("utilities_refiner_percentile", 90.0)),
+            "utilities_refiner_expand_pixels": int(config.get("utilities_refiner_expand_pixels", 8)),
+            "utilities_refiner_min_peak_ratio": float(config.get("utilities_refiner_min_peak_ratio", 1.10)),
+            "utilities_refiner_max_core_area_ratio": float(config.get("utilities_refiner_max_core_area_ratio", 0.55)),
+            "utilities_refiner_min_core_pixels": int(config.get("utilities_refiner_min_core_pixels", 24)),
             "use_patchcore_topk_agg": int(config.get("use_patchcore_topk_agg", 0)),
             "patchcore_topk": int(config.get("patchcore_topk", 3)),
             "patchcore_reweight_lambda": float(config.get("patchcore_reweight_lambda", 0.35)),

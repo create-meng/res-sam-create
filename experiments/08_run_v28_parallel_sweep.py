@@ -1,10 +1,10 @@
 """
-V28 parallel mechanism sweep runner.
+V28 parallel utilities refine sweep runner.
 
 用途：
 - 将 V28 的 4 个固定机制 case 拆成两路并行
-- 不做参数搜索，只做机制组合对照
 - 共享同一个 feature bank
+- 自动等待共享 bank 生成完成后再启动第二路
 """
 
 from __future__ import annotations
@@ -42,7 +42,6 @@ def main() -> int:
     env_a = common_env.copy()
     env_a["V28_CASE_INDICES"] = "0,1"
     env_a["BUILD_BANK"] = "1"
-
     print(f"[part_a] >>> {' '.join(cmd)}  (V28_CASE_INDICES={env_a['V28_CASE_INDICES']}, BUILD_BANK={env_a['BUILD_BANK']})")
     proc_a = subprocess.Popen(cmd, cwd=str(BASE_DIR), env=env_a)
 

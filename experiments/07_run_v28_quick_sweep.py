@@ -2,11 +2,9 @@
 V28 quick sweep runner.
 
 用途：
-- 用固定默认值跑 V28 的机制组合对照，不做调参
-- 机制仅包含：
-  1. `utilities` 分类别过滤
-  2. `utilities` 小目标增强融合
-- 支持通过环境变量选择部分 case
+- 以 V28 的最佳新机制 `utilities_enhance` 为基础
+- 增加 `utilities` 专用框精筛机制对照
+- 不做参数搜索，只比较机制
 """
 
 from __future__ import annotations
@@ -39,6 +37,11 @@ def build_common_env() -> dict[str, str]:
         "UTILITIES_SMALL_TARGET_BLEND_ALPHA": env_str("UTILITIES_SMALL_TARGET_BLEND_ALPHA", "0.35"),
         "UTILITIES_SMALL_TARGET_SIGMA": env_str("UTILITIES_SMALL_TARGET_SIGMA", "1.2"),
         "UTILITIES_SMALL_TARGET_PERCENTILE": env_str("UTILITIES_SMALL_TARGET_PERCENTILE", "85.0"),
+        "UTILITIES_REFINER_PERCENTILE": env_str("UTILITIES_REFINER_PERCENTILE", "90.0"),
+        "UTILITIES_REFINER_EXPAND_PIXELS": env_str("UTILITIES_REFINER_EXPAND_PIXELS", "8"),
+        "UTILITIES_REFINER_MIN_PEAK_RATIO": env_str("UTILITIES_REFINER_MIN_PEAK_RATIO", "1.10"),
+        "UTILITIES_REFINER_MAX_CORE_AREA_RATIO": env_str("UTILITIES_REFINER_MAX_CORE_AREA_RATIO", "0.55"),
+        "UTILITIES_REFINER_MIN_CORE_PIXELS": env_str("UTILITIES_REFINER_MIN_CORE_PIXELS", "24"),
     }
 
 
@@ -47,10 +50,30 @@ def build_case(name: str, **env_overrides: str) -> dict[str, object]:
 
 
 ALL_CASES = [
-    build_case("base", USE_UTILITIES_CATEGORY_FILTER="0", USE_UTILITIES_SMALL_TARGET_ENHANCE="0"),
-    build_case("utilities_filter", USE_UTILITIES_CATEGORY_FILTER="1", USE_UTILITIES_SMALL_TARGET_ENHANCE="0"),
-    build_case("utilities_enhance", USE_UTILITIES_CATEGORY_FILTER="0", USE_UTILITIES_SMALL_TARGET_ENHANCE="1"),
-    build_case("utilities_both", USE_UTILITIES_CATEGORY_FILTER="1", USE_UTILITIES_SMALL_TARGET_ENHANCE="1"),
+    build_case(
+        "base",
+        USE_UTILITIES_CATEGORY_FILTER="0",
+        USE_UTILITIES_SMALL_TARGET_ENHANCE="0",
+        USE_UTILITIES_BOX_REFINER="0",
+    ),
+    build_case(
+        "utilities_enhance",
+        USE_UTILITIES_CATEGORY_FILTER="0",
+        USE_UTILITIES_SMALL_TARGET_ENHANCE="1",
+        USE_UTILITIES_BOX_REFINER="0",
+    ),
+    build_case(
+        "utilities_refine",
+        USE_UTILITIES_CATEGORY_FILTER="0",
+        USE_UTILITIES_SMALL_TARGET_ENHANCE="0",
+        USE_UTILITIES_BOX_REFINER="1",
+    ),
+    build_case(
+        "utilities_enhance_refine",
+        USE_UTILITIES_CATEGORY_FILTER="0",
+        USE_UTILITIES_SMALL_TARGET_ENHANCE="1",
+        USE_UTILITIES_BOX_REFINER="1",
+    ),
 ]
 
 
@@ -126,8 +149,8 @@ def run_sweep(*, build_bank_default: str, title: str) -> int:
 
         print(f"\n=== CASE: {case_name} ===")
         print(f"OUTPUT_SUFFIX={output_suffix}")
-        print(f"USE_UTILITIES_CATEGORY_FILTER={case_env.get('USE_UTILITIES_CATEGORY_FILTER')}")
         print(f"USE_UTILITIES_SMALL_TARGET_ENHANCE={case_env.get('USE_UTILITIES_SMALL_TARGET_ENHANCE')}")
+        print(f"USE_UTILITIES_BOX_REFINER={case_env.get('USE_UTILITIES_BOX_REFINER')}")
 
         run_cmd("experiments/02_inference_auto_v28.py", common_env, case_env)
         run_cmd("experiments/03_evaluate_v28.py", common_env, case_env)
@@ -140,6 +163,6 @@ if __name__ == "__main__":
     raise SystemExit(
         run_sweep(
             build_bank_default="auto",
-            title="V28 mechanism sweep",
+            title="V28 utilities refine sweep",
         )
     )
