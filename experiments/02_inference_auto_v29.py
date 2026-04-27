@@ -1,7 +1,7 @@
 """
-Res-SAM v28 - Step 2: fully automatic inference
+Res-SAM v29 - Step 2: fully automatic inference
 
-V28 说明：
+V29 说明：
 - 固定为当前最优检测主线
 - 不再展开 patchcore / threshold learner 对比分支
 - 新增 `utilities` 分类别后处理
@@ -69,8 +69,8 @@ def _to_abs(base_dir: str, path: str) -> str:
 
 CONFIG = {
     "dataset_mode": DATASET_ENHANCED,
-    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v28", "feature_bank_v28.pth"),
-    "metadata_path":     os.path.join(BASE_DIR, "outputs", "feature_banks_v28", "metadata.json"),
+    "feature_bank_path": os.path.join(BASE_DIR, "outputs", "feature_banks_v29", "feature_bank_v29.pth"),
+    "metadata_path":     os.path.join(BASE_DIR, "outputs", "feature_banks_v29", "metadata.json"),
     "test_data_dirs": {
         "cavities":   os.path.join(BASE_DIR, "data", "GPR_data", "augmented_cavities"),
         "utilities":  os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities"),
@@ -82,8 +82,8 @@ CONFIG = {
         "utilities": os.path.join(BASE_DIR, "data", "GPR_data", "augmented_utilities",
                                   "annotations", "VOC_XML_format"),
     },
-    "output_dir":     os.path.join(BASE_DIR, "outputs", "predictions_v28"),
-    "checkpoint_dir": os.path.join(BASE_DIR, "outputs", "checkpoints_v28"),
+    "output_dir":     os.path.join(BASE_DIR, "outputs", "predictions_v29"),
+    "checkpoint_dir": os.path.join(BASE_DIR, "outputs", "checkpoints_v29"),
     "output_suffix": _normalize_suffix("OUTPUT_SUFFIX", ""),
     "bank_suffix": _normalize_suffix("BANK_SUFFIX", ""),
     
@@ -122,7 +122,7 @@ CONFIG = {
     "utilities_aspect_ratio_threshold": float(os.getenv("UTILITIES_ASPECT_RATIO_THRESHOLD", "5.5")),
     "utilities_score_threshold_p80": float(os.getenv("UTILITIES_SCORE_THRESHOLD_P80", "0.20")),
 
-    # V28 固化基线：在 V25 二次筛选上继续收紧 mean_patch 门槛
+    # V29 固化基线：在 V25 二次筛选上继续收紧 mean_patch 门槛
     "use_secondary_filter": 1,
     "secondary_filter_min_area_orig": 3500,
     "secondary_filter_min_mean_patch": float(os.getenv("SECONDARY_FILTER_MIN_MEAN_PATCH", "0.275")),
@@ -142,6 +142,22 @@ CONFIG = {
     "utilities_refiner_min_peak_ratio": float(os.getenv("UTILITIES_REFINER_MIN_PEAK_RATIO", "1.10")),
     "utilities_refiner_max_core_area_ratio": float(os.getenv("UTILITIES_REFINER_MAX_CORE_AREA_RATIO", "0.55")),
     "utilities_refiner_min_core_pixels": int(os.getenv("UTILITIES_REFINER_MIN_CORE_PIXELS", "24")),
+    "use_utilities_directional_prior": _env_flag("USE_UTILITIES_DIRECTIONAL_PRIOR", "0"),
+    "utilities_directional_alpha": float(os.getenv("UTILITIES_DIRECTIONAL_ALPHA", "0.28")),
+    "utilities_directional_sigma": float(os.getenv("UTILITIES_DIRECTIONAL_SIGMA", "1.4")),
+    "utilities_directional_percentile": float(os.getenv("UTILITIES_DIRECTIONAL_PERCENTILE", "82.0")),
+    "use_utilities_local_cfar": _env_flag("USE_UTILITIES_LOCAL_CFAR", "0"),
+    "utilities_cfar_window": int(os.getenv("UTILITIES_CFAR_WINDOW", "25")),
+    "utilities_cfar_guard": int(os.getenv("UTILITIES_CFAR_GUARD", "5")),
+    "utilities_cfar_k": float(os.getenv("UTILITIES_CFAR_K", "1.35")),
+    "utilities_cfar_floor_ratio": float(os.getenv("UTILITIES_CFAR_FLOOR_RATIO", "0.88")),
+    "use_utilities_position_neighbor_gate": _env_flag("USE_UTILITIES_POSITION_NEIGHBOR_GATE", "0"),
+    "utilities_neighbor_expand_pixels": int(os.getenv("UTILITIES_NEIGHBOR_EXPAND_PIXELS", "18")),
+    "utilities_neighbor_min_contrast_ratio": float(os.getenv("UTILITIES_NEIGHBOR_MIN_CONTRAST_RATIO", "1.08")),
+    "utilities_neighbor_min_inner_delta": float(os.getenv("UTILITIES_NEIGHBOR_MIN_INNER_DELTA", "0.015")),
+    "utilities_position_border_margin_ratio": float(os.getenv("UTILITIES_POSITION_BORDER_MARGIN_RATIO", "0.04")),
+    "utilities_position_min_center_ratio": float(os.getenv("UTILITIES_POSITION_MIN_CENTER_RATIO", "0.06")),
+    "utilities_position_max_center_ratio": float(os.getenv("UTILITIES_POSITION_MAX_CENTER_RATIO", "0.94")),
     "use_patchcore_topk_agg": 0,
     "patchcore_topk": int(os.getenv("PATCHCORE_TOPK", "3")),
     "patchcore_reweight_lambda": float(os.getenv("PATCHCORE_REWEIGHT_LAMBDA", "0.35")),
@@ -165,7 +181,7 @@ CONFIG = {
     ),
     "checkpoint_interval": 50,
     "random_seed": 11,
-    "version": "v28",
+    "version": "v29",
     "feature_with_bias": True,
 }
 
@@ -211,9 +227,122 @@ def apply_utilities_small_target_enhance(score_map: np.ndarray, config: dict,
     enhanced = score_map + alpha * log_response * base_max
     if logger is not None:
         logger.debug(
-            f"  [V28] utilities 小目标增强已启用: sigma={sigma:.2f}, alpha={alpha:.2f}, p={percentile:.1f}"
+            f"  [V29] utilities 小目标增强已启用: sigma={sigma:.2f}, alpha={alpha:.2f}, p={percentile:.1f}"
         )
     return enhanced.astype(np.float32)
+
+
+def apply_utilities_directional_prior(score_map: np.ndarray, config: dict,
+                                      logger: logging.Logger | None = None) -> np.ndarray:
+    """增强细长结构的一致性响应，优先保留 utilities 常见的线状/脊状峰值。"""
+    sigma = max(0.1, float(config.get("utilities_directional_sigma", 1.4)))
+    alpha = float(config.get("utilities_directional_alpha", 0.28))
+    percentile = float(config.get("utilities_directional_percentile", 82.0))
+
+    smoothed = ndimage.gaussian_filter(score_map, sigma=sigma)
+    gx = ndimage.sobel(smoothed, axis=1)
+    gy = ndimage.sobel(smoothed, axis=0)
+    jxx = ndimage.gaussian_filter(gx * gx, sigma=sigma)
+    jyy = ndimage.gaussian_filter(gy * gy, sigma=sigma)
+    jxy = ndimage.gaussian_filter(gx * gy, sigma=sigma)
+
+    trace = jxx + jyy
+    coherence = np.sqrt(np.maximum((jxx - jyy) ** 2 + 4.0 * jxy * jxy, 0.0)) / (trace + 1e-6)
+    hi = np.percentile(coherence, percentile) if np.any(coherence > 0) else 0.0
+    if hi <= 1e-8:
+        return score_map
+
+    coherence = np.clip(coherence / hi, 0.0, 1.0)
+    enhanced = score_map * (1.0 + alpha * coherence)
+    if logger is not None:
+        logger.debug(
+            f"  [V29] utilities 方向先验已启用: sigma={sigma:.2f}, alpha={alpha:.2f}, p={percentile:.1f}"
+        )
+    return enhanced.astype(np.float32)
+
+
+def build_utilities_local_cfar_mask(score_map: np.ndarray, adaptive_threshold: float, config: dict,
+                                    logger: logging.Logger | None = None) -> np.ndarray:
+    """在 utilities 上使用局部背景估计，抑制全图统一阈值带来的漏检/误检摆动。"""
+    window = max(7, int(config.get("utilities_cfar_window", 25)))
+    if window % 2 == 0:
+        window += 1
+    guard = max(1, int(config.get("utilities_cfar_guard", 5)))
+    if guard >= window:
+        guard = max(1, window // 3)
+    if guard % 2 == 0:
+        guard += 1
+
+    full_mean = ndimage.uniform_filter(score_map, size=window, mode="nearest")
+    full_sq_mean = ndimage.uniform_filter(score_map * score_map, size=window, mode="nearest")
+    if guard > 1:
+        guard_mean = ndimage.uniform_filter(score_map, size=guard, mode="nearest")
+        guard_sq_mean = ndimage.uniform_filter(score_map * score_map, size=guard, mode="nearest")
+        area_full = float(window * window)
+        area_guard = float(guard * guard)
+        denom = max(area_full - area_guard, 1.0)
+        local_mean = (full_mean * area_full - guard_mean * area_guard) / denom
+        local_sq_mean = (full_sq_mean * area_full - guard_sq_mean * area_guard) / denom
+    else:
+        local_mean = full_mean
+        local_sq_mean = full_sq_mean
+
+    local_var = np.maximum(local_sq_mean - local_mean * local_mean, 1e-8)
+    local_std = np.sqrt(local_var)
+    k = float(config.get("utilities_cfar_k", 1.35))
+    floor_ratio = float(config.get("utilities_cfar_floor_ratio", 0.88))
+    local_threshold = np.maximum(local_mean + k * local_std, adaptive_threshold * floor_ratio)
+    if logger is not None:
+        logger.debug(
+            f"  [V29] utilities local CFAR 已启用: window={window}, guard={guard}, k={k:.2f}, floor_ratio={floor_ratio:.2f}"
+        )
+    return (score_map > local_threshold).astype(np.uint8)
+
+
+def apply_utilities_position_neighbor_gate(bbox: list[int], score: float, score_map: np.ndarray, config: dict,
+                                           logger: logging.Logger | None = None) -> tuple[bool, str]:
+    """用局部对比和宽松位置先验过滤明显的边界型伪响应。"""
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    h, w = score_map.shape[:2]
+    expand = max(4, int(config.get("utilities_neighbor_expand_pixels", 18)))
+    ex1 = max(0, x1 - expand)
+    ey1 = max(0, y1 - expand)
+    ex2 = min(w, x2 + expand)
+    ey2 = min(h, y2 + expand)
+
+    inner = score_map[y1:y2, x1:x2]
+    outer = score_map[ey1:ey2, ex1:ex2]
+    if inner.size == 0 or outer.size == 0:
+        return False, "empty_patch"
+
+    ring_mask = np.ones_like(outer, dtype=bool)
+    ring_mask[(y1 - ey1):(y2 - ey1), (x1 - ex1):(x2 - ex1)] = False
+    ring = outer[ring_mask]
+    if ring.size == 0:
+        ring = outer.reshape(-1)
+
+    inner_mean = float(np.mean(inner))
+    ring_mean = float(np.mean(ring))
+    contrast_ratio = inner_mean / (ring_mean + 1e-6)
+    inner_delta = inner_mean - ring_mean
+    min_contrast = float(config.get("utilities_neighbor_min_contrast_ratio", 1.08))
+    min_delta = float(config.get("utilities_neighbor_min_inner_delta", 0.015))
+    if contrast_ratio < min_contrast or inner_delta < min_delta:
+        return False, f"weak_contrast({contrast_ratio:.3f},{inner_delta:.4f})"
+
+    cx = 0.5 * (x1 + x2) / max(w, 1)
+    cy = 0.5 * (y1 + y2) / max(h, 1)
+    min_center = float(config.get("utilities_position_min_center_ratio", 0.06))
+    max_center = float(config.get("utilities_position_max_center_ratio", 0.94))
+    border_margin = float(config.get("utilities_position_border_margin_ratio", 0.04))
+    near_border = (
+        x1 <= int(border_margin * w) or y1 <= int(border_margin * h) or
+        x2 >= int((1.0 - border_margin) * w) or y2 >= int((1.0 - border_margin) * h)
+    )
+    if near_border and (cx < min_center or cx > max_center or cy < min_center or cy > max_center):
+        return False, f"border_position(cx={cx:.3f},cy={cy:.3f})"
+
+    return True, ""
 
 
 def get_category_filter_params(category: str, config: dict) -> dict[str, float]:
@@ -253,7 +382,7 @@ def refine_utilities_bbox(bbox: list[int], score: float, score_map: np.ndarray, 
     peak_ratio = patch_max / (patch_mean + 1e-6)
     if peak_ratio < float(config.get("utilities_refiner_min_peak_ratio", 1.10)):
         if logger is not None:
-            logger.debug(f"  [V28] utilities 精筛移除框: peak_ratio={peak_ratio:.3f} 过低")
+            logger.debug(f"  [V29] utilities 精筛移除框: peak_ratio={peak_ratio:.3f} 过低")
         return None, score
 
     percentile = float(config.get("utilities_refiner_percentile", 90.0))
@@ -263,14 +392,14 @@ def refine_utilities_bbox(bbox: list[int], score: float, score_map: np.ndarray, 
     min_core_pixels = int(config.get("utilities_refiner_min_core_pixels", 24))
     if core_pixels < min_core_pixels:
         if logger is not None:
-            logger.debug(f"  [V28] utilities 精筛移除框: core_pixels={core_pixels} < {min_core_pixels}")
+            logger.debug(f"  [V29] utilities 精筛移除框: core_pixels={core_pixels} < {min_core_pixels}")
         return None, score
 
     core_ratio = core_pixels / float(patch.size)
     max_core_ratio = float(config.get("utilities_refiner_max_core_area_ratio", 0.55))
     if core_ratio > max_core_ratio:
         if logger is not None:
-            logger.debug(f"  [V28] utilities 精筛移除框: core_ratio={core_ratio:.3f} > {max_core_ratio:.3f}")
+            logger.debug(f"  [V29] utilities 精筛移除框: core_ratio={core_ratio:.3f} > {max_core_ratio:.3f}")
         return None, score
 
     rows, cols = np.where(core_mask)
@@ -628,6 +757,8 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
 
     if category == "utilities" and int(config.get("use_utilities_small_target_enhance", 0)):
         score_map = apply_utilities_small_target_enhance(score_map, config, logger)
+    if category == "utilities" and int(config.get("use_utilities_directional_prior", 0)):
+        score_map = apply_utilities_directional_prior(score_map, config, logger)
 
     # Step 6: 自适应阈值
     use_per_image_threshold = config.get("use_per_image_threshold", True)
@@ -676,6 +807,8 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
     
     # Step 7: 阈值化
     binary_map = (score_map > adaptive_threshold).astype(np.uint8)
+    if category == "utilities" and int(config.get("use_utilities_local_cfar", 0)):
+        binary_map = build_utilities_local_cfar_mask(score_map, adaptive_threshold, config, logger)
     num_anomaly_pixels = int(np.sum(binary_map))
     logger.debug(f"  [V23] 阈值化后异常像素数: {num_anomaly_pixels}")
 
@@ -754,7 +887,21 @@ def detect_with_score_map(model, image: np.ndarray, config: dict,
             refined_scores.append(refined_score)
         pred_bboxes = refined_bboxes
         pred_scores = refined_scores
-        logger.debug(f"  [V28] utilities 精筛后剩余 {len(pred_bboxes)} 个框")
+        logger.debug(f"  [V29] utilities 精筛后剩余 {len(pred_bboxes)} 个框")
+
+    if category == "utilities" and int(config.get("use_utilities_position_neighbor_gate", 0)) and len(pred_bboxes) > 0:
+        gated_bboxes = []
+        gated_scores = []
+        for bbox, score in zip(pred_bboxes, pred_scores):
+            keep, reason = apply_utilities_position_neighbor_gate(bbox, float(score), score_map, config, logger)
+            if not keep:
+                logger.debug(f"  [V29] utilities 邻域/位置门控移除框: {reason}")
+                continue
+            gated_bboxes.append(bbox)
+            gated_scores.append(score)
+        pred_bboxes = gated_bboxes
+        pred_scores = gated_scores
+        logger.debug(f"  [V29] utilities 邻域/位置门控后剩余 {len(pred_bboxes)} 个框")
     
     # Step 11: 固定 Top-K 过滤
     top_k = config.get("top_k_per_image", 1)
@@ -813,7 +960,7 @@ def run_inference(config: dict) -> dict:
     run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    logger = setup_global_logger(base_dir, "02_inference_auto_v28")
+    logger = setup_global_logger(base_dir, "02_inference_auto_v29")
     
     config = dict(config)
     for key in ["feature_bank_path", "metadata_path", "output_dir", "checkpoint_dir"]:
@@ -841,12 +988,12 @@ def run_inference(config: dict) -> dict:
         config["val_normal_patch_mean"] = float(normal_stats.get("mean", 0.0) or 0.0)
         config["val_normal_patch_std"] = float(normal_stats.get("std", 0.0) or 0.0)
 
-    log_section("Res-SAM V28：继承 V25 归档基线，准备继续优化检测指标", logger)
+    log_section("Res-SAM V29：继承 V25 归档基线，准备继续优化检测指标", logger)
     log_config(config, logger)
 
     if not os.path.exists(config["feature_bank_path"]):
         raise FileNotFoundError(f"Feature bank not found: {config['feature_bank_path']}\n"
-                                f"请先运行 01_build_feature_bank_v28.py")
+                                f"请先运行 01_build_feature_bank_v29.py")
 
     os.makedirs(config["output_dir"], exist_ok=True)
     os.makedirs(config["checkpoint_dir"], exist_ok=True)
@@ -855,7 +1002,7 @@ def run_inference(config: dict) -> dict:
 
     from PatchRes.ResSAM import ResSAM
 
-    logger.info("初始化 ResSAM（V28）...")
+    logger.info("初始化 ResSAM（V29）...")
     model = ResSAM(
         hidden_size=config["hidden_size"],
         window_size=config["window_size"],
@@ -961,18 +1108,18 @@ def run_inference(config: dict) -> dict:
                             area_orig = max(0, (bbox_orig[2] - bbox_orig[0])) * max(0, (bbox_orig[3] - bbox_orig[1]))
                             if area_orig < min_area_orig:
                                 logger.debug(
-                                    f"  [V28] 二次筛选移除框[{category}]: 原图面积 {area_orig} < {min_area_orig}"
+                                    f"  [V29] 二次筛选移除框[{category}]: 原图面积 {area_orig} < {min_area_orig}"
                                 )
                                 continue
                             if mean_patch_score < min_mean_patch:
                                 logger.debug(
-                                    f"  [V28] 二次筛选移除框[{category}]: "
+                                    f"  [V29] 二次筛选移除框[{category}]: "
                                     f"mean_patch_score {mean_patch_score:.4f} < {min_mean_patch:.4f}"
                                 )
                                 continue
                             if float(score) < min_box_score:
                                 logger.debug(
-                                    f"  [V28] 二次筛选移除框[{category}]: "
+                                    f"  [V29] 二次筛选移除框[{category}]: "
                                     f"box_score {float(score):.4f} < {min_box_score:.4f}"
                                 )
                                 continue
@@ -1056,11 +1203,11 @@ def run_inference(config: dict) -> dict:
 
     # 保存最终结果
     suffix = config.get("output_suffix", "")
-    output_filename = f"auto_predictions_v28{suffix}.json" if suffix else "auto_predictions_v28.json"
+    output_filename = f"auto_predictions_v29{suffix}.json" if suffix else "auto_predictions_v29.json"
     output_file = os.path.join(config["output_dir"], output_filename)
     output_data = {
         "meta": {
-            "version": "v28",
+            "version": "v29",
             "creation_time": datetime.now().isoformat(),
             "feature_bank_path": config["feature_bank_path"],
             "bank_suffix": config.get("bank_suffix", ""),
@@ -1100,6 +1247,22 @@ def run_inference(config: dict) -> dict:
             "utilities_refiner_min_peak_ratio": float(config.get("utilities_refiner_min_peak_ratio", 1.10)),
             "utilities_refiner_max_core_area_ratio": float(config.get("utilities_refiner_max_core_area_ratio", 0.55)),
             "utilities_refiner_min_core_pixels": int(config.get("utilities_refiner_min_core_pixels", 24)),
+            "use_utilities_directional_prior": int(config.get("use_utilities_directional_prior", 0)),
+            "utilities_directional_alpha": float(config.get("utilities_directional_alpha", 0.28)),
+            "utilities_directional_sigma": float(config.get("utilities_directional_sigma", 1.4)),
+            "utilities_directional_percentile": float(config.get("utilities_directional_percentile", 82.0)),
+            "use_utilities_local_cfar": int(config.get("use_utilities_local_cfar", 0)),
+            "utilities_cfar_window": int(config.get("utilities_cfar_window", 25)),
+            "utilities_cfar_guard": int(config.get("utilities_cfar_guard", 5)),
+            "utilities_cfar_k": float(config.get("utilities_cfar_k", 1.35)),
+            "utilities_cfar_floor_ratio": float(config.get("utilities_cfar_floor_ratio", 0.88)),
+            "use_utilities_position_neighbor_gate": int(config.get("use_utilities_position_neighbor_gate", 0)),
+            "utilities_neighbor_expand_pixels": int(config.get("utilities_neighbor_expand_pixels", 18)),
+            "utilities_neighbor_min_contrast_ratio": float(config.get("utilities_neighbor_min_contrast_ratio", 1.08)),
+            "utilities_neighbor_min_inner_delta": float(config.get("utilities_neighbor_min_inner_delta", 0.015)),
+            "utilities_position_border_margin_ratio": float(config.get("utilities_position_border_margin_ratio", 0.04)),
+            "utilities_position_min_center_ratio": float(config.get("utilities_position_min_center_ratio", 0.06)),
+            "utilities_position_max_center_ratio": float(config.get("utilities_position_max_center_ratio", 0.94)),
             "use_patchcore_topk_agg": int(config.get("use_patchcore_topk_agg", 0)),
             "patchcore_topk": int(config.get("patchcore_topk", 3)),
             "patchcore_reweight_lambda": float(config.get("patchcore_reweight_lambda", 0.35)),
@@ -1122,27 +1285,27 @@ def run_inference(config: dict) -> dict:
     logger.info(f"结果保存至：{output_file}")
     logger.info(f"处理图像数：{total_images}，检出框数：{total_detections}")
     
-    log_finish("02_inference_auto_v28", logger)
+    log_finish("02_inference_auto_v29", logger)
     
     return all_results
 
 
 if __name__ == "__main__":
     preflight_faiss_or_raise()
-    CONFIG = apply_layout_to_config_02_03(dict(CONFIG), BASE_DIR, "v28")
+    CONFIG = apply_layout_to_config_02_03(dict(CONFIG), BASE_DIR, "v29")
     bank_suffix = CONFIG.get("bank_suffix", "")
     if bank_suffix:
         CONFIG["feature_bank_path"] = os.path.join(
-            BASE_DIR, "outputs", f"feature_banks_v28{bank_suffix}", f"feature_bank_v28{bank_suffix}.pth"
+            BASE_DIR, "outputs", f"feature_banks_v29{bank_suffix}", f"feature_bank_v29{bank_suffix}.pth"
         )
         CONFIG["metadata_path"] = os.path.join(
-            BASE_DIR, "outputs", f"feature_banks_v28{bank_suffix}", "metadata.json"
+            BASE_DIR, "outputs", f"feature_banks_v29{bank_suffix}", "metadata.json"
         )
     else:
-        CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v28", "feature_bank_v28.pth")
-        CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", "feature_banks_v28", "metadata.json")
-    CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", "predictions_v28")
-    CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", "checkpoints_v28")
+        CONFIG["feature_bank_path"] = os.path.join(BASE_DIR, "outputs", "feature_banks_v29", "feature_bank_v29.pth")
+        CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", "feature_banks_v29", "metadata.json")
+    CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", "predictions_v29")
+    CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", "checkpoints_v29")
 
     with torch.no_grad():
         run_inference(CONFIG)

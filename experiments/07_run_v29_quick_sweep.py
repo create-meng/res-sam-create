@@ -1,9 +1,8 @@
 """
-V28 quick sweep runner.
+V29 quick sweep runner.
 
 用途：
-- 以 V28 的最佳新机制 `utilities_enhance` 为基础
-- 增加 `utilities` 专用框精筛机制对照
+- 只比较新的 utilities 专用机制
 - 不做参数搜索，只比较机制
 """
 
@@ -42,6 +41,19 @@ def build_common_env() -> dict[str, str]:
         "UTILITIES_REFINER_MIN_PEAK_RATIO": env_str("UTILITIES_REFINER_MIN_PEAK_RATIO", "1.10"),
         "UTILITIES_REFINER_MAX_CORE_AREA_RATIO": env_str("UTILITIES_REFINER_MAX_CORE_AREA_RATIO", "0.55"),
         "UTILITIES_REFINER_MIN_CORE_PIXELS": env_str("UTILITIES_REFINER_MIN_CORE_PIXELS", "24"),
+        "UTILITIES_DIRECTIONAL_ALPHA": env_str("UTILITIES_DIRECTIONAL_ALPHA", "0.28"),
+        "UTILITIES_DIRECTIONAL_SIGMA": env_str("UTILITIES_DIRECTIONAL_SIGMA", "1.4"),
+        "UTILITIES_DIRECTIONAL_PERCENTILE": env_str("UTILITIES_DIRECTIONAL_PERCENTILE", "82.0"),
+        "UTILITIES_CFAR_WINDOW": env_str("UTILITIES_CFAR_WINDOW", "25"),
+        "UTILITIES_CFAR_GUARD": env_str("UTILITIES_CFAR_GUARD", "5"),
+        "UTILITIES_CFAR_K": env_str("UTILITIES_CFAR_K", "1.35"),
+        "UTILITIES_CFAR_FLOOR_RATIO": env_str("UTILITIES_CFAR_FLOOR_RATIO", "0.88"),
+        "UTILITIES_NEIGHBOR_EXPAND_PIXELS": env_str("UTILITIES_NEIGHBOR_EXPAND_PIXELS", "18"),
+        "UTILITIES_NEIGHBOR_MIN_CONTRAST_RATIO": env_str("UTILITIES_NEIGHBOR_MIN_CONTRAST_RATIO", "1.08"),
+        "UTILITIES_NEIGHBOR_MIN_INNER_DELTA": env_str("UTILITIES_NEIGHBOR_MIN_INNER_DELTA", "0.015"),
+        "UTILITIES_POSITION_BORDER_MARGIN_RATIO": env_str("UTILITIES_POSITION_BORDER_MARGIN_RATIO", "0.04"),
+        "UTILITIES_POSITION_MIN_CENTER_RATIO": env_str("UTILITIES_POSITION_MIN_CENTER_RATIO", "0.06"),
+        "UTILITIES_POSITION_MAX_CENTER_RATIO": env_str("UTILITIES_POSITION_MAX_CENTER_RATIO", "0.94"),
     }
 
 
@@ -55,32 +67,53 @@ ALL_CASES = [
         USE_UTILITIES_CATEGORY_FILTER="0",
         USE_UTILITIES_SMALL_TARGET_ENHANCE="0",
         USE_UTILITIES_BOX_REFINER="0",
+        USE_UTILITIES_DIRECTIONAL_PRIOR="0",
+        USE_UTILITIES_LOCAL_CFAR="0",
+        USE_UTILITIES_POSITION_NEIGHBOR_GATE="0",
     ),
     build_case(
-        "utilities_enhance",
-        USE_UTILITIES_CATEGORY_FILTER="0",
-        USE_UTILITIES_SMALL_TARGET_ENHANCE="1",
-        USE_UTILITIES_BOX_REFINER="0",
-    ),
-    build_case(
-        "utilities_refine",
+        "utilities_directional",
         USE_UTILITIES_CATEGORY_FILTER="0",
         USE_UTILITIES_SMALL_TARGET_ENHANCE="0",
-        USE_UTILITIES_BOX_REFINER="1",
+        USE_UTILITIES_BOX_REFINER="0",
+        USE_UTILITIES_DIRECTIONAL_PRIOR="1",
+        USE_UTILITIES_LOCAL_CFAR="0",
+        USE_UTILITIES_POSITION_NEIGHBOR_GATE="0",
     ),
     build_case(
-        "utilities_enhance_refine",
+        "utilities_local_cfar",
         USE_UTILITIES_CATEGORY_FILTER="0",
-        USE_UTILITIES_SMALL_TARGET_ENHANCE="1",
-        USE_UTILITIES_BOX_REFINER="1",
+        USE_UTILITIES_SMALL_TARGET_ENHANCE="0",
+        USE_UTILITIES_BOX_REFINER="0",
+        USE_UTILITIES_DIRECTIONAL_PRIOR="0",
+        USE_UTILITIES_LOCAL_CFAR="1",
+        USE_UTILITIES_POSITION_NEIGHBOR_GATE="0",
+    ),
+    build_case(
+        "utilities_pos_neighbor",
+        USE_UTILITIES_CATEGORY_FILTER="0",
+        USE_UTILITIES_SMALL_TARGET_ENHANCE="0",
+        USE_UTILITIES_BOX_REFINER="0",
+        USE_UTILITIES_DIRECTIONAL_PRIOR="0",
+        USE_UTILITIES_LOCAL_CFAR="0",
+        USE_UTILITIES_POSITION_NEIGHBOR_GATE="1",
+    ),
+    build_case(
+        "utilities_all3",
+        USE_UTILITIES_CATEGORY_FILTER="0",
+        USE_UTILITIES_SMALL_TARGET_ENHANCE="0",
+        USE_UTILITIES_BOX_REFINER="0",
+        USE_UTILITIES_DIRECTIONAL_PRIOR="1",
+        USE_UTILITIES_LOCAL_CFAR="1",
+        USE_UTILITIES_POSITION_NEIGHBOR_GATE="1",
     ),
 ]
 
 
 def bank_file_path(bank_suffix: str) -> Path:
     if bank_suffix:
-        return BASE_DIR / "outputs" / f"feature_banks_v28{bank_suffix}" / f"feature_bank_v28{bank_suffix}.pth"
-    return BASE_DIR / "outputs" / "feature_banks_v28" / "feature_bank_v28.pth"
+        return BASE_DIR / "outputs" / f"feature_banks_v29{bank_suffix}" / f"feature_bank_v29{bank_suffix}.pth"
+    return BASE_DIR / "outputs" / "feature_banks_v29" / "feature_bank_v29.pth"
 
 
 def case_output_suffix(case_name: str) -> str:
@@ -110,10 +143,10 @@ def resolve_build_bank(mode: str, bank_suffix: str) -> bool:
 
 def run_sweep(*, build_bank_default: str, title: str) -> int:
     common_env = build_common_env()
-    title = env_str("V28_SWEEP_TITLE", title)
+    title = env_str("V29_SWEEP_TITLE", title)
     build_bank_mode = env_str("BUILD_BANK", build_bank_default).lower()
     bank_suffix = common_env["BANK_ROOT_SUFFIX"]
-    case_indices_raw = env_str("V28_CASE_INDICES", "")
+    case_indices_raw = env_str("V29_CASE_INDICES", "")
     cases = ALL_CASES
     if case_indices_raw:
         indices = [int(part.strip()) for part in case_indices_raw.split(",") if part.strip()]
@@ -131,7 +164,7 @@ def run_sweep(*, build_bank_default: str, title: str) -> int:
     if build_bank_once:
         print("\n=== BUILD FEATURE BANK (shared) ===")
         run_cmd(
-            "experiments/01_build_feature_bank_v28.py",
+            "experiments/01_build_feature_bank_v29.py",
             common_env,
             {"BANK_SUFFIX": bank_suffix, "OUTPUT_SUFFIX": ""},
         )
@@ -149,11 +182,13 @@ def run_sweep(*, build_bank_default: str, title: str) -> int:
 
         print(f"\n=== CASE: {case_name} ===")
         print(f"OUTPUT_SUFFIX={output_suffix}")
-        print(f"USE_UTILITIES_SMALL_TARGET_ENHANCE={case_env.get('USE_UTILITIES_SMALL_TARGET_ENHANCE')}")
         print(f"USE_UTILITIES_BOX_REFINER={case_env.get('USE_UTILITIES_BOX_REFINER')}")
+        print(f"USE_UTILITIES_DIRECTIONAL_PRIOR={case_env.get('USE_UTILITIES_DIRECTIONAL_PRIOR')}")
+        print(f"USE_UTILITIES_LOCAL_CFAR={case_env.get('USE_UTILITIES_LOCAL_CFAR')}")
+        print(f"USE_UTILITIES_POSITION_NEIGHBOR_GATE={case_env.get('USE_UTILITIES_POSITION_NEIGHBOR_GATE')}")
 
-        run_cmd("experiments/02_inference_auto_v28.py", common_env, case_env)
-        run_cmd("experiments/03_evaluate_v28.py", common_env, case_env)
+        run_cmd("experiments/02_inference_auto_v29.py", common_env, case_env)
+        run_cmd("experiments/03_evaluate_v29.py", common_env, case_env)
 
     print(f"\n{title} completed.")
     return 0
@@ -163,6 +198,6 @@ if __name__ == "__main__":
     raise SystemExit(
         run_sweep(
             build_bank_default="auto",
-            title="V28 utilities refine sweep",
+            title="V29 utilities new-mechanism sweep",
         )
     )

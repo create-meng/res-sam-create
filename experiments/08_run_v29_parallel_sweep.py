@@ -1,8 +1,8 @@
 """
-V28 parallel utilities refine sweep runner.
+V29 parallel utilities new-mechanism sweep runner.
 
 用途：
-- 将 V28 的 4 个固定机制 case 拆成两路并行
+- 将 V29 的 5 个固定机制 case 拆成两路并行
 - 共享同一个 feature bank
 - 自动等待共享 bank 生成完成后再启动第二路
 """
@@ -18,8 +18,8 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
-SCRIPT_07 = BASE_DIR / "experiments" / "07_run_v28_quick_sweep.py"
-BANK_PATH = BASE_DIR / "outputs" / "feature_banks_v28" / "feature_bank_v28.pth"
+SCRIPT_07 = BASE_DIR / "experiments" / "07_run_v29_quick_sweep.py"
+BANK_PATH = BASE_DIR / "outputs" / "feature_banks_v29" / "feature_bank_v29.pth"
 WAIT_TIMEOUT_SEC = 60 * 60
 
 
@@ -40,9 +40,9 @@ def main() -> int:
     cmd = [PYTHON, str(SCRIPT_07)]
 
     env_a = common_env.copy()
-    env_a["V28_CASE_INDICES"] = "0,1"
-    env_a["BUILD_BANK"] = "1"
-    print(f"[part_a] >>> {' '.join(cmd)}  (V28_CASE_INDICES={env_a['V28_CASE_INDICES']}, BUILD_BANK={env_a['BUILD_BANK']})")
+    env_a["V29_CASE_INDICES"] = "0,1,2"
+    env_a["BUILD_BANK"] = "auto"
+    print(f"[part_a] >>> {' '.join(cmd)}  (V29_CASE_INDICES={env_a['V29_CASE_INDICES']}, BUILD_BANK={env_a['BUILD_BANK']})")
     proc_a = subprocess.Popen(cmd, cwd=str(BASE_DIR), env=env_a)
 
     proc_b = None
@@ -50,9 +50,9 @@ def main() -> int:
         wait_for_shared_bank()
 
         env_b = common_env.copy()
-        env_b["V28_CASE_INDICES"] = "2,3"
+        env_b["V29_CASE_INDICES"] = "3,4"
         env_b["BUILD_BANK"] = "0"
-        print(f"[part_b] >>> {' '.join(cmd)}  (V28_CASE_INDICES={env_b['V28_CASE_INDICES']}, BUILD_BANK={env_b['BUILD_BANK']})")
+        print(f"[part_b] >>> {' '.join(cmd)}  (V29_CASE_INDICES={env_b['V29_CASE_INDICES']}, BUILD_BANK={env_b['BUILD_BANK']})")
         proc_b = subprocess.Popen(cmd, cwd=str(BASE_DIR), env=env_b)
 
         rc = 0
