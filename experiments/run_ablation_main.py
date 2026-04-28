@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +36,11 @@ def env_flag(name: str, default: str = "0") -> bool:
     return env_str(name, default).lower() in {"1", "true", "yes", "on"}
 
 
+def env_int(name: str, default: int) -> int:
+    value = env_str(name, str(default))
+    return int(value)
+
+
 def run_cmd(script_path: Path, extra_env: dict[str, str] | None = None) -> None:
     env = os.environ.copy()
     if extra_env:
@@ -42,6 +48,15 @@ def run_cmd(script_path: Path, extra_env: dict[str, str] | None = None) -> None:
     cmd = [PYTHON, str(script_path)]
     print(">>>", " ".join(cmd))
     subprocess.run(cmd, cwd=str(BASE_DIR), env=env, check=True)
+
+
+def run_python_module(script_path: Path, extra_env: dict[str, str] | None = None) -> subprocess.Popen[str]:
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
+    cmd = [PYTHON, str(script_path)]
+    print(">>>", " ".join(cmd))
+    return subprocess.Popen(cmd, cwd=str(BASE_DIR), env=env)
 
 
 def bank_path_current(bank_suffix: str) -> Path:
@@ -416,7 +431,7 @@ ALL_CASES = CURRENT_CASES + LEGACY_CASES
 
 
 def selected_cases() -> list[dict[str, object]]:
-    chosen = env_str("ABLATION_CASES", "")
+    chosen = env_str("WORKER_CASES", env_str("ABLATION_CASES", ""))
     if not chosen:
         return list(ALL_CASES)
     name_set = {part.strip() for part in chosen.split(",") if part.strip()}
@@ -425,6 +440,100 @@ def selected_cases() -> list[dict[str, object]]:
     if missing:
         raise ValueError(f"Unknown ABLATION_CASES: {missing}")
     return cases
+
+
+def selected_case_names() -> list[str]:
+    return [str(case["name"]) for case in selected_cases()]
+
+
+def build_case_lookup() -> dict[str, dict[str, object]]:
+    return {str(case["name"]): case for case in ALL_CASES}
+
+
+def ordered_case_names() -> list[str]:
+    return [str(case["name"]) for case in ALL_CASES]
+
+
+def split_case_names(case_names: list[str], num_groups: int) -> list[list[str]]:
+    groups: list[list[str]] = [[] for _ in range(max(1, num_groups))]
+    for idx, name in enumerate(case_names):
+        groups[idx % len(groups)].append(name)
+    return [group for group in groups if group]
+
+
+def load_manifest_cases() -> dict[str, dict[str, object]]:
+    if not MANIFEST_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    cases = payload.get("cases", []) or []
+    return {str(case.get("name")): case for case in cases if case.get("name")}
+
+
+def report_exists(case: dict[str, object]) -> bool:
+    report_path = Path(str(case["report_path"]))
+    prediction_path = Path(str(case["prediction_path"]))
+    return report_path.exists() and prediction_path.exists()
+
+
+def manifest_entry_for_case(case_name: str) -> dict[str, object]:
+    case = build_case_lookup()[case_name]
+    family = str(case["family"])
+    description = str(case.get("description", ""))
+    if family == "current":
+        suffix = case_output_suffix(case_name)
+        return {
+            "name": case_name,
+            "family": family,
+            "description": description,
+            "prediction_path": str(BASE_DIR / "outputs" / "predictions_v30" / f"auto_predictions_v30{suffix}.json"),
+            "report_path": str(BASE_DIR / "outputs" / "predictions_v30" / f"evaluation_report_v30{suffix}.json"),
+        }
+    if family == "v7":
+        return {
+            "name": case_name,
+            "family": family,
+            "description": description,
+            "prediction_path": str(BASE_DIR / "outputs" / "predictions_v7" / "auto_predictions_v7.json"),
+            "report_path": str(BASE_DIR / "outputs" / "visualizations_v7" / "03_evaluate_and_visualize_v7_report.md"),
+        }
+    if family == "v18":
+        return {
+            "name": case_name,
+            "family": family,
+            "description": description,
+            "prediction_path": str(BASE_DIR / "outputs" / "predictions_v18" / "auto_predictions_v18.json"),
+            "report_path": str(BASE_DIR / "outputs" / "predictions_v18" / "evaluation_report_v18.json"),
+        }
+    raise ValueError(f"Unsupported case family: {family}")
+
+
+def manifest_entries_for_case_names(case_names: list[str]) -> list[dict[str, object]]:
+    return [manifest_entry_for_case(name) for name in case_names]
+
+
+def filter_pending_case_names(case_names: list[str]) -> list[str]:
+    pending: list[str] = []
+    for name in case_names:
+        manifest_case = manifest_entry_for_case(name)
+        if manifest_case and report_exists(manifest_case):
+            print(f"[skip] completed case detected: {name}")
+            continue
+        pending.append(name)
+    return pending
+
+
+def build_common_env() -> dict[str, str]:
+    common_env: dict[str, str] = {}
+    bank_suffix = env_str("BANK_SUFFIX", "")
+    if bank_suffix:
+        common_env["BANK_SUFFIX"] = bank_suffix
+    max_images = env_str("MAX_IMAGES_PER_CATEGORY", "")
+    if max_images:
+        common_env["MAX_IMAGES_PER_CATEGORY"] = max_images
+    return common_env
 
 
 def run_current_case(case: dict[str, object], common_env: dict[str, str], manifest: list[dict[str, object]]) -> None:
@@ -478,16 +587,7 @@ def run_legacy_case(case: dict[str, object], common_env: dict[str, str], manifes
     )
 
 
-def main() -> int:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    common_env = {}
-    bank_suffix = env_str("BANK_SUFFIX", "")
-    if bank_suffix:
-        common_env["BANK_SUFFIX"] = bank_suffix
-    max_images = env_str("MAX_IMAGES_PER_CATEGORY", "")
-    if max_images:
-        common_env["MAX_IMAGES_PER_CATEGORY"] = max_images
-
+def run_selected_cases(common_env: dict[str, str]) -> list[dict[str, object]]:
     cases = selected_cases()
     print(f"BASE_DIR={BASE_DIR}")
     print(f"TOTAL_CASES={len(cases)}")
@@ -503,18 +603,139 @@ def main() -> int:
             run_current_case(case, common_env, manifest)
         else:
             run_legacy_case(case, common_env, manifest)
+    return manifest
 
+
+def merge_manifest_cases(new_cases: list[dict[str, object]]) -> list[dict[str, object]]:
+    merged = load_manifest_cases()
+    for case in new_cases:
+        merged[str(case["name"])] = case
+    names = [name for name in ordered_case_names() if name in merged]
+    extras = [name for name in merged.keys() if name not in names]
+    names.extend(sorted(extras))
+    return [merged[name] for name in names]
+
+
+def write_manifest(cases: list[dict[str, object]]) -> None:
     MANIFEST_PATH.write_text(
         json.dumps(
             {
                 "base_dir": str(BASE_DIR),
-                "cases": manifest,
+                "cases": cases,
             },
             indent=2,
             ensure_ascii=False,
         ),
         encoding="utf-8",
     )
+
+
+def run_worker_entry() -> int:
+    common_env = build_common_env()
+    new_cases = run_selected_cases(common_env)
+    print(f"\nworker completed cases: {', '.join(case['name'] for case in new_cases)}")
+    return 0
+
+
+def run_parallel_supervisor() -> int:
+    selected_names = selected_case_names()
+    if not selected_names:
+        print("No cases selected.")
+        return 0
+
+    skip_completed = env_flag("SKIP_COMPLETED_CASES", "1")
+    if skip_completed:
+        selected_names = filter_pending_case_names(selected_names)
+    if not selected_names:
+        print("All selected cases already completed.")
+        merged_cases = manifest_entries_for_case_names(selected_case_names())
+        write_manifest(merged_cases)
+        if merged_cases:
+            collect_ablation_results(merged_cases)
+        return 0
+
+    common_env = {}
+    common_env = build_common_env()
+
+    case_lookup = build_case_lookup()
+    if any(str(case_lookup[name]["family"]) == "current" for name in selected_names):
+        ensure_current_bank(common_env)
+
+    num_workers = min(env_int("PARALLEL_WORKERS", 2), len(selected_names))
+    restart_delay_sec = max(1, env_int("WORKER_RESTART_DELAY_SEC", 5))
+    max_restarts = env_int("WORKER_MAX_RESTARTS", 20)
+    groups = split_case_names(selected_names, num_workers)
+
+    print(f"[parallel] workers={len(groups)}")
+    for idx, group in enumerate(groups, 1):
+        print(f"[parallel] worker_{idx}: {', '.join(group)}")
+
+    script_path = Path(__file__).resolve()
+    restart_counts = [0 for _ in groups]
+    completed = [False for _ in groups]
+
+    procs: list[subprocess.Popen[str] | None] = []
+    for idx, group in enumerate(groups, 1):
+        worker_env = {
+            **common_env,
+            "WORKER_MODE": "1",
+            "WORKER_CASES": ",".join(group),
+            "BUILD_CURRENT_BANK": "0",
+            "BUILD_V7_BANK": env_str("BUILD_V7_BANK", "auto"),
+            "BUILD_V18_BANK": env_str("BUILD_V18_BANK", "auto"),
+            "SKIP_COMPLETED_CASES": "1",
+            "WORKER_LABEL": f"worker_{idx}",
+        }
+        procs.append(run_python_module(script_path, worker_env))
+
+    while not all(completed):
+        time.sleep(5)
+        for idx, proc in enumerate(procs):
+            if completed[idx] or proc is None:
+                continue
+            return_code = proc.poll()
+            if return_code is None:
+                continue
+            if return_code == 0:
+                completed[idx] = True
+                print(f"[parallel] worker_{idx + 1} completed")
+                continue
+
+            restart_counts[idx] += 1
+            print(f"[parallel] worker_{idx + 1} exited with code {return_code}, restart {restart_counts[idx]}/{max_restarts}")
+            if restart_counts[idx] > max_restarts:
+                raise RuntimeError(f"worker_{idx + 1} exceeded max restarts")
+
+            time.sleep(restart_delay_sec)
+            group = groups[idx]
+            worker_env = {
+                **common_env,
+                "WORKER_MODE": "1",
+                "WORKER_CASES": ",".join(group),
+                "BUILD_CURRENT_BANK": "0",
+                "BUILD_V7_BANK": "0",
+                "BUILD_V18_BANK": "0",
+                "SKIP_COMPLETED_CASES": "1",
+                "WORKER_LABEL": f"worker_{idx + 1}",
+            }
+            procs[idx] = run_python_module(script_path, worker_env)
+
+    merged_cases = manifest_entries_for_case_names(selected_case_names())
+    write_manifest(merged_cases)
+    if merged_cases:
+        collect_ablation_results(merged_cases)
+    return 0
+
+
+def main() -> int:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if env_flag("WORKER_MODE", "0"):
+        return run_worker_entry()
+    if env_flag("RUN_PARALLEL", "0"):
+        return run_parallel_supervisor()
+
+    manifest = run_selected_cases(build_common_env())
+    write_manifest(manifest)
     print(f"\nmanifest saved: {MANIFEST_PATH}")
     collect_ablation_results(manifest)
     return 0
