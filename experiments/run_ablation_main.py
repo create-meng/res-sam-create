@@ -658,8 +658,15 @@ def run_parallel_supervisor() -> int:
     common_env = build_common_env()
 
     case_lookup = build_case_lookup()
-    if any(str(case_lookup[name]["family"]) == "current" for name in selected_names):
+    selected_families = {str(case_lookup[name]["family"]) for name in selected_names}
+    if "current" in selected_families:
         ensure_current_bank(common_env)
+    if "v7" in selected_families:
+        scripts_v7 = materialize_legacy_version("v7")
+        ensure_legacy_bank("v7", scripts_v7, common_env)
+    if "v18" in selected_families:
+        scripts_v18 = materialize_legacy_version("v18")
+        ensure_legacy_bank("v18", scripts_v18, common_env)
 
     num_workers = min(env_int("PARALLEL_WORKERS", 2), len(selected_names))
     restart_delay_sec = max(1, env_int("WORKER_RESTART_DELAY_SEC", 5))
@@ -681,8 +688,8 @@ def run_parallel_supervisor() -> int:
             "WORKER_MODE": "1",
             "WORKER_CASES": ",".join(group),
             "BUILD_CURRENT_BANK": "0",
-            "BUILD_V7_BANK": env_str("BUILD_V7_BANK", "auto"),
-            "BUILD_V18_BANK": env_str("BUILD_V18_BANK", "auto"),
+            "BUILD_V7_BANK": "0",
+            "BUILD_V18_BANK": "0",
             "SKIP_COMPLETED_CASES": "1",
             "WORKER_LABEL": f"worker_{idx}",
         }
