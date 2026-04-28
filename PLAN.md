@@ -132,7 +132,7 @@ def parse_voc_xml(xml_path):
 
 ### Step 1: Feature Bank 构建
 
-**脚本**: `experiments/01_build_feature_bank.py`
+**脚本**: `experiments/_feature_bank.py`
 
 **输入**: `intact/` 中随机 20 张图片
 
@@ -180,7 +180,7 @@ torch.save(features, 'outputs/feature_banks/features.pth')
 
 ### Step 2: Fully Automatic 推理
 
-**脚本**: `experiments/02_inference_auto.py`
+**脚本**: `experiments/_inference_auto.py`
 
 **输入**: 测试集图片 + Feature Bank
 
@@ -366,10 +366,10 @@ def generate_clicks(gt_bbox, pos_count, neg_count, img_size):
    └── experiments/, outputs/
 
 2. Step 1: Feature Bank 构建
-   └── 01_build_feature_bank.py
+   └── _feature_bank.py
 
 3. Step 2: Fully Automatic 推理
-   └── 02_inference_auto.py
+   └── _inference_auto.py
 
 4. Step 3: 评估指标
    └── 04_evaluate.py

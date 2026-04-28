@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Res-SAM V30 评估脚本
-评估 V30 主线实验效果
+Res-SAM current 主线评估脚本
+评估当前主线实验效果
 
-V30 说明：
+当前主线说明：
 - 当前继承 V25 基线
 - 多 IoU 阈值评估（0.1, 0.2, 0.3, 0.5）
 - 图像级 AUC
@@ -73,8 +73,8 @@ def get_image_score_strategies(record):
     }
 
 
-def evaluate_v30(pred_path, meta_path):
-    """评估 v30 结果"""
+def evaluate_current(pred_path, meta_path):
+    """评估当前主线结果"""
     try:
         with open(pred_path, 'r', encoding='utf-8') as f:
             obj = json.load(f)
@@ -188,8 +188,8 @@ def evaluate_v30(pred_path, meta_path):
 
 
 if __name__ == '__main__':
-    logger = setup_global_logger(BASE_DIR, "03_evaluate_v30")
-    log_section("V30 评估：主线版本", logger)
+    logger = setup_global_logger(BASE_DIR, "03_evaluate_current")
+    log_section("Current 评估：主线版本", logger)
 
     output_suffix = _normalize_suffix("OUTPUT_SUFFIX", "")
     bank_suffix = _normalize_suffix("BANK_SUFFIX", "")
@@ -204,24 +204,24 @@ if __name__ == '__main__':
 
     if not os.path.exists(pred_path):
         logger.error(f"预测结果文件不存在: {pred_path}")
-        logger.error("请先运行: python experiments/02_inference_auto_v30.py")
+        logger.error("请先运行: python experiments/_inference_auto.py")
         sys.exit(1)
 
     if not os.path.exists(meta_path):
         logger.error(f"元数据文件不存在: {meta_path}")
-        logger.error("请先运行: python experiments/01_build_feature_bank_v30.py")
+        logger.error("请先运行: python experiments/_feature_bank.py")
         sys.exit(1)
 
     logger.info(f"读取预测结果: {pred_path}")
     logger.info(f"读取元数据:   {meta_path}")
 
-    result = evaluate_v30(pred_path, meta_path)
+    result = evaluate_current(pred_path, meta_path)
 
     if result is None:
         logger.error("评估失败")
         sys.exit(1)
 
-    log_section("v30 评估结果", logger)
+    log_section("current 评估结果", logger)
 
     logger.info("Feature Bank 配置:")
     logger.info(f"  hidden_size:          {result['meta'].get('config', {}).get('hidden_size')}")
@@ -282,11 +282,11 @@ if __name__ == '__main__':
         json.dump(save_result, f, indent=2, ensure_ascii=False)
 
     logger.info(f"\n评估报告已保存: {report_path}")
-    log_finish("03_evaluate_v30", logger)
+    log_finish("03_evaluate_current", logger)
 
     # 终端汇总输出
     print("\n" + "=" * 80)
-    print("v30 评估完成！")
+    print("current 评估完成！")
     print("=" * 80)
     print(f"主要指标 (IoU=0.5):")
     print(f"  TP={m05['tp']}, FP={m05['fp']}, FN={m05['fn']}")

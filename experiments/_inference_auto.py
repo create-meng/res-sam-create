@@ -1,7 +1,7 @@
 """
-Res-SAM v30 - Step 2: fully automatic inference
+Res-SAM current mainline - Step 2: fully automatic inference
 
-V30 说明：
+当前主线说明：
 - 固定为当前最优检测主线
 - 不再展开 patchcore / threshold learner 对比分支
 - 新增 `utilities` 分类别后处理
@@ -49,6 +49,27 @@ from PatchRes.logger import setup_global_logger, log_config, log_section, log_fi
 def _env_flag(name: str, default: str = "0") -> int:
     value = (os.getenv(name, default) or default).strip().lower()
     return 1 if value in {"1", "true", "yes", "on"} else 0
+
+
+def _env_optional_int(name: str) -> int | None:
+    value = (os.getenv(name, "") or "").strip()
+    if not value:
+        return None
+    return int(value)
+
+
+def _env_optional_float(name: str) -> float | None:
+    value = (os.getenv(name, "") or "").strip()
+    if not value:
+        return None
+    return float(value)
+
+
+def _env_optional_float_list(name: str) -> list[float] | None:
+    value = (os.getenv(name, "") or "").strip()
+    if not value:
+        return None
+    return [float(part.strip()) for part in value.split(",") if part.strip()]
 
 
 def _normalize_suffix(env_name: str, fallback: str = "") -> str:
@@ -254,6 +275,58 @@ def parse_stride_list(raw_value: str | list[int] | tuple[int, ...], fallback: li
         else:
             values = [int(part.strip()) for part in text.split(",") if part.strip()]
     return [v for v in values if v > 0] or list(fallback)
+
+
+def apply_env_overrides(config: dict) -> dict:
+    overridden = dict(config)
+
+    int_overrides = {
+        "hidden_size": "HIDDEN_SIZE",
+        "min_bbox_area": "MIN_BBOX_AREA",
+        "max_bbox_area": "MAX_BBOX_AREA",
+        "bbox_expand_pixels": "BBOX_EXPAND_PIXELS",
+        "top_k_per_image": "TOP_K_PER_IMAGE",
+        "use_multi_scale": "USE_MULTI_SCALE",
+        "use_secondary_filter": "USE_SECONDARY_FILTER",
+        "use_patchcore_topk_agg": "USE_PATCHCORE_TOPK_AGG",
+        "use_threshold_learner": "USE_THRESHOLD_LEARNER",
+        "use_per_image_threshold": "USE_PER_IMAGE_THRESHOLD",
+        "use_adaptive_beta": "USE_ADAPTIVE_BETA",
+        "use_score_map": "USE_SCORE_MAP",
+    }
+    float_overrides = {
+        "beta_threshold": "BETA_THRESHOLD",
+        "score_map_smooth_sigma": "SCORE_MAP_SMOOTH_SIGMA",
+        "nms_iou_threshold": "NMS_IOU_THRESHOLD",
+        "per_image_threshold_ratio": "PER_IMAGE_THRESHOLD_RATIO",
+        "secondary_filter_min_mean_patch": "SECONDARY_FILTER_MIN_MEAN_PATCH",
+        "secondary_filter_box_score_min": "SECONDARY_FILTER_BOX_SCORE_MIN",
+        "patchcore_reweight_lambda": "PATCHCORE_REWEIGHT_LAMBDA",
+    }
+
+    for key, env_name in int_overrides.items():
+        value = _env_optional_int(env_name)
+        if value is not None:
+            overridden[key] = value
+
+    for key, env_name in float_overrides.items():
+        value = _env_optional_float(env_name)
+        if value is not None:
+            overridden[key] = value
+
+    patchcore_topk = _env_optional_int("PATCHCORE_TOPK")
+    if patchcore_topk is not None:
+        overridden["patchcore_topk"] = patchcore_topk
+
+    multi_scale_strides = os.getenv("MULTI_SCALE_STRIDES", "").strip()
+    if multi_scale_strides:
+        overridden["multi_scale_strides"] = parse_stride_list(multi_scale_strides, [3, 5, 8])
+
+    multi_scale_weights = _env_optional_float_list("MULTI_SCALE_WEIGHTS")
+    if multi_scale_weights:
+        overridden["multi_scale_weights"] = multi_scale_weights
+
+    return overridden
 
 
 def build_utilities_proposal_mask(score_map: np.ndarray, config: dict,
@@ -1115,7 +1188,7 @@ def run_inference(config: dict) -> dict:
     run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    logger = setup_global_logger(base_dir, "02_inference_auto_v30")
+    logger = setup_global_logger(base_dir, "02_inference_auto_current")
     
     config = dict(config)
     for key in ["feature_bank_path", "metadata_path", "output_dir", "checkpoint_dir"]:
@@ -1148,7 +1221,7 @@ def run_inference(config: dict) -> dict:
 
     if not os.path.exists(config["feature_bank_path"]):
         raise FileNotFoundError(f"Feature bank not found: {config['feature_bank_path']}\n"
-                                f"请先运行 01_build_feature_bank_v30.py")
+                                f"请先运行 _feature_bank.py")
 
     os.makedirs(config["output_dir"], exist_ok=True)
     os.makedirs(config["checkpoint_dir"], exist_ok=True)
@@ -1458,7 +1531,7 @@ def run_inference(config: dict) -> dict:
     logger.info(f"结果保存至：{output_file}")
     logger.info(f"处理图像数：{total_images}，检出框数：{total_detections}")
     
-    log_finish("02_inference_auto_v30", logger)
+    log_finish("02_inference_auto_current", logger)
     
     return all_results
 
@@ -1479,6 +1552,7 @@ if __name__ == "__main__":
         CONFIG["metadata_path"]     = os.path.join(BASE_DIR, "outputs", "feature_banks_v30", "metadata.json")
     CONFIG["output_dir"]        = os.path.join(BASE_DIR, "outputs", "predictions_v30")
     CONFIG["checkpoint_dir"]    = os.path.join(BASE_DIR, "outputs", "checkpoints_v30")
+    CONFIG = apply_env_overrides(CONFIG)
 
     with torch.no_grad():
         run_inference(CONFIG)

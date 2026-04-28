@@ -1,7 +1,7 @@
 """
-Res-SAM v30 - Step 1: build the feature bank
+Res-SAM current mainline - Step 1: build the feature bank
 
-V30 说明：
+当前主线说明：
 - 固定为当前最优检测主线
 - 不再展开 softpatch 等无增益分支
 
@@ -387,7 +387,7 @@ def build_feature_bank(config: dict):
     torch.manual_seed(config["random_seed"])
 
     print("=" * 60)
-    print("Res-SAM v30：Feature Bank 构建（继承 V25 基线）")
+    print("Res-SAM current：Feature Bank 构建（继承 V25 基线）")
     print("=" * 60)
     print(f"  hidden_size              = {config['hidden_size']}")
     print(f"  background_removal       = {config.get('background_removal_method')}")
@@ -402,7 +402,7 @@ def build_feature_bank(config: dict):
     val_split = split_validation_set(config)
     
     # 2. 初始化模型
-    print("\n初始化 ResSAM (v30)...")
+    print("\n初始化 ResSAM (current)...")
     model = ResSAM(
         hidden_size=config["hidden_size"],
         window_size=config["window_size"],
@@ -464,7 +464,7 @@ def build_feature_bank(config: dict):
     
     # 7. 保存 Feature Bank
     model.save_feature_bank(output_path)
-    print(f"\nFeature Bank v30 保存至: {output_path}")
+    print(f"\nFeature Bank current 保存至: {output_path}")
 
     # 8. 保存元数据
     all_metadata = {
@@ -504,7 +504,7 @@ def build_feature_bank(config: dict):
 
 
 if __name__ == "__main__":
-    logger = setup_global_logger(BASE_DIR, "01_build_feature_bank_v30")
+    logger = setup_global_logger(BASE_DIR, "01_build_feature_bank_current")
     
     preflight_faiss_or_raise()
     CONFIG = apply_layout_to_config_01(dict(CONFIG), BASE_DIR, "v30")
@@ -534,6 +534,6 @@ if __name__ == "__main__":
     with torch.no_grad():
         build_feature_bank(CONFIG)
     
-    log_finish("01_build_feature_bank_v30", logger)
+    log_finish("01_build_feature_bank_current", logger)
 
 
