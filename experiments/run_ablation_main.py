@@ -731,7 +731,7 @@ def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     if env_flag("WORKER_MODE", "0"):
         return run_worker_entry()
-    if env_flag("RUN_PARALLEL", "0"):
+    if not env_flag("FORCE_SEQUENTIAL", "0") and env_flag("RUN_PARALLEL", "1"):
         return run_parallel_supervisor()
 
     manifest = run_selected_cases(build_common_env())

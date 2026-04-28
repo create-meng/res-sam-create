@@ -28,7 +28,9 @@ Rule:
 
 - Default:
   `python experiments/run_ablation_main.py`
-- Two-worker supervised parallel run:
-  `RUN_PARALLEL=1 PARALLEL_WORKERS=2 python experiments/run_ablation_main.py`
+- Force sequential:
+  `FORCE_SEQUENTIAL=1 python experiments/run_ablation_main.py`
+- Explicit parallel worker count:
+  `PARALLEL_WORKERS=2 python experiments/run_ablation_main.py`
 
 The parallel mode prebuilds the shared current feature bank once, splits cases across workers, and restarts a failed worker so the underlying checkpoint files can continue from the last saved position.
