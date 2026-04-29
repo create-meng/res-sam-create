@@ -284,6 +284,31 @@ def summarize_case(case: dict[str, object]) -> dict[str, object]:
     }
 
 
+def write_legacy_v18_report(prediction_path: Path, report_path: Path) -> None:
+    pred_obj = load_json_if_exists(prediction_path)
+    if pred_obj is None:
+        raise FileNotFoundError(f"Missing prediction file: {prediction_path}")
+    results = pred_obj.get("results", {})
+    metrics = metric_at_iou_05(results)
+    patch_mean_normal, patch_mean_anomaly, patch_mean_gap_value = patch_mean_gap(results)
+    payload = {
+        "version": "v18",
+        "primary_image_score_strategy": "patch_mean",
+        "image_auc": None,
+        "tp": metrics["tp"],
+        "fp": metrics["fp"],
+        "fn": metrics["fn"],
+        "precision": metrics["precision"],
+        "recall": metrics["recall"],
+        "f1": metrics["f1"],
+        "patch_mean_normal": patch_mean_normal,
+        "patch_mean_anomaly": patch_mean_anomaly,
+        "patch_mean_gap": patch_mean_gap_value,
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def fmt_float(value: object, digits: int = 4) -> str:
     if value is None:
         return "-"
@@ -565,14 +590,15 @@ def run_legacy_case(case: dict[str, object], common_env: dict[str, str], manifes
     print(f"\n=== CASE {case['name']} ({version}) ===")
     print(case.get("description", ""))
     run_cmd(scripts["infer"], common_env)
-    run_cmd(scripts["eval"], common_env)
 
     if version == "v7":
+        run_cmd(scripts["eval"], common_env)
         prediction_path = BASE_DIR / "outputs" / "predictions_v7" / "auto_predictions_v7.json"
         report_path = BASE_DIR / "outputs" / "visualizations_v7" / "03_evaluate_and_visualize_v7_report.md"
     elif version == "v18":
         prediction_path = BASE_DIR / "outputs" / "predictions_v18" / "auto_predictions_v18.json"
         report_path = BASE_DIR / "outputs" / "predictions_v18" / "evaluation_report_v18.json"
+        write_legacy_v18_report(prediction_path, report_path)
     else:
         raise ValueError(version)
 
