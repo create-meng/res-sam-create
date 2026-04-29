@@ -283,31 +283,33 @@ def emit_ablation_progress(kind, **kwargs):
 
 def instrument_progress_script(script_path: Path) -> None:
     text = script_path.read_text(encoding="utf-8")
-    if "emit_ablation_progress(" in text:
-        return
     if "CONFIG = {" not in text:
         return
+    if "AB_PROGRESS_PREFIX" in text:
+        marker = progress_helper_block()
+        start = text.find(marker)
+        if start != -1:
+            text = text[:start] + text[start + len(marker):]
+        text = text.replace('                emit_ablation_progress("resume", category=category, current=int(start_idx), total=int(len(image_files)))\n', "")
+        text = text.replace('        emit_ablation_progress("category_start", category=category, current=int(start_idx), total=int(len(image_files)))\n', "")
+        text = text.replace('                emit_ablation_progress("image_progress", category=category, current=int(i + 1), total=int(len(image_files)), image=img_file)\n', "")
+        text = text.replace('        emit_ablation_progress("category_done", category=category, current=int(last_completed), total=int(len(image_files)))\n', "")
     text = text.replace("CONFIG = {", progress_helper_block() + "CONFIG = {", 1)
     replacements = [
         (
-            'logger.info(f"共找到 {len(image_files)} 张图像")',
-            'logger.info(f"共找到 {len(image_files)} 张图像")\n'
-            '        emit_ablation_progress("category_start", category=category, current=int(start_idx), total=int(len(image_files)))',
-        ),
-        (
-            'print(f"共找到 {len(image_files)} 张图像")',
-            'print(f"共找到 {len(image_files)} 张图像")\n'
-            '        emit_ablation_progress("category_start", category=category, current=int(start_idx), total=int(len(image_files)))',
-        ),
-        (
             'logger.info(f"从断点继续：start_idx={start_idx}")',
             'logger.info(f"从断点继续：start_idx={start_idx}")\n'
-            '                emit_ablation_progress("resume", category=category, current=int(start_idx), total=int(len(image_files)))',
+                '                emit_ablation_progress("resume", category=category, current=int(start_idx), total=int(len(image_files)))',
         ),
         (
             'print(f"从断点继续：start_idx={start_idx}")',
             'print(f"从断点继续：start_idx={start_idx}")\n'
-            '                emit_ablation_progress("resume", category=category, current=int(start_idx), total=int(len(image_files)))',
+                '                emit_ablation_progress("resume", category=category, current=int(start_idx), total=int(len(image_files)))',
+        ),
+        (
+            '        annotation_dir = config["annotation_dirs"].get(category, "")',
+            '        emit_ablation_progress("category_start", category=category, current=int(start_idx), total=int(len(image_files)))\n'
+            '        annotation_dir = config["annotation_dirs"].get(category, "")',
         ),
         (
             '                img_file = image_files[i]',
@@ -347,7 +349,8 @@ def materialize_legacy_version(version: str) -> dict[str, Path]:
     materialized: dict[str, Path] = {}
     for key, repo_rel_path in file_map.items():
         dst = BASE_DIR / "experiments" / f"_materialized_{version}_{Path(repo_rel_path).name}"
-        if not dst.exists() or env_flag("REFRESH_LEGACY_SCRIPTS", "0"):
+        force_refresh = key == "infer"
+        if force_refresh or not dst.exists() or env_flag("REFRESH_LEGACY_SCRIPTS", "0"):
             print(f"[legacy] materialize {version}: {repo_rel_path} @ {commit}")
             git_show_to_file(commit, repo_rel_path, dst)
         if key == "infer":
