@@ -112,6 +112,7 @@ def pump_child_output(
 ) -> None:
     assert proc.stdout is not None
     latest_state.setdefault("line_buffer", "")
+    latest_state.setdefault("latest_progress", "")
     with log_path.open("a", encoding="utf-8") as log_file:
         while True:
             chunk = proc.stdout.read(1)
@@ -125,18 +126,19 @@ def pump_child_output(
                 if line.startswith(PROGRESS_PREFIX):
                     try:
                         payload = json.loads(line[len(PROGRESS_PREFIX):])
-                        latest_state["latest"] = format_progress_payload(payload)
-                        progress_queue.put(latest_state["latest"])
+                        latest_state["latest_progress"] = format_progress_payload(payload)
+                        latest_state["latest"] = latest_state["latest_progress"]
+                        progress_queue.put(latest_state["latest_progress"])
                     except Exception:
                         latest_state["latest"] = line
                 elif line:
-                    latest_state["latest"] = line
+                    latest_state["latest_raw"] = line
             else:
                 latest_state["line_buffer"] = (latest_state.get("line_buffer", "") + chunk)[-2000:]
             latest_state["buffer"] = (latest_state.get("buffer", "") + chunk)[-4000:]
             candidate = normalize_progress_text(latest_state["buffer"])
             if candidate and not candidate.startswith(PROGRESS_PREFIX):
-                latest_state["latest"] = candidate
+                latest_state["latest_raw"] = candidate
         log_file.flush()
 
 
@@ -169,7 +171,7 @@ def run_cmd(
         text=True,
         bufsize=0,
     )
-    latest_state = {"buffer": "", "latest": ""}
+    latest_state = {"buffer": "", "latest": "", "latest_raw": "", "latest_progress": ""}
     progress_queue: queue.Queue[str] = queue.Queue()
     reader = threading.Thread(target=pump_child_output, args=(proc, log_path, latest_state, progress_queue), daemon=True)
     reader.start()
@@ -195,17 +197,19 @@ def run_cmd(
             reader.join(timeout=2)
             elapsed = format_elapsed(time.time() - started_at)
             if return_code != 0:
-                last_line = latest_state.get("latest") or read_last_log_line(log_path)
+                last_line = latest_state.get("latest_progress") or latest_state.get("latest_raw") or read_last_log_line(log_path)
                 hint = f" | last={last_line}" if last_line else ""
                 raise subprocess.CalledProcessError(return_code, cmd, output=f"log={log_path}{hint}")
-            final_line = latest_state.get("latest")
+            final_line = latest_state.get("latest_progress") or latest_state.get("latest_raw")
             hint = f" | last={final_line}" if final_line else ""
             print(f"[supervisor] {label} finished in {elapsed}{hint}")
             return
         now = time.time()
         if now - last_feedback >= heartbeat_sec:
             elapsed = format_elapsed(now - started_at)
-            last_line = latest_state.get("latest") or read_last_log_line(log_path)
+            last_line = latest_state.get("latest_progress")
+            if not last_line:
+                last_line = latest_state.get("latest_raw") or read_last_log_line(log_path)
             hint = ""
             if last_line and last_line != last_log_hint:
                 hint = f" | last={last_line}"
