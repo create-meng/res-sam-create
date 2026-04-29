@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -107,6 +108,7 @@ def pump_child_output(
     proc: subprocess.Popen[str],
     log_path: Path,
     latest_state: dict[str, str],
+    progress_queue: queue.Queue[str],
 ) -> None:
     assert proc.stdout is not None
     latest_state.setdefault("line_buffer", "")
@@ -124,6 +126,7 @@ def pump_child_output(
                     try:
                         payload = json.loads(line[len(PROGRESS_PREFIX):])
                         latest_state["latest"] = format_progress_payload(payload)
+                        progress_queue.put(latest_state["latest"])
                     except Exception:
                         latest_state["latest"] = line
                 elif line:
@@ -142,7 +145,7 @@ def run_cmd(
     extra_env: dict[str, str] | None = None,
     *,
     status_label: str | None = None,
-    heartbeat_sec: int = 10,
+    heartbeat_sec: int = 30,
 ) -> None:
     env = os.environ.copy()
     if extra_env:
@@ -167,13 +170,26 @@ def run_cmd(
         bufsize=0,
     )
     latest_state = {"buffer": "", "latest": ""}
-    reader = threading.Thread(target=pump_child_output, args=(proc, log_path, latest_state), daemon=True)
+    progress_queue: queue.Queue[str] = queue.Queue()
+    reader = threading.Thread(target=pump_child_output, args=(proc, log_path, latest_state, progress_queue), daemon=True)
     reader.start()
     started_at = time.time()
     last_feedback = started_at
     last_log_hint = ""
+    last_progress_line = ""
     print(f"[supervisor] {label} log={log_path}")
     while True:
+        try:
+            while True:
+                progress_line = progress_queue.get_nowait()
+                if progress_line and progress_line != last_progress_line:
+                    elapsed = format_elapsed(time.time() - started_at)
+                    print(f"[supervisor] {label} progress | elapsed={elapsed} | {progress_line}")
+                    last_progress_line = progress_line
+                    last_log_hint = progress_line
+                    last_feedback = time.time()
+        except queue.Empty:
+            pass
         return_code = proc.poll()
         if return_code is not None:
             reader.join(timeout=2)
