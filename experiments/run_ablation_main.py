@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -31,6 +32,7 @@ STATUS_DIR = OUTPUT_DIR / "status"
 LOG_DIR = OUTPUT_DIR / "logs"
 CSV_PATH = OUTPUT_DIR / "ablation_summary.csv"
 MD_PATH = OUTPUT_DIR / "ablation_summary.md"
+PROGRESS_PREFIX = "__AB_PROGRESS__"
 
 
 def env_str(name: str, default: str = "") -> str:
@@ -74,17 +76,79 @@ def read_last_log_line(log_path: Path) -> str:
     return ""
 
 
+def normalize_progress_text(text: str) -> str:
+    cleaned = text.replace("\r", "\n")
+    parts = [part.strip() for part in cleaned.split("\n")]
+    for part in reversed(parts):
+        if part:
+            return part
+    return ""
+
+
+def format_progress_payload(payload: dict[str, object]) -> str:
+    kind = str(payload.get("kind") or "")
+    category = str(payload.get("category") or "")
+    current = payload.get("current")
+    total = payload.get("total")
+    image = str(payload.get("image") or "")
+    if kind == "category_start":
+        return f"{category} start {current}/{total}"
+    if kind == "resume":
+        return f"{category} resume at {current}/{total}"
+    if kind == "image_progress":
+        suffix = f" | {image}" if image else ""
+        return f"{category} {current}/{total}{suffix}"
+    if kind == "category_done":
+        return f"{category} done {current}/{total}"
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def pump_child_output(
+    proc: subprocess.Popen[str],
+    log_path: Path,
+    latest_state: dict[str, str],
+) -> None:
+    assert proc.stdout is not None
+    latest_state.setdefault("line_buffer", "")
+    with log_path.open("a", encoding="utf-8") as log_file:
+        while True:
+            chunk = proc.stdout.read(1)
+            if chunk == "":
+                break
+            log_file.write(chunk)
+            if chunk in {"\r", "\n"}:
+                log_file.flush()
+                line = latest_state.get("line_buffer", "").strip()
+                latest_state["line_buffer"] = ""
+                if line.startswith(PROGRESS_PREFIX):
+                    try:
+                        payload = json.loads(line[len(PROGRESS_PREFIX):])
+                        latest_state["latest"] = format_progress_payload(payload)
+                    except Exception:
+                        latest_state["latest"] = line
+                elif line:
+                    latest_state["latest"] = line
+            else:
+                latest_state["line_buffer"] = (latest_state.get("line_buffer", "") + chunk)[-2000:]
+            latest_state["buffer"] = (latest_state.get("buffer", "") + chunk)[-4000:]
+            candidate = normalize_progress_text(latest_state["buffer"])
+            if candidate and not candidate.startswith(PROGRESS_PREFIX):
+                latest_state["latest"] = candidate
+        log_file.flush()
+
+
 def run_cmd(
     script_path: Path,
     extra_env: dict[str, str] | None = None,
     *,
     status_label: str | None = None,
-    heartbeat_sec: int = 30,
+    heartbeat_sec: int = 10,
 ) -> None:
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
     env.setdefault("PYTHONUNBUFFERED", "1")
+    env.setdefault("ABLATION_PROGRESS", "1")
     cmd = [PYTHON, str(script_path)]
     print(">>>", " ".join(cmd))
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -93,39 +157,46 @@ def run_cmd(
     with log_path.open("a", encoding="utf-8") as log_file:
         log_file.write(f"\n\n===== {now_iso()} | START {label} =====\n")
         log_file.flush()
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(BASE_DIR),
-            env=env,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        started_at = time.time()
-        last_feedback = started_at
-        last_log_hint = ""
-        print(f"[supervisor] {label} log={log_path}")
-        while True:
-            return_code = proc.poll()
-            if return_code is not None:
-                elapsed = format_elapsed(time.time() - started_at)
-                if return_code != 0:
-                    last_line = read_last_log_line(log_path)
-                    hint = f" | last={last_line}" if last_line else ""
-                    raise subprocess.CalledProcessError(return_code, cmd, output=f"log={log_path}{hint}")
-                print(f"[supervisor] {label} finished in {elapsed}")
-                return
-            now = time.time()
-            if now - last_feedback >= heartbeat_sec:
-                elapsed = format_elapsed(now - started_at)
-                last_line = read_last_log_line(log_path)
-                hint = ""
-                if last_line and last_line != last_log_hint:
-                    hint = f" | last={last_line}"
-                    last_log_hint = last_line
-                print(f"[supervisor] {label} still running | elapsed={elapsed}{hint}")
-                last_feedback = now
-            time.sleep(5)
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(BASE_DIR),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=0,
+    )
+    latest_state = {"buffer": "", "latest": ""}
+    reader = threading.Thread(target=pump_child_output, args=(proc, log_path, latest_state), daemon=True)
+    reader.start()
+    started_at = time.time()
+    last_feedback = started_at
+    last_log_hint = ""
+    print(f"[supervisor] {label} log={log_path}")
+    while True:
+        return_code = proc.poll()
+        if return_code is not None:
+            reader.join(timeout=2)
+            elapsed = format_elapsed(time.time() - started_at)
+            if return_code != 0:
+                last_line = latest_state.get("latest") or read_last_log_line(log_path)
+                hint = f" | last={last_line}" if last_line else ""
+                raise subprocess.CalledProcessError(return_code, cmd, output=f"log={log_path}{hint}")
+            final_line = latest_state.get("latest")
+            hint = f" | last={final_line}" if final_line else ""
+            print(f"[supervisor] {label} finished in {elapsed}{hint}")
+            return
+        now = time.time()
+        if now - last_feedback >= heartbeat_sec:
+            elapsed = format_elapsed(now - started_at)
+            last_line = latest_state.get("latest") or read_last_log_line(log_path)
+            hint = ""
+            if last_line and last_line != last_log_hint:
+                hint = f" | last={last_line}"
+                last_log_hint = last_line
+            print(f"[supervisor] {label} still running | elapsed={elapsed}{hint}")
+            last_feedback = now
+        time.sleep(5)
 
 
 def run_python_module(script_path: Path, extra_env: dict[str, str] | None = None) -> subprocess.Popen[str]:
@@ -133,6 +204,7 @@ def run_python_module(script_path: Path, extra_env: dict[str, str] | None = None
     if extra_env:
         env.update(extra_env)
     env.setdefault("PYTHONUNBUFFERED", "1")
+    env.setdefault("ABLATION_PROGRESS", "1")
     cmd = [PYTHON, str(script_path)]
     print(">>>", " ".join(cmd))
     return subprocess.Popen(cmd, cwd=str(BASE_DIR), env=env)
@@ -196,6 +268,64 @@ def git_show_to_file(commit: str, repo_rel_path: str, dst: Path) -> None:
     dst.write_text(result.stdout, encoding="utf-8")
 
 
+def progress_helper_block() -> str:
+    return f"""
+AB_PROGRESS_PREFIX = "{PROGRESS_PREFIX}"
+
+def emit_ablation_progress(kind, **kwargs):
+    if os.getenv("ABLATION_PROGRESS", "0").lower() not in {{"1", "true", "yes", "on"}}:
+        return
+    payload = {{"kind": kind, **kwargs}}
+    print(AB_PROGRESS_PREFIX + json.dumps(payload, ensure_ascii=False), flush=True)
+
+"""
+
+
+def instrument_progress_script(script_path: Path) -> None:
+    text = script_path.read_text(encoding="utf-8")
+    if "emit_ablation_progress(" in text:
+        return
+    if "CONFIG = {" not in text:
+        return
+    text = text.replace("CONFIG = {", progress_helper_block() + "CONFIG = {", 1)
+    replacements = [
+        (
+            'logger.info(f"共找到 {len(image_files)} 张图像")',
+            'logger.info(f"共找到 {len(image_files)} 张图像")\n'
+            '        emit_ablation_progress("category_start", category=category, current=int(start_idx), total=int(len(image_files)))',
+        ),
+        (
+            'print(f"共找到 {len(image_files)} 张图像")',
+            'print(f"共找到 {len(image_files)} 张图像")\n'
+            '        emit_ablation_progress("category_start", category=category, current=int(start_idx), total=int(len(image_files)))',
+        ),
+        (
+            'logger.info(f"从断点继续：start_idx={start_idx}")',
+            'logger.info(f"从断点继续：start_idx={start_idx}")\n'
+            '                emit_ablation_progress("resume", category=category, current=int(start_idx), total=int(len(image_files)))',
+        ),
+        (
+            'print(f"从断点继续：start_idx={start_idx}")',
+            'print(f"从断点继续：start_idx={start_idx}")\n'
+            '                emit_ablation_progress("resume", category=category, current=int(start_idx), total=int(len(image_files)))',
+        ),
+        (
+            '                img_file = image_files[i]',
+            '                img_file = image_files[i]\n'
+            '                emit_ablation_progress("image_progress", category=category, current=int(i + 1), total=int(len(image_files)), image=img_file)',
+        ),
+        (
+            '        all_results[category] = category_results',
+            '        emit_ablation_progress("category_done", category=category, current=int(last_completed), total=int(len(image_files)))\n'
+            '        all_results[category] = category_results',
+        ),
+    ]
+    for old, new in replacements:
+        if old in text:
+            text = text.replace(old, new, 1)
+    script_path.write_text(text, encoding="utf-8")
+
+
 def materialize_legacy_version(version: str) -> dict[str, Path]:
     if version == "v7":
         commit = "bc76702"
@@ -220,6 +350,8 @@ def materialize_legacy_version(version: str) -> dict[str, Path]:
         if not dst.exists() or env_flag("REFRESH_LEGACY_SCRIPTS", "0"):
             print(f"[legacy] materialize {version}: {repo_rel_path} @ {commit}")
             git_show_to_file(commit, repo_rel_path, dst)
+        if key == "infer":
+            instrument_progress_script(dst)
         materialized[key] = dst
     return materialized
 

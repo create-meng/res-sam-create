@@ -45,6 +45,16 @@ from experiments.paper_constants import DEFAULT_BETA_THRESHOLD, preflight_faiss_
 from experiments.resize_policy import RESIZE_POLICY_FIXED, target_hw_for_preprocess
 from PatchRes.logger import setup_global_logger, log_config, log_section, log_finish
 
+AB_PROGRESS_PREFIX = "__AB_PROGRESS__"
+
+
+def emit_ablation_progress(kind: str, **kwargs) -> None:
+    value = (os.getenv("ABLATION_PROGRESS", "0") or "0").strip().lower()
+    if value not in {"1", "true", "yes", "on"}:
+        return
+    payload = {"kind": kind, **kwargs}
+    print(AB_PROGRESS_PREFIX + json.dumps(payload, ensure_ascii=False), flush=True)
+
 
 def _env_flag(name: str, default: str = "0") -> int:
     value = (os.getenv(name, default) or default).strip().lower()
@@ -1284,6 +1294,9 @@ def run_inference(config: dict) -> dict:
                 category_results = checkpoint.get("results", []) or []
                 last_completed = start_idx
                 logger.info(f"从断点继续：start_idx={start_idx}")
+                emit_ablation_progress("resume", category=category, current=int(start_idx), total=int(len(image_files)))
+
+        emit_ablation_progress("category_start", category=category, current=int(start_idx), total=int(len(image_files)))
 
         annotation_dir = config["annotation_dirs"].get(category, "")
         checkpoint_interval = int(config.get("checkpoint_interval", 50) or 0)
@@ -1292,6 +1305,7 @@ def run_inference(config: dict) -> dict:
         try:
             for i in tqdm(range(start_idx, len(image_files)), desc=f"处理 {category}", file=sys.stdout):
                 img_file = image_files[i]
+                emit_ablation_progress("image_progress", category=category, current=int(i + 1), total=int(len(image_files)), image=img_file)
                 img_path = os.path.join(data_dir, img_file)
                 xml_name = os.path.splitext(img_file)[0] + ".xml"
                 xml_path = os.path.join(annotation_dir, xml_name) if annotation_dir else ""
@@ -1424,6 +1438,7 @@ def run_inference(config: dict) -> dict:
             raise
 
         all_results[category] = category_results
+        emit_ablation_progress("category_done", category=category, current=int(last_completed), total=int(len(image_files)))
         logger.info(f"类别 {category} 完成，共 {len(category_results)} 张")
         
         # 保存完成标记
