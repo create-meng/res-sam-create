@@ -15,6 +15,8 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +26,8 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
 OUTPUT_DIR = BASE_DIR / "outputs" / "ablation_suite"
 MANIFEST_PATH = OUTPUT_DIR / "case_manifest.json"
+MANIFEST_LOCK_PATH = OUTPUT_DIR / "case_manifest.lock"
+STATUS_DIR = OUTPUT_DIR / "status"
 CSV_PATH = OUTPUT_DIR / "ablation_summary.csv"
 MD_PATH = OUTPUT_DIR / "ablation_summary.md"
 
@@ -41,22 +45,81 @@ def env_int(name: str, default: int) -> int:
     return int(value)
 
 
-def run_cmd(script_path: Path, extra_env: dict[str, str] | None = None) -> None:
+def format_elapsed(seconds: float) -> str:
+    total = int(seconds)
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def run_cmd(
+    script_path: Path,
+    extra_env: dict[str, str] | None = None,
+    *,
+    status_label: str | None = None,
+    heartbeat_sec: int = 30,
+) -> None:
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
+    env.setdefault("PYTHONUNBUFFERED", "1")
     cmd = [PYTHON, str(script_path)]
     print(">>>", " ".join(cmd))
-    subprocess.run(cmd, cwd=str(BASE_DIR), env=env, check=True)
+    proc = subprocess.Popen(cmd, cwd=str(BASE_DIR), env=env)
+    started_at = time.time()
+    last_feedback = started_at
+    label = status_label or script_path.name
+    while True:
+        return_code = proc.poll()
+        if return_code is not None:
+            if return_code != 0:
+                raise subprocess.CalledProcessError(return_code, cmd)
+            elapsed = format_elapsed(time.time() - started_at)
+            print(f"[supervisor] {label} finished in {elapsed}")
+            return
+        now = time.time()
+        if now - last_feedback >= heartbeat_sec:
+            elapsed = format_elapsed(now - started_at)
+            print(f"[supervisor] {label} still running | elapsed={elapsed}")
+            last_feedback = now
+        time.sleep(5)
 
 
 def run_python_module(script_path: Path, extra_env: dict[str, str] | None = None) -> subprocess.Popen[str]:
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
+    env.setdefault("PYTHONUNBUFFERED", "1")
     cmd = [PYTHON, str(script_path)]
     print(">>>", " ".join(cmd))
     return subprocess.Popen(cmd, cwd=str(BASE_DIR), env=env)
+
+
+def now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+@contextmanager
+def manifest_lock(timeout_sec: float = 30.0):
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    deadline = time.time() + timeout_sec
+    while True:
+        try:
+            fd = os.open(str(MANIFEST_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+            os.close(fd)
+            break
+        except FileExistsError:
+            if time.time() >= deadline:
+                raise TimeoutError(f"Timed out acquiring manifest lock: {MANIFEST_LOCK_PATH}")
+            time.sleep(0.2)
+    try:
+        yield
+    finally:
+        try:
+            MANIFEST_LOCK_PATH.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def bank_path_current(bank_suffix: str) -> Path:
@@ -72,7 +135,7 @@ def ensure_current_bank(common_env: dict[str, str]) -> None:
     should_build = build_mode == "1" or (build_mode == "auto" and not target_bank.exists())
     if should_build:
         print(f"[current] build feature bank: {target_bank}")
-        run_cmd(BASE_DIR / "experiments" / "_feature_bank.py", common_env)
+        run_cmd(BASE_DIR / "experiments" / "_feature_bank.py", common_env, status_label="current feature bank")
     else:
         print(f"[current] reuse feature bank: {target_bank}")
 
@@ -124,7 +187,7 @@ def ensure_legacy_bank(version: str, scripts: dict[str, Path], common_env: dict[
     should_build = build_mode == "1" or (build_mode == "auto" and not target_bank.exists())
     if should_build:
         print(f"[{version}] build feature bank: {target_bank}")
-        run_cmd(scripts["build"], common_env)
+        run_cmd(scripts["build"], common_env, status_label=f"{version} feature bank")
     else:
         print(f"[{version}] reuse feature bank: {target_bank}")
 
@@ -539,12 +602,108 @@ def manifest_entries_for_case_names(case_names: list[str]) -> list[dict[str, obj
     return [manifest_entry_for_case(name) for name in case_names]
 
 
+def manifest_stub_for_case(case_name: str) -> dict[str, object]:
+    entry = manifest_entry_for_case(case_name)
+    entry.update(
+        {
+            "status": "pending",
+            "stage": "pending",
+            "worker": "",
+            "started_at": None,
+            "updated_at": now_iso(),
+            "finished_at": None,
+            "last_error": "",
+            "note": "",
+            "case_index": None,
+            "case_total": None,
+        }
+    )
+    return entry
+
+
+def ordered_manifest_cases(case_map: dict[str, dict[str, object]]) -> list[dict[str, object]]:
+    names = [name for name in ordered_case_names() if name in case_map]
+    extras = [name for name in case_map.keys() if name not in names]
+    names.extend(sorted(extras))
+    return [case_map[name] for name in names]
+
+
+def write_case_status_file(case_data: dict[str, object]) -> None:
+    STATUS_DIR.mkdir(parents=True, exist_ok=True)
+    status_path = STATUS_DIR / f"{case_data['name']}.json"
+    status_path.write_text(json.dumps(case_data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def update_manifest_case(case_name: str, **updates: object) -> dict[str, object]:
+    with manifest_lock():
+        case_map = load_manifest_cases()
+        current = manifest_stub_for_case(case_name)
+        current.update(case_map.get(case_name, {}))
+        current.update(updates)
+        current["updated_at"] = now_iso()
+        if current.get("status") == "running" and not current.get("started_at"):
+            current["started_at"] = current["updated_at"]
+        if current.get("status") in {"completed", "failed", "skipped"}:
+            current["finished_at"] = current["updated_at"]
+        case_map[case_name] = current
+        write_manifest(ordered_manifest_cases(case_map))
+    write_case_status_file(current)
+    return current
+
+
+def ensure_manifest_cases(case_names: list[str]) -> None:
+    with manifest_lock():
+        case_map = load_manifest_cases()
+        changed = False
+        for case_name in case_names:
+            if case_name not in case_map:
+                case_map[case_name] = manifest_stub_for_case(case_name)
+                changed = True
+        if changed:
+            write_manifest(ordered_manifest_cases(case_map))
+    for case_name in case_names:
+        case_data = load_manifest_cases().get(case_name)
+        if case_data:
+            write_case_status_file(case_data)
+
+
+def format_case_prefix(worker_label: str, case_name: str, case_index: int, case_total: int, stage: str) -> str:
+    return f"[{worker_label}][case {case_index}/{case_total}][{case_name}][{stage}]"
+
+
+def print_case_progress(worker_label: str, case_name: str, case_index: int, case_total: int, stage: str, message: str) -> None:
+    print(f"{format_case_prefix(worker_label, case_name, case_index, case_total, stage)} {message}")
+
+
+def manifest_progress_snapshot(case_names: list[str]) -> str:
+    case_map = load_manifest_cases()
+    counts = {"pending": 0, "running": 0, "completed": 0, "failed": 0, "skipped": 0}
+    running_items: list[str] = []
+    for case_name in case_names:
+        case_data = case_map.get(case_name, manifest_stub_for_case(case_name))
+        status = str(case_data.get("status") or "pending")
+        counts[status] = counts.get(status, 0) + 1
+        if status == "running":
+            worker = str(case_data.get("worker") or "-")
+            stage = str(case_data.get("stage") or "-")
+            running_items.append(f"{worker}:{case_name}:{stage}")
+    summary = (
+        f"[progress] total={len(case_names)} completed={counts.get('completed', 0)} "
+        f"running={counts.get('running', 0)} pending={counts.get('pending', 0)} "
+        f"failed={counts.get('failed', 0)} skipped={counts.get('skipped', 0)}"
+    )
+    if running_items:
+        summary += " | active=" + ", ".join(running_items)
+    return summary
+
+
 def filter_pending_case_names(case_names: list[str]) -> list[str]:
     pending: list[str] = []
     for name in case_names:
         manifest_case = manifest_entry_for_case(name)
         if manifest_case and report_exists(manifest_case):
             print(f"[skip] completed case detected: {name}")
+            update_manifest_case(name, status="completed", stage="done", note="existing outputs detected")
             continue
         pending.append(name)
     return pending
@@ -561,47 +720,139 @@ def build_common_env() -> dict[str, str]:
     return common_env
 
 
-def run_current_case(case: dict[str, object], common_env: dict[str, str], manifest: list[dict[str, object]]) -> None:
+def run_current_case(
+    case: dict[str, object],
+    common_env: dict[str, str],
+    manifest: list[dict[str, object]],
+    *,
+    worker_label: str,
+    case_index: int,
+    case_total: int,
+) -> None:
+    case_name = str(case["name"])
     output_suffix = case_output_suffix(str(case["name"]))
     case_env = {
         **common_env,
         "OUTPUT_SUFFIX": output_suffix,
         **dict(case.get("env", {})),
     }
-    print(f"\n=== CASE {case['name']} (current) ===")
+    prediction_path = BASE_DIR / "outputs" / "predictions_v30" / f"auto_predictions_v30{output_suffix}.json"
+    report_path = BASE_DIR / "outputs" / "predictions_v30" / f"evaluation_report_v30{output_suffix}.json"
+    print(f"\n=== CASE {case_name} (current) ===")
     print(case.get("description", ""))
-    run_cmd(BASE_DIR / "experiments" / "_inference_auto.py", case_env)
-    run_cmd(BASE_DIR / "experiments" / "_evaluate.py", case_env)
+    update_manifest_case(
+        case_name,
+        status="running",
+        stage="inference",
+        worker=worker_label,
+        note="current pipeline started",
+        case_index=case_index,
+        case_total=case_total,
+        prediction_path=str(prediction_path),
+        report_path=str(report_path),
+    )
+    print_case_progress(worker_label, case_name, case_index, case_total, "inference", "start; child script should show image progress such as 1/30")
+    run_cmd(
+        BASE_DIR / "experiments" / "_inference_auto.py",
+        case_env,
+        status_label=f"{case_name} inference",
+    )
+    update_manifest_case(case_name, status="running", stage="evaluate", worker=worker_label, note="inference done")
+    print_case_progress(worker_label, case_name, case_index, case_total, "evaluate", "start")
+    run_cmd(
+        BASE_DIR / "experiments" / "_evaluate.py",
+        case_env,
+        status_label=f"{case_name} evaluate",
+    )
+    update_manifest_case(
+        case_name,
+        status="completed",
+        stage="done",
+        worker=worker_label,
+        note="current pipeline completed",
+        prediction_path=str(prediction_path),
+        report_path=str(report_path),
+    )
+    print_case_progress(worker_label, case_name, case_index, case_total, "done", f"prediction={prediction_path.name} report={report_path.name}")
     manifest.append(
         {
             "name": case["name"],
             "family": "current",
             "description": case.get("description", ""),
-            "prediction_path": str(BASE_DIR / "outputs" / "predictions_v30" / f"auto_predictions_v30{output_suffix}.json"),
-            "report_path": str(BASE_DIR / "outputs" / "predictions_v30" / f"evaluation_report_v30{output_suffix}.json"),
+            "prediction_path": str(prediction_path),
+            "report_path": str(report_path),
         }
     )
 
 
-def run_legacy_case(case: dict[str, object], common_env: dict[str, str], manifest: list[dict[str, object]]) -> None:
+def run_legacy_case(
+    case: dict[str, object],
+    common_env: dict[str, str],
+    manifest: list[dict[str, object]],
+    *,
+    worker_label: str,
+    case_index: int,
+    case_total: int,
+) -> None:
+    case_name = str(case["name"])
     version = str(case["family"])
     scripts = materialize_legacy_version(version)
     ensure_legacy_bank(version, scripts, common_env)
-    print(f"\n=== CASE {case['name']} ({version}) ===")
+    print(f"\n=== CASE {case_name} ({version}) ===")
     print(case.get("description", ""))
-    run_cmd(scripts["infer"], common_env)
+    update_manifest_case(
+        case_name,
+        status="running",
+        stage="inference",
+        worker=worker_label,
+        note=f"{version} pipeline started",
+        case_index=case_index,
+        case_total=case_total,
+    )
+    print_case_progress(worker_label, case_name, case_index, case_total, "inference", "start; child script should show image progress such as 1/30")
+    run_cmd(scripts["infer"], common_env, status_label=f"{case_name} inference")
 
     if version == "v7":
-        run_cmd(scripts["eval"], common_env)
         prediction_path = BASE_DIR / "outputs" / "predictions_v7" / "auto_predictions_v7.json"
         report_path = BASE_DIR / "outputs" / "visualizations_v7" / "03_evaluate_and_visualize_v7_report.md"
+        update_manifest_case(
+            case_name,
+            status="running",
+            stage="evaluate",
+            worker=worker_label,
+            note="legacy v7 inference done",
+            prediction_path=str(prediction_path),
+            report_path=str(report_path),
+        )
+        print_case_progress(worker_label, case_name, case_index, case_total, "evaluate", "start")
+        run_cmd(scripts["eval"], common_env, status_label=f"{case_name} evaluate")
     elif version == "v18":
         prediction_path = BASE_DIR / "outputs" / "predictions_v18" / "auto_predictions_v18.json"
         report_path = BASE_DIR / "outputs" / "predictions_v18" / "evaluation_report_v18.json"
+        update_manifest_case(
+            case_name,
+            status="running",
+            stage="evaluate",
+            worker=worker_label,
+            note="legacy v18 inference done",
+            prediction_path=str(prediction_path),
+            report_path=str(report_path),
+        )
+        print_case_progress(worker_label, case_name, case_index, case_total, "evaluate", "start")
         write_legacy_v18_report(prediction_path, report_path)
     else:
         raise ValueError(version)
 
+    update_manifest_case(
+        case_name,
+        status="completed",
+        stage="done",
+        worker=worker_label,
+        note=f"{version} pipeline completed",
+        prediction_path=str(prediction_path),
+        report_path=str(report_path),
+    )
+    print_case_progress(worker_label, case_name, case_index, case_total, "done", f"prediction={prediction_path.name} report={report_path.name}")
     manifest.append(
         {
             "name": case["name"],
@@ -615,20 +866,54 @@ def run_legacy_case(case: dict[str, object], common_env: dict[str, str], manifes
 
 def run_selected_cases(common_env: dict[str, str]) -> list[dict[str, object]]:
     cases = selected_cases()
+    worker_label = env_str("WORKER_LABEL", "main")
     print(f"BASE_DIR={BASE_DIR}")
     print(f"TOTAL_CASES={len(cases)}")
+    print(f"WORKER={worker_label}")
     print("CASES=", ", ".join(str(case["name"]) for case in cases))
+    ensure_manifest_cases([str(case["name"]) for case in cases])
 
     if any(str(case["family"]) == "current" for case in cases):
         ensure_current_bank(common_env)
 
     manifest: list[dict[str, object]] = []
-    for case in cases:
+    total_cases = len(cases)
+    for idx, case in enumerate(cases, 1):
         family = str(case["family"])
-        if family == "current":
-            run_current_case(case, common_env, manifest)
-        else:
-            run_legacy_case(case, common_env, manifest)
+        case_name = str(case["name"])
+        print_case_progress(worker_label, case_name, idx, total_cases, "prepare", str(case.get("description", "")))
+        try:
+            if family == "current":
+                run_current_case(
+                    case,
+                    common_env,
+                    manifest,
+                    worker_label=worker_label,
+                    case_index=idx,
+                    case_total=total_cases,
+                )
+            else:
+                run_legacy_case(
+                    case,
+                    common_env,
+                    manifest,
+                    worker_label=worker_label,
+                    case_index=idx,
+                    case_total=total_cases,
+                )
+        except Exception as exc:
+            update_manifest_case(
+                case_name,
+                status="failed",
+                stage="failed",
+                worker=worker_label,
+                note=f"{family} pipeline failed",
+                last_error=str(exc),
+                case_index=idx,
+                case_total=total_cases,
+            )
+            print_case_progress(worker_label, case_name, idx, total_cases, "failed", str(exc))
+            raise
     return manifest
 
 
@@ -668,6 +953,7 @@ def run_parallel_supervisor() -> int:
     if not selected_names:
         print("No cases selected.")
         return 0
+    ensure_manifest_cases(selected_names)
 
     skip_completed = env_flag("SKIP_COMPLETED_CASES", "1")
     if skip_completed:
@@ -721,8 +1007,17 @@ def run_parallel_supervisor() -> int:
         }
         procs.append(run_python_module(script_path, worker_env))
 
+    last_progress_log = 0.0
+    last_progress_snapshot = ""
     while not all(completed):
         time.sleep(5)
+        now = time.time()
+        if now - last_progress_log >= 15:
+            snapshot = manifest_progress_snapshot(selected_names)
+            if snapshot != last_progress_snapshot or now - last_progress_log >= 30:
+                print(snapshot)
+                last_progress_snapshot = snapshot
+            last_progress_log = now
         for idx, proc in enumerate(procs):
             if completed[idx] or proc is None:
                 continue
@@ -753,24 +1048,29 @@ def run_parallel_supervisor() -> int:
             }
             procs[idx] = run_python_module(script_path, worker_env)
 
-    merged_cases = manifest_entries_for_case_names(selected_case_names())
+    merged_case_map = load_manifest_cases()
+    merged_cases = [merged_case_map.get(name, manifest_stub_for_case(name)) for name in selected_case_names()]
     write_manifest(merged_cases)
     if merged_cases:
-        collect_ablation_results(merged_cases)
+        collect_ablation_results([case for case in merged_cases if report_exists(case)])
     return 0
 
 
 def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    STATUS_DIR.mkdir(parents=True, exist_ok=True)
     if env_flag("WORKER_MODE", "0"):
         return run_worker_entry()
     if not env_flag("FORCE_SEQUENTIAL", "0") and env_flag("RUN_PARALLEL", "1"):
         return run_parallel_supervisor()
 
+    ensure_manifest_cases(selected_case_names())
     manifest = run_selected_cases(build_common_env())
-    write_manifest(manifest)
+    merged_case_map = load_manifest_cases()
+    merged_manifest = [merged_case_map.get(name, manifest_stub_for_case(name)) for name in selected_case_names()]
+    write_manifest(merged_manifest)
     print(f"\nmanifest saved: {MANIFEST_PATH}")
-    collect_ablation_results(manifest)
+    collect_ablation_results([case for case in merged_manifest if report_exists(case)])
     return 0
 
 
