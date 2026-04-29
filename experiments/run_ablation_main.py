@@ -28,6 +28,7 @@ OUTPUT_DIR = BASE_DIR / "outputs" / "ablation_suite"
 MANIFEST_PATH = OUTPUT_DIR / "case_manifest.json"
 MANIFEST_LOCK_PATH = OUTPUT_DIR / "case_manifest.lock"
 STATUS_DIR = OUTPUT_DIR / "status"
+LOG_DIR = OUTPUT_DIR / "logs"
 CSV_PATH = OUTPUT_DIR / "ablation_summary.csv"
 MD_PATH = OUTPUT_DIR / "ablation_summary.md"
 
@@ -52,6 +53,27 @@ def format_elapsed(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def sanitize_label(label: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in label)
+    while "__" in safe:
+        safe = safe.replace("__", "_")
+    return safe.strip("_") or "task"
+
+
+def read_last_log_line(log_path: Path) -> str:
+    if not log_path.exists():
+        return ""
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return ""
+    for line in reversed(lines):
+        text = line.strip()
+        if text:
+            return text
+    return ""
+
+
 def run_cmd(
     script_path: Path,
     extra_env: dict[str, str] | None = None,
@@ -65,24 +87,45 @@ def run_cmd(
     env.setdefault("PYTHONUNBUFFERED", "1")
     cmd = [PYTHON, str(script_path)]
     print(">>>", " ".join(cmd))
-    proc = subprocess.Popen(cmd, cwd=str(BASE_DIR), env=env)
-    started_at = time.time()
-    last_feedback = started_at
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
     label = status_label or script_path.name
-    while True:
-        return_code = proc.poll()
-        if return_code is not None:
-            if return_code != 0:
-                raise subprocess.CalledProcessError(return_code, cmd)
-            elapsed = format_elapsed(time.time() - started_at)
-            print(f"[supervisor] {label} finished in {elapsed}")
-            return
-        now = time.time()
-        if now - last_feedback >= heartbeat_sec:
-            elapsed = format_elapsed(now - started_at)
-            print(f"[supervisor] {label} still running | elapsed={elapsed}")
-            last_feedback = now
-        time.sleep(5)
+    log_path = LOG_DIR / f"{sanitize_label(label)}.log"
+    with log_path.open("a", encoding="utf-8") as log_file:
+        log_file.write(f"\n\n===== {now_iso()} | START {label} =====\n")
+        log_file.flush()
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(BASE_DIR),
+            env=env,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        started_at = time.time()
+        last_feedback = started_at
+        last_log_hint = ""
+        print(f"[supervisor] {label} log={log_path}")
+        while True:
+            return_code = proc.poll()
+            if return_code is not None:
+                elapsed = format_elapsed(time.time() - started_at)
+                if return_code != 0:
+                    last_line = read_last_log_line(log_path)
+                    hint = f" | last={last_line}" if last_line else ""
+                    raise subprocess.CalledProcessError(return_code, cmd, output=f"log={log_path}{hint}")
+                print(f"[supervisor] {label} finished in {elapsed}")
+                return
+            now = time.time()
+            if now - last_feedback >= heartbeat_sec:
+                elapsed = format_elapsed(now - started_at)
+                last_line = read_last_log_line(log_path)
+                hint = ""
+                if last_line and last_line != last_log_hint:
+                    hint = f" | last={last_line}"
+                    last_log_hint = last_line
+                print(f"[supervisor] {label} still running | elapsed={elapsed}{hint}")
+                last_feedback = now
+            time.sleep(5)
 
 
 def run_python_module(script_path: Path, extra_env: dict[str, str] | None = None) -> subprocess.Popen[str]:
