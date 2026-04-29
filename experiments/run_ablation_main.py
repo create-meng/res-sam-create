@@ -589,6 +589,7 @@ def write_csv(rows: list[dict[str, object]]) -> None:
         "precision",
         "recall",
         "f1_iou_05",
+        "total_pred",
         "image_auc_strategy",
         "image_auc",
         "patch_mean_normal",
