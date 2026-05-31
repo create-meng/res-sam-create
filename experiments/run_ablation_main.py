@@ -12,7 +12,6 @@ from __future__ import annotations
 import csv
 import json
 import os
-import queue
 import subprocess
 import sys
 import threading
@@ -324,10 +323,59 @@ def merge_log_progress_into_totals(
     return merged
 
 
+def live_progress_path(case_name: str) -> Path:
+    return STATUS_DIR / f"{sanitize_label(case_name)}.live_progress.json"
+
+
+def write_live_progress(case_name: str, family: str, payload: dict[str, object]) -> None:
+    detail = payload_to_progress_detail(payload)
+    if not detail:
+        return
+    totals = merge_log_progress_into_totals(read_inference_case_totals(case_name, family), detail)
+    if not totals or not totals.get("active_category"):
+        return
+    state = {
+        "case_name": case_name,
+        "category": totals.get("active_category"),
+        "category_label": totals.get("active_category_label"),
+        "current": int(totals["active_current"]),
+        "total": int(totals["active_total"]),
+        "done": int(totals["done"]),
+        "total_all": int(totals["total"]),
+        "updated_at": now_iso(),
+        "image": detail.get("image", ""),
+    }
+    STATUS_DIR.mkdir(parents=True, exist_ok=True)
+    path = live_progress_path(case_name)
+    tmp_path = path.with_suffix(".tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(state, ensure_ascii=False))
+        handle.flush()
+        os.fsync(handle.fileno())
+    tmp_path.replace(path)
+
+
+def read_live_progress(case_name: str) -> dict[str, object] | None:
+    path = live_progress_path(case_name)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 def format_running_case_progress(case_name: str, family: str, stage: str) -> str:
-    """单行进度：checkpoint 与 inference log 取较大值，供总进度快照复用。"""
+    """单行进度：优先读 worker 写入的 live_progress，再回退 log/checkpoint。"""
     if stage == "evaluate":
         return "评估中"
+
+    live = read_live_progress(case_name)
+    if live and live.get("category_label") is not None:
+        return (
+            f"{live['category_label']} {live['current']}/{live['total']} | "
+            f"case {live['done']}/{live['total_all']}"
+        )
 
     log_path = case_stage_log_path(case_name, stage)
     detail = read_latest_progress_detail(log_path)
@@ -376,59 +424,32 @@ def sync_running_case_note(case_name: str, stage: str, note: str) -> None:
         pass
 
 
-def publish_progress_update(
-    payload: dict[str, object],
-    latest_state: dict[str, str],
-    progress_queue: queue.Queue[str],
-) -> None:
-    formatted = format_progress_payload(payload)
-    if formatted == latest_state.get("latest_progress"):
-        return
-    latest_state["latest_progress"] = formatted
-    latest_state["latest"] = formatted
-    progress_queue.put(formatted)
-
-
-def pump_child_output(
-    proc: subprocess.Popen[str],
+def tail_log_progress_loop(
     log_path: Path,
-    latest_state: dict[str, str],
-    progress_queue: queue.Queue[str],
+    stop_event: threading.Event,
+    case_name: str,
+    family: str,
+    poll_sec: float = 0.5,
 ) -> None:
-    assert proc.stdout is not None
-    latest_state.setdefault("line_buffer", "")
-    latest_state.setdefault("latest_progress", "")
-    latest_state.setdefault("buffer", "")
-    read_size = max(256, env_int("SUPERVISOR_READ_CHUNK", 4096))
-    with log_path.open("a", encoding="utf-8") as log_file:
-        while True:
-            chunk = proc.stdout.read(read_size)
-            if chunk == "":
-                break
-            log_file.write(chunk)
-            log_file.flush()
-            latest_state["buffer"] = (latest_state.get("buffer", "") + chunk)[-8000:]
-            payload = scan_text_for_latest_progress_payload(latest_state["buffer"])
-            if payload:
-                publish_progress_update(payload, latest_state, progress_queue)
-                log_file.flush()
-            for char in chunk:
-                if char in {"\r", "\n"}:
-                    line = latest_state.get("line_buffer", "").strip()
-                    latest_state["line_buffer"] = ""
-                    if line.startswith(PROGRESS_PREFIX):
-                        line_payload = parse_progress_payload_line(line)
-                        if line_payload:
-                            publish_progress_update(line_payload, latest_state, progress_queue)
-                            log_file.flush()
-                    elif line:
-                        latest_state["latest_raw"] = line
-                else:
-                    latest_state["line_buffer"] = (latest_state.get("line_buffer", "") + char)[-2000:]
-            candidate = normalize_progress_text(latest_state["buffer"])
-            if candidate and not candidate.startswith(PROGRESS_PREFIX):
-                latest_state["latest_raw"] = candidate
-        log_file.flush()
+    offset = 0
+    carry = ""
+    if log_path.exists():
+        offset = log_path.stat().st_size
+    while not stop_event.is_set():
+        if log_path.exists():
+            try:
+                with log_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                    handle.seek(offset)
+                    chunk = handle.read()
+                    offset = handle.tell()
+            except Exception:
+                chunk = ""
+            if chunk:
+                carry = (carry + chunk)[-16000:]
+                payload = scan_text_for_latest_progress_payload(carry)
+                if payload:
+                    write_live_progress(case_name, family, payload)
+        stop_event.wait(poll_sec)
 
 
 def run_cmd(
@@ -451,70 +472,57 @@ def run_cmd(
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     label = status_label or script_path.name
     log_path = LOG_DIR / f"{sanitize_label(label)}.log"
-    with log_path.open("a", encoding="utf-8") as log_file:
+    case_context = extract_case_context(label)
+    log_file = log_path.open("a", encoding="utf-8", buffering=1)
+    try:
         log_file.write(f"\n\n===== {now_iso()} | START {label} =====\n")
         log_file.flush()
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(BASE_DIR),
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    latest_state = {"buffer": "", "latest": "", "latest_raw": "", "latest_progress": ""}
-    progress_queue: queue.Queue[str] = queue.Queue()
-    reader = threading.Thread(target=pump_child_output, args=(proc, log_path, latest_state, progress_queue), daemon=True)
-    reader.start()
-    started_at = time.time()
-    last_feedback = started_at
-    last_manifest_sync = 0.0
-    last_progress_line = ""
-    case_context = extract_case_context(label)
-    while True:
-        try:
-            while True:
-                progress_line = progress_queue.get_nowait()
-                if progress_line and progress_line != last_progress_line:
-                    last_progress_line = progress_line
-                    last_feedback = time.time()
-                    if case_context:
-                        case_name, stage = case_context
-                        family = str(build_case_lookup().get(case_name, {}).get("family", "current"))
-                        sync_running_case_note(
-                            case_name,
-                            stage,
-                            format_running_case_progress(case_name, family, stage),
-                        )
-                        last_manifest_sync = last_feedback
-        except queue.Empty:
-            pass
-        return_code = proc.poll()
-        if return_code is not None:
-            reader.join(timeout=2)
-            elapsed = format_elapsed(time.time() - started_at)
-            if return_code != 0:
-                last_line = latest_state.get("latest_progress") or latest_state.get("latest_raw") or read_last_log_line(log_path)
-                hint = f" | 当前={last_line}" if last_line else ""
-                raise subprocess.CalledProcessError(return_code, cmd, output=f"log={log_path}{hint}")
-            final_line = latest_state.get("latest_progress") or latest_state.get("latest_raw")
-            hint = f" | {final_line}" if final_line else ""
-            print(f"[完成] {label} | 用时={elapsed}{hint}")
-            return
-        now = time.time()
-        if now - last_feedback >= heartbeat_sec:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(BASE_DIR),
+            env=env,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        stop_tail = threading.Event()
+        tailer: threading.Thread | None = None
+        if case_context:
+            case_name, _stage = case_context
+            family = str(build_case_lookup().get(case_name, {}).get("family", "current"))
+            tailer = threading.Thread(
+                target=tail_log_progress_loop,
+                args=(log_path, stop_tail, case_name, family),
+                daemon=True,
+            )
+            tailer.start()
+        started_at = time.time()
+        last_manifest_sync = 0.0
+        while True:
+            return_code = proc.poll()
+            if return_code is not None:
+                stop_tail.set()
+                if tailer is not None:
+                    tailer.join(timeout=2)
+                elapsed = format_elapsed(time.time() - started_at)
+                if return_code != 0:
+                    last_line = read_last_log_line(log_path)
+                    hint = f" | 当前={last_line}" if last_line else ""
+                    raise subprocess.CalledProcessError(return_code, cmd, output=f"log={log_path}{hint}")
+                final_line = read_latest_progress_from_log(log_path) or read_last_log_line(log_path)
+                hint = f" | {final_line}" if final_line else ""
+                print(f"[完成] {label} | 用时={elapsed}{hint}")
+                return
+            now = time.time()
             if case_context and now - last_manifest_sync >= heartbeat_sec:
                 case_name, stage = case_context
                 family = str(build_case_lookup().get(case_name, {}).get("family", "current"))
-                sync_running_case_note(
-                    case_name,
-                    stage,
-                    format_running_case_progress(case_name, family, stage),
-                )
+                sync_running_case_note(case_name, stage, format_running_case_progress(case_name, family, stage))
                 last_manifest_sync = now
-            last_feedback = now
-        time.sleep(poll_sec)
+            time.sleep(poll_sec)
+    finally:
+        log_file.close()
 
 
 def run_python_module(script_path: Path, extra_env: dict[str, str] | None = None) -> subprocess.Popen[str]:
