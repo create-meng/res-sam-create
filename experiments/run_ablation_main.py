@@ -34,6 +34,24 @@ LOG_DIR = OUTPUT_DIR / "logs"
 CSV_PATH = OUTPUT_DIR / "ablation_summary.csv"
 MD_PATH = OUTPUT_DIR / "ablation_summary.md"
 PROGRESS_PREFIX = "__AB_PROGRESS__"
+CATEGORY_LABELS = {
+    "cavities": "空洞检测",
+    "utilities": "管线检测",
+    "normal_auc": "正常样本AUC",
+}
+STAGE_LABELS = {
+    "pending": "等待",
+    "inference": "推理",
+    "evaluate": "评估",
+    "done": "完成",
+    "failed": "失败",
+}
+INFERENCE_CATEGORY_ORDER = ("cavities", "utilities", "normal_auc")
+INFERENCE_CATEGORY_TOTALS = {
+    "cavities": 553,
+    "utilities": 786,
+    "normal_auc": 900,
+}
 
 
 def env_str(name: str, default: str = "") -> str:
@@ -86,22 +104,272 @@ def normalize_progress_text(text: str) -> str:
     return ""
 
 
+def category_label(category: str) -> str:
+    return CATEGORY_LABELS.get(category, category)
+
+
+def stage_label(stage: str) -> str:
+    return STAGE_LABELS.get(stage, stage)
+
+
+def format_fraction(current: object, total: object) -> str:
+    try:
+        cur = int(current)
+        tot = int(total)
+    except (TypeError, ValueError):
+        return f"{current}/{total}"
+    if tot <= 0:
+        return f"{cur}/{tot}"
+    pct = 100.0 * cur / tot
+    return f"第{cur}/{tot}张 ({pct:.1f}%)"
+
+
+def parse_progress_payload_line(line: str) -> dict[str, object] | None:
+    text = line.strip()
+    if not text.startswith(PROGRESS_PREFIX):
+        return None
+    try:
+        payload = json.loads(text[len(PROGRESS_PREFIX):])
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def scan_text_for_latest_progress_payload(text: str) -> dict[str, object] | None:
+    if PROGRESS_PREFIX not in text:
+        return None
+    idx = text.rfind(PROGRESS_PREFIX)
+    rest = text[idx + len(PROGRESS_PREFIX):]
+    decoder = json.JSONDecoder()
+    pos = 0
+    while pos < len(rest):
+        while pos < len(rest) and rest[pos].isspace():
+            pos += 1
+        if pos >= len(rest):
+            return None
+        try:
+            payload, end = decoder.raw_decode(rest, pos)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(payload, dict):
+            return payload
+        pos = end
+    return None
+
+
 def format_progress_payload(payload: dict[str, object]) -> str:
     kind = str(payload.get("kind") or "")
-    category = str(payload.get("category") or "")
+    category = category_label(str(payload.get("category") or ""))
     current = payload.get("current")
     total = payload.get("total")
     image = str(payload.get("image") or "")
+    fraction = format_fraction(current, total)
     if kind == "category_start":
-        return f"{category} start {current}/{total}"
+        return f"{category} 开始 {fraction}"
     if kind == "resume":
-        return f"{category} resume at {current}/{total}"
+        return f"{category} 断点续跑 {fraction}"
     if kind == "image_progress":
         suffix = f" | {image}" if image else ""
-        return f"{category} {current}/{total}{suffix}"
+        return f"{category} {fraction}{suffix}"
     if kind == "category_done":
-        return f"{category} done {current}/{total}"
+        return f"{category} 已完成 {fraction}"
     return json.dumps(payload, ensure_ascii=False)
+
+
+def read_log_tail_text(log_path: Path, chunk_size: int = 131072) -> str:
+    if not log_path.exists():
+        return ""
+    try:
+        with log_path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            chunk = min(size, chunk_size)
+            handle.seek(max(0, size - chunk))
+            return handle.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def read_latest_progress_from_log(log_path: Path) -> str:
+    for line in reversed(read_log_tail_text(log_path).splitlines()):
+        payload = parse_progress_payload_line(line)
+        if payload:
+            return format_progress_payload(payload)
+    return ""
+
+
+def payload_to_progress_detail(payload: dict[str, object]) -> dict[str, object]:
+    category = str(payload.get("category") or "")
+    current = payload.get("current")
+    total = payload.get("total")
+    try:
+        cur_i = int(current)
+        tot_i = int(total)
+        remaining = max(0, tot_i - cur_i)
+    except (TypeError, ValueError):
+        cur_i = None
+        tot_i = None
+        remaining = None
+    return {
+        "kind": str(payload.get("kind") or ""),
+        "category": category,
+        "category_label": category_label(category),
+        "current": cur_i,
+        "total": tot_i,
+        "remaining_in_category": remaining,
+        "image": str(payload.get("image") or ""),
+        "summary": format_progress_payload(payload),
+    }
+
+
+def read_latest_progress_detail(log_path: Path) -> dict[str, object] | None:
+    tail = read_log_tail_text(log_path)
+    payload = scan_text_for_latest_progress_payload(tail)
+    if payload:
+        return payload_to_progress_detail(payload)
+    for line in reversed(tail.splitlines()):
+        parsed = parse_progress_payload_line(line)
+        if parsed:
+            return payload_to_progress_detail(parsed)
+    return None
+
+
+def checkpoint_dir_for_family(family: str) -> Path:
+    if family == "v7":
+        return BASE_DIR / "outputs" / "checkpoints_v7"
+    if family == "v18":
+        return BASE_DIR / "outputs" / "checkpoints_v18"
+    return BASE_DIR / "outputs" / "checkpoints_v30"
+
+
+def output_suffix_for_case(case_name: str, family: str) -> str:
+    if family == "current":
+        return f"_{case_name}"
+    return ""
+
+
+def read_inference_case_totals(case_name: str, family: str) -> dict[str, object] | None:
+    checkpoint_dir = checkpoint_dir_for_family(family)
+    suffix = output_suffix_for_case(case_name, family)
+    if not checkpoint_dir.exists():
+        return None
+
+    total_all = sum(INFERENCE_CATEGORY_TOTALS.values())
+    done = 0
+    active_category: str | None = None
+    active_current = 0
+    active_total = 0
+    active_checkpoint_mtime = ""
+
+    for cat in INFERENCE_CATEGORY_ORDER:
+        cat_total = INFERENCE_CATEGORY_TOTALS.get(cat, 0)
+        cp_path = checkpoint_dir / f"checkpoint_auto_{cat}{suffix}.json"
+        if not cp_path.exists():
+            active_category = cat
+            active_total = cat_total
+            break
+        try:
+            cp = json.loads(cp_path.read_text(encoding="utf-8"))
+        except Exception:
+            break
+        processed = int(cp.get("processed_count", 0) or 0)
+        if cp.get("completed"):
+            done += processed if processed > 0 else cat_total
+            continue
+        active_category = cat
+        active_current = processed
+        active_total = cat_total
+        done += processed
+        try:
+            active_checkpoint_mtime = datetime.fromtimestamp(cp_path.stat().st_mtime).strftime("%H:%M:%S")
+        except OSError:
+            active_checkpoint_mtime = ""
+        break
+
+    return {
+        "done": done,
+        "total": total_all,
+        "remaining": max(0, total_all - done),
+        "active_category": active_category,
+        "active_category_label": category_label(active_category) if active_category else "",
+        "active_current": active_current,
+        "active_total": active_total,
+        "active_remaining": max(0, active_total - active_current) if active_category else 0,
+        "active_checkpoint_mtime": active_checkpoint_mtime,
+    }
+
+
+def resolve_case_progress(case_name: str, family: str, stage: str) -> str:
+    if stage == "evaluate":
+        log_path = case_stage_log_path(case_name, stage)
+        last = read_last_log_line(log_path)
+        if last and not last.startswith("====="):
+            return f"评估中 | 最近日志: {last[:120]}"
+        return "评估中（该阶段无逐张进度）"
+
+    log_path = case_stage_log_path(case_name, stage)
+    detail = read_latest_progress_detail(log_path)
+    totals = read_inference_case_totals(case_name, family)
+    parts: list[str] = []
+
+    if detail and detail.get("category_label"):
+        parts.append(f"类别={detail['category_label']}")
+        if detail.get("current") is not None and detail.get("total") is not None:
+            parts.append(f"本类已跑{detail['current']}/{detail['total']}张")
+            if detail.get("remaining_in_category") is not None:
+                parts.append(f"本类剩余{detail['remaining_in_category']}张")
+    elif totals and totals.get("active_category"):
+        parts.append(f"类别={totals['active_category_label']}")
+        parts.append(f"本类已跑{totals['active_current']}/{totals['active_total']}张")
+        parts.append(f"本类剩余{totals['active_remaining']}张")
+
+    if totals:
+        parts.append(f"case总进度 {totals['done']}/{totals['total']}张")
+        parts.append(f"case剩余约{totals['remaining']}张")
+        if totals.get("active_checkpoint_mtime"):
+            parts.append(f"checkpoint更新于 {totals['active_checkpoint_mtime']}")
+
+    if not parts:
+        last_raw = read_last_log_line(log_path)
+        if last_raw and not last_raw.startswith("====="):
+            return f"日志最近输出: {last_raw[:160]}"
+        return "等待子进程输出（可查看 logs 下对应 inference.log）"
+
+    return " | ".join(parts)
+
+
+def case_stage_log_path(case_name: str, stage: str) -> Path:
+    stage_key = stage if stage in {"inference", "evaluate"} else "inference"
+    return LOG_DIR / f"{sanitize_label(f'{case_name} {stage_key}')}.log"
+
+
+def extract_case_context(status_label: str) -> tuple[str, str] | None:
+    for suffix, stage in ((" inference", "inference"), (" evaluate", "evaluate")):
+        if status_label.endswith(suffix):
+            return status_label[: -len(suffix)], stage
+    return None
+
+
+def sync_running_case_note(case_name: str, stage: str, note: str) -> None:
+    if not note:
+        return
+    try:
+        update_manifest_case(case_name, note=note, stage=stage)
+    except Exception:
+        pass
+
+
+def publish_progress_update(
+    payload: dict[str, object],
+    latest_state: dict[str, str],
+    progress_queue: queue.Queue[str],
+) -> None:
+    formatted = format_progress_payload(payload)
+    if formatted == latest_state.get("latest_progress"):
+        return
+    latest_state["latest_progress"] = formatted
+    latest_state["latest"] = formatted
+    progress_queue.put(formatted)
 
 
 def pump_child_output(
@@ -113,29 +381,31 @@ def pump_child_output(
     assert proc.stdout is not None
     latest_state.setdefault("line_buffer", "")
     latest_state.setdefault("latest_progress", "")
+    latest_state.setdefault("buffer", "")
+    read_size = max(256, env_int("SUPERVISOR_READ_CHUNK", 4096))
     with log_path.open("a", encoding="utf-8") as log_file:
         while True:
-            chunk = proc.stdout.read(1)
+            chunk = proc.stdout.read(read_size)
             if chunk == "":
                 break
             log_file.write(chunk)
-            if chunk in {"\r", "\n"}:
-                log_file.flush()
-                line = latest_state.get("line_buffer", "").strip()
-                latest_state["line_buffer"] = ""
-                if line.startswith(PROGRESS_PREFIX):
-                    try:
-                        payload = json.loads(line[len(PROGRESS_PREFIX):])
-                        latest_state["latest_progress"] = format_progress_payload(payload)
-                        latest_state["latest"] = latest_state["latest_progress"]
-                        progress_queue.put(latest_state["latest_progress"])
-                    except Exception:
-                        latest_state["latest"] = line
-                elif line:
-                    latest_state["latest_raw"] = line
-            else:
-                latest_state["line_buffer"] = (latest_state.get("line_buffer", "") + chunk)[-2000:]
-            latest_state["buffer"] = (latest_state.get("buffer", "") + chunk)[-4000:]
+            log_file.flush()
+            latest_state["buffer"] = (latest_state.get("buffer", "") + chunk)[-8000:]
+            payload = scan_text_for_latest_progress_payload(latest_state["buffer"])
+            if payload:
+                publish_progress_update(payload, latest_state, progress_queue)
+            for char in chunk:
+                if char in {"\r", "\n"}:
+                    line = latest_state.get("line_buffer", "").strip()
+                    latest_state["line_buffer"] = ""
+                    if line.startswith(PROGRESS_PREFIX):
+                        line_payload = parse_progress_payload_line(line)
+                        if line_payload:
+                            publish_progress_update(line_payload, latest_state, progress_queue)
+                    elif line:
+                        latest_state["latest_raw"] = line
+                else:
+                    latest_state["line_buffer"] = (latest_state.get("line_buffer", "") + char)[-2000:]
             candidate = normalize_progress_text(latest_state["buffer"])
             if candidate and not candidate.startswith(PROGRESS_PREFIX):
                 latest_state["latest_raw"] = candidate
@@ -147,14 +417,17 @@ def run_cmd(
     extra_env: dict[str, str] | None = None,
     *,
     status_label: str | None = None,
-    heartbeat_sec: int = 30,
+    heartbeat_sec: int | None = None,
 ) -> None:
+    if heartbeat_sec is None:
+        heartbeat_sec = max(5, env_int("SUPERVISOR_HEARTBEAT_SEC", 30))
+    poll_sec = max(1, env_int("SUPERVISOR_POLL_SEC", 2))
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("ABLATION_PROGRESS", "1")
-    cmd = [PYTHON, str(script_path)]
+    cmd = [PYTHON, "-u", str(script_path)]
     print(">>>", " ".join(cmd))
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     label = status_label or script_path.name
@@ -169,7 +442,7 @@ def run_cmd(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=0,
+        bufsize=1,
     )
     latest_state = {"buffer": "", "latest": "", "latest_raw": "", "latest_progress": ""}
     progress_queue: queue.Queue[str] = queue.Queue()
@@ -177,19 +450,24 @@ def run_cmd(
     reader.start()
     started_at = time.time()
     last_feedback = started_at
-    last_log_hint = ""
+    last_manifest_sync = 0.0
     last_progress_line = ""
-    print(f"[supervisor] {label} log={log_path}")
+    last_heartbeat_progress = ""
+    case_context = extract_case_context(label)
+    print(f"[监控] {label} | 日志={log_path}")
     while True:
         try:
             while True:
                 progress_line = progress_queue.get_nowait()
                 if progress_line and progress_line != last_progress_line:
                     elapsed = format_elapsed(time.time() - started_at)
-                    print(f"[supervisor] {label} progress | elapsed={elapsed} | {progress_line}")
+                    print(f"[监控] {label} | 已运行 {elapsed} | {progress_line}")
                     last_progress_line = progress_line
-                    last_log_hint = progress_line
                     last_feedback = time.time()
+                    if case_context:
+                        case_name, stage = case_context
+                        sync_running_case_note(case_name, stage, progress_line)
+                        last_manifest_sync = last_feedback
         except queue.Empty:
             pass
         return_code = proc.poll()
@@ -198,25 +476,38 @@ def run_cmd(
             elapsed = format_elapsed(time.time() - started_at)
             if return_code != 0:
                 last_line = latest_state.get("latest_progress") or latest_state.get("latest_raw") or read_last_log_line(log_path)
-                hint = f" | last={last_line}" if last_line else ""
+                hint = f" | 当前={last_line}" if last_line else ""
                 raise subprocess.CalledProcessError(return_code, cmd, output=f"log={log_path}{hint}")
             final_line = latest_state.get("latest_progress") or latest_state.get("latest_raw")
-            hint = f" | last={final_line}" if final_line else ""
-            print(f"[supervisor] {label} finished in {elapsed}{hint}")
+            hint = f" | 最后={final_line}" if final_line else ""
+            print(f"[监控] {label} | 完成 用时={elapsed}{hint}")
             return
         now = time.time()
         if now - last_feedback >= heartbeat_sec:
             elapsed = format_elapsed(now - started_at)
-            last_line = latest_state.get("latest_progress")
-            if not last_line:
-                last_line = latest_state.get("latest_raw") or read_last_log_line(log_path)
-            hint = ""
-            if last_line and last_line != last_log_hint:
-                hint = f" | last={last_line}"
-                last_log_hint = last_line
-            print(f"[supervisor] {label} still running | elapsed={elapsed}{hint}")
+            if case_context:
+                case_name, stage = case_context
+                family = str(build_case_lookup().get(case_name, {}).get("family", "current"))
+                base_msg = resolve_case_progress(case_name, family, stage)
+                if base_msg == last_heartbeat_progress and stage == "inference" and base_msg != "等待子进程输出（可查看 logs 下对应 inference.log）":
+                    progress_msg = f"{base_msg} | 仍在处理当前张，数字暂不变"
+                else:
+                    progress_msg = base_msg
+                    last_heartbeat_progress = base_msg
+            else:
+                progress_msg = latest_state.get("latest_progress")
+                if not progress_msg:
+                    progress_msg = latest_state.get("latest_raw") or read_last_log_line(log_path)
+                if not progress_msg:
+                    progress_msg = "等待子进程输出..."
+            print(f"[监控] {label} | 仍在运行 已运行={elapsed} | {progress_msg}")
             last_feedback = now
-        time.sleep(5)
+            if case_context:
+                case_name, stage = case_context
+                if now - last_manifest_sync >= heartbeat_sec:
+                    sync_running_case_note(case_name, stage, progress_msg)
+                    last_manifest_sync = now
+        time.sleep(poll_sec)
 
 
 def run_python_module(script_path: Path, extra_env: dict[str, str] | None = None) -> subprocess.Popen[str]:
@@ -225,7 +516,7 @@ def run_python_module(script_path: Path, extra_env: dict[str, str] | None = None
         env.update(extra_env)
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("ABLATION_PROGRESS", "1")
-    cmd = [PYTHON, str(script_path)]
+    cmd = [PYTHON, "-u", str(script_path)]
     print(">>>", " ".join(cmd))
     return subprocess.Popen(cmd, cwd=str(BASE_DIR), env=env)
 
@@ -876,24 +1167,48 @@ def print_case_progress(worker_label: str, case_name: str, case_index: int, case
 
 def manifest_progress_snapshot(case_names: list[str]) -> str:
     case_map = load_manifest_cases()
+    case_lookup = build_case_lookup()
     counts = {"pending": 0, "running": 0, "completed": 0, "failed": 0, "skipped": 0}
-    running_items: list[str] = []
+    pending_names: list[str] = []
+    running_lines: list[str] = []
     for case_name in case_names:
         case_data = case_map.get(case_name, manifest_stub_for_case(case_name))
         status = str(case_data.get("status") or "pending")
         counts[status] = counts.get(status, 0) + 1
-        if status == "running":
-            worker = str(case_data.get("worker") or "-")
-            stage = str(case_data.get("stage") or "-")
-            running_items.append(f"{worker}:{case_name}:{stage}")
-    summary = (
-        f"[progress] total={len(case_names)} completed={counts.get('completed', 0)} "
-        f"running={counts.get('running', 0)} pending={counts.get('pending', 0)} "
-        f"failed={counts.get('failed', 0)} skipped={counts.get('skipped', 0)}"
-    )
-    if running_items:
-        summary += " | active=" + ", ".join(running_items)
-    return summary
+        if status == "pending":
+            pending_names.append(case_name)
+            continue
+        if status != "running":
+            continue
+        worker = str(case_data.get("worker") or "-")
+        stage = str(case_data.get("stage") or "inference")
+        family = str(case_data.get("family") or case_lookup.get(case_name, {}).get("family") or "current")
+        case_index = case_data.get("case_index")
+        case_total = case_data.get("case_total")
+        queue_hint = ""
+        if case_index and case_total:
+            queue_hint = f" | worker队列 {case_index}/{case_total}"
+        progress = resolve_case_progress(case_name, family, stage)
+        running_lines.append(
+            f"  - {worker} | {case_name} | {stage_label(stage)}{queue_hint} | {progress}"
+        )
+    lines = [
+        (
+            f"[总进度] 共{len(case_names)}个case | 已完成={counts.get('completed', 0)} "
+            f"| 运行中={counts.get('running', 0)} | 待跑={counts.get('pending', 0)} "
+            f"| 失败={counts.get('failed', 0)} | 跳过={counts.get('skipped', 0)}"
+        ),
+        (
+            f"[待跑任务] {', '.join(pending_names) if pending_names else '无'}"
+            f"（共{len(pending_names)}个）"
+        ),
+    ]
+    if running_lines:
+        lines.append("[正在运行]")
+        lines.extend(running_lines)
+    else:
+        lines.append("[正在运行] 无")
+    return "\n".join(lines)
 
 
 def filter_pending_case_names(case_names: list[str]) -> list[str]:
@@ -1206,16 +1521,15 @@ def run_parallel_supervisor() -> int:
         }
         procs.append(run_python_module(script_path, worker_env))
 
+    snapshot_sec = max(5, env_int("PARALLEL_SNAPSHOT_SEC", 30))
+    print(f"[parallel] 进度快照间隔={snapshot_sec}s（可用 PARALLEL_SNAPSHOT_SEC 调整）")
     last_progress_log = 0.0
-    last_progress_snapshot = ""
+    print(manifest_progress_snapshot(selected_names), flush=True)
     while not all(completed):
-        time.sleep(5)
+        time.sleep(max(1, env_int("SUPERVISOR_POLL_SEC", 2)))
         now = time.time()
-        if now - last_progress_log >= 15:
-            snapshot = manifest_progress_snapshot(selected_names)
-            if snapshot != last_progress_snapshot or now - last_progress_log >= 30:
-                print(snapshot)
-                last_progress_snapshot = snapshot
+        if now - last_progress_log >= snapshot_sec:
+            print(manifest_progress_snapshot(selected_names), flush=True)
             last_progress_log = now
         for idx, proc in enumerate(procs):
             if completed[idx] or proc is None:
