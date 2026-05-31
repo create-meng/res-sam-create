@@ -299,12 +299,40 @@ def read_inference_case_totals(case_name: str, family: str) -> dict[str, object]
     }
 
 
+def merge_log_progress_into_totals(
+    totals: dict[str, object] | None,
+    detail: dict[str, object] | None,
+) -> dict[str, object] | None:
+    """checkpoint 每 50 张才落盘；log 每张图都有进度。取较新较大值避免监控假停。"""
+    if not totals or not detail:
+        return totals
+    active_cat = totals.get("active_category")
+    if not active_cat or detail.get("category") != active_cat:
+        return totals
+    try:
+        log_cur = int(detail["current"])
+        cp_cur = int(totals["active_current"])
+    except (TypeError, ValueError, KeyError):
+        return totals
+    if log_cur <= cp_cur:
+        return totals
+    merged = dict(totals)
+    merged["active_current"] = log_cur
+    merged["active_remaining"] = max(0, int(totals["active_total"]) - log_cur)
+    merged["done"] = int(totals["done"]) - cp_cur + log_cur
+    merged["remaining"] = max(0, int(totals["total"]) - int(merged["done"]))
+    return merged
+
+
 def format_running_case_progress(case_name: str, family: str, stage: str) -> str:
-    """单行进度：统一以 checkpoint 计数，供总进度快照与心跳复用。"""
+    """单行进度：checkpoint 与 inference log 取较大值，供总进度快照复用。"""
     if stage == "evaluate":
         return "评估中"
 
-    totals = read_inference_case_totals(case_name, family)
+    log_path = case_stage_log_path(case_name, stage)
+    detail = read_latest_progress_detail(log_path)
+    totals = merge_log_progress_into_totals(read_inference_case_totals(case_name, family), detail)
+
     if totals and totals.get("active_category"):
         cur = int(totals["active_current"])
         tot = int(totals["active_total"])
@@ -312,8 +340,6 @@ def format_running_case_progress(case_name: str, family: str, stage: str) -> str
         total_all = int(totals["total"])
         return f"{totals['active_category_label']} {cur}/{tot} | case {done}/{total_all}"
 
-    log_path = case_stage_log_path(case_name, stage)
-    detail = read_latest_progress_detail(log_path)
     if detail and detail.get("current") is not None and detail.get("total") is not None:
         return f"{detail['category_label']} {detail['current']}/{detail['total']} | case ?/{sum(INFERENCE_CATEGORY_TOTALS.values())}"
 
@@ -385,6 +411,7 @@ def pump_child_output(
             payload = scan_text_for_latest_progress_payload(latest_state["buffer"])
             if payload:
                 publish_progress_update(payload, latest_state, progress_queue)
+                log_file.flush()
             for char in chunk:
                 if char in {"\r", "\n"}:
                     line = latest_state.get("line_buffer", "").strip()
@@ -393,6 +420,7 @@ def pump_child_output(
                         line_payload = parse_progress_payload_line(line)
                         if line_payload:
                             publish_progress_update(line_payload, latest_state, progress_queue)
+                            log_file.flush()
                     elif line:
                         latest_state["latest_raw"] = line
                 else:
