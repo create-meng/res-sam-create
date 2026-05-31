@@ -17,9 +17,9 @@ export BUILD_V7_BANK="${BUILD_V7_BANK:-auto}"
 export BUILD_V18_BANK="${BUILD_V18_BANK:-auto}"
 export WORKER_RESTART_DELAY_SEC="${WORKER_RESTART_DELAY_SEC:-5}"
 export WORKER_MAX_RESTARTS="${WORKER_MAX_RESTARTS:-20}"
-export SUPERVISOR_HEARTBEAT_SEC="${SUPERVISOR_HEARTBEAT_SEC:-10}"
+export SUPERVISOR_HEARTBEAT_SEC="${SUPERVISOR_HEARTBEAT_SEC:-30}"
 export SUPERVISOR_POLL_SEC="${SUPERVISOR_POLL_SEC:-2}"
-export PARALLEL_SNAPSHOT_SEC="${PARALLEL_SNAPSHOT_SEC:-10}"
+export PARALLEL_SNAPSHOT_SEC="${PARALLEL_SNAPSHOT_SEC:-30}"
 
 echo "RepoRoot              = ${REPO_ROOT}"
 echo "PYTHON_BIN            = ${PYTHON_BIN}"
@@ -34,7 +34,6 @@ echo "SUPERVISOR_HEARTBEAT_SEC = ${SUPERVISOR_HEARTBEAT_SEC}"
 echo "PARALLEL_SNAPSHOT_SEC = ${PARALLEL_SNAPSHOT_SEC}"
 echo
 echo "Running full ablation suite on the full dataset..."
-echo "Tip: open another terminal and run: bash ./scripts/watch_ablation_progress.sh"
 
 "${PYTHON_BIN}" ./experiments/run_ablation_main.py
 

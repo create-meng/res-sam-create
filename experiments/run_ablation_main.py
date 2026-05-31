@@ -274,7 +274,7 @@ def read_inference_case_totals(case_name: str, family: str) -> dict[str, object]
             break
         processed = int(cp.get("processed_count", 0) or 0)
         if cp.get("completed"):
-            done += processed if processed > 0 else cat_total
+            done += cat_total
             continue
         active_category = cat
         active_current = processed
@@ -299,43 +299,34 @@ def read_inference_case_totals(case_name: str, family: str) -> dict[str, object]
     }
 
 
-def resolve_case_progress(case_name: str, family: str, stage: str) -> str:
+def format_running_case_progress(case_name: str, family: str, stage: str) -> str:
+    """单行进度：统一以 checkpoint 计数，供总进度快照与心跳复用。"""
     if stage == "evaluate":
-        log_path = case_stage_log_path(case_name, stage)
-        last = read_last_log_line(log_path)
-        if last and not last.startswith("====="):
-            return f"评估中 | 最近日志: {last[:120]}"
-        return "评估中（该阶段无逐张进度）"
+        return "评估中"
+
+    totals = read_inference_case_totals(case_name, family)
+    if totals and totals.get("active_category"):
+        cur = int(totals["active_current"])
+        tot = int(totals["active_total"])
+        done = int(totals["done"])
+        total_all = int(totals["total"])
+        return f"{totals['active_category_label']} {cur}/{tot} | case {done}/{total_all}"
 
     log_path = case_stage_log_path(case_name, stage)
     detail = read_latest_progress_detail(log_path)
-    totals = read_inference_case_totals(case_name, family)
-    parts: list[str] = []
-
-    if detail and detail.get("category_label"):
-        parts.append(f"类别={detail['category_label']}")
-        if detail.get("current") is not None and detail.get("total") is not None:
-            parts.append(f"本类已跑{detail['current']}/{detail['total']}张")
-            if detail.get("remaining_in_category") is not None:
-                parts.append(f"本类剩余{detail['remaining_in_category']}张")
-    elif totals and totals.get("active_category"):
-        parts.append(f"类别={totals['active_category_label']}")
-        parts.append(f"本类已跑{totals['active_current']}/{totals['active_total']}张")
-        parts.append(f"本类剩余{totals['active_remaining']}张")
+    if detail and detail.get("current") is not None and detail.get("total") is not None:
+        return f"{detail['category_label']} {detail['current']}/{detail['total']} | case ?/{sum(INFERENCE_CATEGORY_TOTALS.values())}"
 
     if totals:
-        parts.append(f"case总进度 {totals['done']}/{totals['total']}张")
-        parts.append(f"case剩余约{totals['remaining']}张")
-        if totals.get("active_checkpoint_mtime"):
-            parts.append(f"checkpoint更新于 {totals['active_checkpoint_mtime']}")
+        done = int(totals["done"])
+        total_all = int(totals["total"])
+        return f"收尾中 | case {done}/{total_all}"
 
-    if not parts:
-        last_raw = read_last_log_line(log_path)
-        if last_raw and not last_raw.startswith("====="):
-            return f"日志最近输出: {last_raw[:160]}"
-        return "等待子进程输出（可查看 logs 下对应 inference.log）"
+    return "启动中"
 
-    return " | ".join(parts)
+
+def resolve_case_progress(case_name: str, family: str, stage: str) -> str:
+    return format_running_case_progress(case_name, family, stage)
 
 
 def case_stage_log_path(case_name: str, stage: str) -> Path:
@@ -452,21 +443,22 @@ def run_cmd(
     last_feedback = started_at
     last_manifest_sync = 0.0
     last_progress_line = ""
-    last_heartbeat_progress = ""
     case_context = extract_case_context(label)
-    print(f"[监控] {label} | 日志={log_path}")
     while True:
         try:
             while True:
                 progress_line = progress_queue.get_nowait()
                 if progress_line and progress_line != last_progress_line:
-                    elapsed = format_elapsed(time.time() - started_at)
-                    print(f"[监控] {label} | 已运行 {elapsed} | {progress_line}")
                     last_progress_line = progress_line
                     last_feedback = time.time()
                     if case_context:
                         case_name, stage = case_context
-                        sync_running_case_note(case_name, stage, progress_line)
+                        family = str(build_case_lookup().get(case_name, {}).get("family", "current"))
+                        sync_running_case_note(
+                            case_name,
+                            stage,
+                            format_running_case_progress(case_name, family, stage),
+                        )
                         last_manifest_sync = last_feedback
         except queue.Empty:
             pass
@@ -479,34 +471,21 @@ def run_cmd(
                 hint = f" | 当前={last_line}" if last_line else ""
                 raise subprocess.CalledProcessError(return_code, cmd, output=f"log={log_path}{hint}")
             final_line = latest_state.get("latest_progress") or latest_state.get("latest_raw")
-            hint = f" | 最后={final_line}" if final_line else ""
-            print(f"[监控] {label} | 完成 用时={elapsed}{hint}")
+            hint = f" | {final_line}" if final_line else ""
+            print(f"[完成] {label} | 用时={elapsed}{hint}")
             return
         now = time.time()
         if now - last_feedback >= heartbeat_sec:
-            elapsed = format_elapsed(now - started_at)
-            if case_context:
+            if case_context and now - last_manifest_sync >= heartbeat_sec:
                 case_name, stage = case_context
                 family = str(build_case_lookup().get(case_name, {}).get("family", "current"))
-                base_msg = resolve_case_progress(case_name, family, stage)
-                if base_msg == last_heartbeat_progress and stage == "inference" and base_msg != "等待子进程输出（可查看 logs 下对应 inference.log）":
-                    progress_msg = f"{base_msg} | 仍在处理当前张，数字暂不变"
-                else:
-                    progress_msg = base_msg
-                    last_heartbeat_progress = base_msg
-            else:
-                progress_msg = latest_state.get("latest_progress")
-                if not progress_msg:
-                    progress_msg = latest_state.get("latest_raw") or read_last_log_line(log_path)
-                if not progress_msg:
-                    progress_msg = "等待子进程输出..."
-            print(f"[监控] {label} | 仍在运行 已运行={elapsed} | {progress_msg}")
+                sync_running_case_note(
+                    case_name,
+                    stage,
+                    format_running_case_progress(case_name, family, stage),
+                )
+                last_manifest_sync = now
             last_feedback = now
-            if case_context:
-                case_name, stage = case_context
-                if now - last_manifest_sync >= heartbeat_sec:
-                    sync_running_case_note(case_name, stage, progress_msg)
-                    last_manifest_sync = now
         time.sleep(poll_sec)
 
 
@@ -1169,38 +1148,23 @@ def manifest_progress_snapshot(case_names: list[str]) -> str:
     case_map = load_manifest_cases()
     case_lookup = build_case_lookup()
     counts = {"pending": 0, "running": 0, "completed": 0, "failed": 0, "skipped": 0}
-    pending_names: list[str] = []
     running_lines: list[str] = []
     for case_name in case_names:
         case_data = case_map.get(case_name, manifest_stub_for_case(case_name))
         status = str(case_data.get("status") or "pending")
         counts[status] = counts.get(status, 0) + 1
-        if status == "pending":
-            pending_names.append(case_name)
-            continue
         if status != "running":
             continue
         worker = str(case_data.get("worker") or "-")
         stage = str(case_data.get("stage") or "inference")
         family = str(case_data.get("family") or case_lookup.get(case_name, {}).get("family") or "current")
-        case_index = case_data.get("case_index")
-        case_total = case_data.get("case_total")
-        queue_hint = ""
-        if case_index and case_total:
-            queue_hint = f" | worker队列 {case_index}/{case_total}"
-        progress = resolve_case_progress(case_name, family, stage)
-        running_lines.append(
-            f"  - {worker} | {case_name} | {stage_label(stage)}{queue_hint} | {progress}"
-        )
+        progress = format_running_case_progress(case_name, family, stage)
+        running_lines.append(f"  {worker} | {case_name} | {progress}")
     lines = [
         (
             f"[总进度] 共{len(case_names)}个case | 已完成={counts.get('completed', 0)} "
-            f"| 运行中={counts.get('running', 0)} | 待跑={counts.get('pending', 0)} "
-            f"| 失败={counts.get('failed', 0)} | 跳过={counts.get('skipped', 0)}"
-        ),
-        (
-            f"[待跑任务] {', '.join(pending_names) if pending_names else '无'}"
-            f"（共{len(pending_names)}个）"
+            f"| 运行中={counts.get('running', 0)}"
+            + (f" | 失败={counts['failed']}" if counts.get("failed") else "")
         ),
     ]
     if running_lines:
