@@ -28,6 +28,8 @@ PYTHON = sys.executable
 OUTPUT_DIR = BASE_DIR / "outputs" / "ablation_suite"
 MANIFEST_PATH = OUTPUT_DIR / "case_manifest.json"
 MANIFEST_LOCK_PATH = OUTPUT_DIR / "case_manifest.lock"
+WORK_QUEUE_PATH = OUTPUT_DIR / "work_queue.json"
+WORK_QUEUE_LOCK_PATH = OUTPUT_DIR / "work_queue.lock"
 STATUS_DIR = OUTPUT_DIR / "status"
 LOG_DIR = OUTPUT_DIR / "logs"
 CSV_PATH = OUTPUT_DIR / "ablation_summary.csv"
@@ -1054,6 +1056,110 @@ def split_case_names(case_names: list[str], num_groups: int) -> list[list[str]]:
     return [group for group in groups if group]
 
 
+def load_work_queue() -> dict[str, object]:
+    if not WORK_QUEUE_PATH.exists():
+        return {"pending": [], "total": 0, "ordered": []}
+    try:
+        payload = json.loads(WORK_QUEUE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"pending": [], "total": 0, "ordered": []}
+    if not isinstance(payload, dict):
+        return {"pending": [], "total": 0, "ordered": []}
+    payload.setdefault("pending", [])
+    payload.setdefault("total", 0)
+    payload.setdefault("ordered", [])
+    return payload
+
+
+def write_work_queue(payload: dict[str, object]) -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    WORK_QUEUE_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+@contextmanager
+def work_queue_lock(timeout_sec: float = 30.0):
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    deadline = time.time() + timeout_sec
+    while True:
+        try:
+            fd = os.open(str(WORK_QUEUE_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+            os.close(fd)
+            break
+        except FileExistsError:
+            if time.time() >= deadline:
+                raise TimeoutError(f"Timed out acquiring work queue lock: {WORK_QUEUE_LOCK_PATH}")
+            time.sleep(0.2)
+    try:
+        yield
+    finally:
+        try:
+            WORK_QUEUE_LOCK_PATH.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def init_work_queue(case_names: list[str]) -> None:
+    pending: list[str] = []
+    case_map = load_manifest_cases()
+    for name in case_names:
+        entry = manifest_entry_for_case(name)
+        if report_exists(entry):
+            continue
+        status = str(case_map.get(name, {}).get("status") or "pending")
+        if status == "running":
+            continue
+        pending.append(name)
+    write_work_queue({"pending": pending, "total": len(case_names), "ordered": list(case_names)})
+
+
+def claim_next_case(worker_label: str) -> tuple[str | None, int, int]:
+    """从共享队列领取下一个 case；优先续跑本 worker 未完成的 running case。"""
+    case_map = load_manifest_cases()
+    queue = load_work_queue()
+    total = int(queue.get("total") or 0)
+
+    for name in ordered_case_names():
+        if name not in case_map:
+            continue
+        data = case_map[name]
+        if str(data.get("status") or "") == "running" and str(data.get("worker") or "") == worker_label:
+            pending = queue.get("pending") or []
+            idx = max(1, total - len(pending))
+            return name, idx, max(total, 1)
+
+    with work_queue_lock():
+        queue = load_work_queue()
+        pending = list(queue.get("pending") or [])
+        total = int(queue.get("total") or 0)
+        case_map = load_manifest_cases()
+        while pending:
+            name = pending.pop(0)
+            entry = manifest_entry_for_case(name)
+            if report_exists(entry):
+                continue
+            data = case_map.get(name, manifest_stub_for_case(name))
+            status = str(data.get("status") or "pending")
+            other_worker = str(data.get("worker") or "")
+            if status == "running" and other_worker and other_worker != worker_label:
+                continue
+            write_work_queue({**queue, "pending": pending})
+            idx = max(1, total - len(pending))
+            update_manifest_case(
+                name,
+                status="running",
+                stage="inference",
+                worker=worker_label,
+                note=f"claimed from queue by {worker_label}",
+                case_index=idx,
+                case_total=max(total, 1),
+            )
+            print(f"[{worker_label}] 领取任务 {name} | 队列剩余 {len(pending)}")
+            return name, idx, max(total, 1)
+        write_work_queue({**queue, "pending": pending})
+    return None, 0, max(total, 1)
+
+
 def load_manifest_cases() -> dict[str, dict[str, object]]:
     if not MANIFEST_PATH.exists():
         return {}
@@ -1378,6 +1484,83 @@ def run_legacy_case(
     )
 
 
+def run_single_case(
+    case: dict[str, object],
+    common_env: dict[str, str],
+    manifest: list[dict[str, object]],
+    *,
+    worker_label: str,
+    case_index: int,
+    case_total: int,
+) -> None:
+    family = str(case["family"])
+    case_name = str(case["name"])
+    print_case_progress(worker_label, case_name, case_index, case_total, "prepare", str(case.get("description", "")))
+    try:
+        if family == "current":
+            run_current_case(
+                case,
+                common_env,
+                manifest,
+                worker_label=worker_label,
+                case_index=case_index,
+                case_total=case_total,
+            )
+        else:
+            run_legacy_case(
+                case,
+                common_env,
+                manifest,
+                worker_label=worker_label,
+                case_index=case_index,
+                case_total=case_total,
+            )
+    except Exception as exc:
+        update_manifest_case(
+            case_name,
+            status="failed",
+            stage="failed",
+            worker=worker_label,
+            note=f"{family} pipeline failed",
+            last_error=str(exc),
+            case_index=case_index,
+            case_total=case_total,
+        )
+        print_case_progress(worker_label, case_name, case_index, case_total, "failed", str(exc))
+        raise
+
+
+def run_dynamic_worker(common_env: dict[str, str]) -> list[dict[str, object]]:
+    worker_label = env_str("WORKER_LABEL", "main")
+    queue = load_work_queue()
+    total = int(queue.get("total") or 0)
+    print(f"BASE_DIR={BASE_DIR}")
+    print(f"WORKER={worker_label}")
+    print(f"WORK_QUEUE_TOTAL={total}")
+    print("MODE=dynamic shared queue")
+
+    ordered = queue.get("ordered") or []
+    if any(str(build_case_lookup()[str(name)]["family"]) == "current" for name in ordered if str(name) in build_case_lookup()):
+        ensure_current_bank(common_env)
+
+    manifest: list[dict[str, object]] = []
+    while True:
+        case_name, case_index, case_total = claim_next_case(worker_label)
+        if not case_name:
+            print(f"[{worker_label}] 队列已空，退出")
+            break
+        case = build_case_lookup()[case_name]
+        run_single_case(
+            case,
+            common_env,
+            manifest,
+            worker_label=worker_label,
+            case_index=case_index,
+            case_total=case_total,
+        )
+    return manifest
+
+
 def run_selected_cases(common_env: dict[str, str]) -> list[dict[str, object]]:
     cases = selected_cases()
     worker_label = env_str("WORKER_LABEL", "main")
@@ -1393,41 +1576,14 @@ def run_selected_cases(common_env: dict[str, str]) -> list[dict[str, object]]:
     manifest: list[dict[str, object]] = []
     total_cases = len(cases)
     for idx, case in enumerate(cases, 1):
-        family = str(case["family"])
-        case_name = str(case["name"])
-        print_case_progress(worker_label, case_name, idx, total_cases, "prepare", str(case.get("description", "")))
-        try:
-            if family == "current":
-                run_current_case(
-                    case,
-                    common_env,
-                    manifest,
-                    worker_label=worker_label,
-                    case_index=idx,
-                    case_total=total_cases,
-                )
-            else:
-                run_legacy_case(
-                    case,
-                    common_env,
-                    manifest,
-                    worker_label=worker_label,
-                    case_index=idx,
-                    case_total=total_cases,
-                )
-        except Exception as exc:
-            update_manifest_case(
-                case_name,
-                status="failed",
-                stage="failed",
-                worker=worker_label,
-                note=f"{family} pipeline failed",
-                last_error=str(exc),
-                case_index=idx,
-                case_total=total_cases,
-            )
-            print_case_progress(worker_label, case_name, idx, total_cases, "failed", str(exc))
-            raise
+        run_single_case(
+            case,
+            common_env,
+            manifest,
+            worker_label=worker_label,
+            case_index=idx,
+            case_total=total_cases,
+        )
     return manifest
 
 
@@ -1457,7 +1613,10 @@ def write_manifest(cases: list[dict[str, object]]) -> None:
 
 def run_worker_entry() -> int:
     common_env = build_common_env()
-    new_cases = run_selected_cases(common_env)
+    if env_flag("WORKER_DYNAMIC", "0"):
+        new_cases = run_dynamic_worker(common_env)
+    else:
+        new_cases = run_selected_cases(common_env)
     print(f"\nworker completed cases: {', '.join(case['name'] for case in new_cases)}")
     return 0
 
@@ -1497,29 +1656,46 @@ def run_parallel_supervisor() -> int:
     num_workers = min(env_int("PARALLEL_WORKERS", 2), len(selected_names))
     restart_delay_sec = max(1, env_int("WORKER_RESTART_DELAY_SEC", 5))
     max_restarts = env_int("WORKER_MAX_RESTARTS", 20)
-    groups = split_case_names(selected_names, num_workers)
+    use_dynamic = env_flag("WORKER_DYNAMIC", "1")
+    groups: list[list[str]] = []
 
-    print(f"[parallel] workers={len(groups)}")
-    for idx, group in enumerate(groups, 1):
-        print(f"[parallel] worker_{idx}: {', '.join(group)}")
+    if use_dynamic:
+        init_work_queue(selected_names)
+        queue = load_work_queue()
+        pending = queue.get("pending") or []
+        print(f"[parallel] dynamic queue | workers={num_workers} | pending={len(pending)} | total={queue.get('total')}")
+        print(f"[parallel] 空闲 worker 将从共享队列自动领取剩余 case")
+    else:
+        groups = split_case_names(selected_names, num_workers)
+        print(f"[parallel] static split | workers={len(groups)}")
+        for idx, group in enumerate(groups, 1):
+            print(f"[parallel] worker_{idx}: {', '.join(group)}")
 
     script_path = Path(__file__).resolve()
-    restart_counts = [0 for _ in groups]
-    completed = [False for _ in groups]
+    worker_slots = num_workers if use_dynamic else len(groups)
+    restart_counts = [0 for _ in range(worker_slots)]
+    completed = [False for _ in range(worker_slots)]
 
-    procs: list[subprocess.Popen[str] | None] = []
-    for idx, group in enumerate(groups, 1):
-        worker_env = {
+    def make_worker_env(worker_idx: int) -> dict[str, str]:
+        env = {
             **common_env,
             "WORKER_MODE": "1",
-            "WORKER_CASES": ",".join(group),
             "BUILD_CURRENT_BANK": "0",
             "BUILD_V7_BANK": "0",
             "BUILD_V18_BANK": "0",
             "SKIP_COMPLETED_CASES": "1",
-            "WORKER_LABEL": f"worker_{idx}",
+            "WORKER_LABEL": f"worker_{worker_idx}",
         }
-        procs.append(run_python_module(script_path, worker_env))
+        if use_dynamic:
+            env["WORKER_DYNAMIC"] = "1"
+        else:
+            env["WORKER_DYNAMIC"] = "0"
+            env["WORKER_CASES"] = ",".join(groups[worker_idx - 1])
+        return env
+
+    procs: list[subprocess.Popen[str] | None] = []
+    for idx in range(1, worker_slots + 1):
+        procs.append(run_python_module(script_path, make_worker_env(idx)))
 
     snapshot_sec = max(5, env_int("PARALLEL_SNAPSHOT_SEC", 30))
     print(f"[parallel] 进度快照间隔={snapshot_sec}s（可用 PARALLEL_SNAPSHOT_SEC 调整）")
@@ -1548,18 +1724,7 @@ def run_parallel_supervisor() -> int:
                 raise RuntimeError(f"worker_{idx + 1} exceeded max restarts")
 
             time.sleep(restart_delay_sec)
-            group = groups[idx]
-            worker_env = {
-                **common_env,
-                "WORKER_MODE": "1",
-                "WORKER_CASES": ",".join(group),
-                "BUILD_CURRENT_BANK": "0",
-                "BUILD_V7_BANK": "0",
-                "BUILD_V18_BANK": "0",
-                "SKIP_COMPLETED_CASES": "1",
-                "WORKER_LABEL": f"worker_{idx + 1}",
-            }
-            procs[idx] = run_python_module(script_path, worker_env)
+            procs[idx] = run_python_module(script_path, make_worker_env(idx + 1))
 
     merged_case_map = load_manifest_cases()
     merged_cases = [merged_case_map.get(name, manifest_stub_for_case(name)) for name in selected_case_names()]
